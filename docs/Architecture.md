@@ -26,9 +26,12 @@ The visual design language (tokens, theming, component rules) lives in [Design.m
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Browser | Chrome only (latest stable) | File System Access API, OPFS, WebCodecs, `getAsFileSystemHandle()` all available |
+| Browser | Chrome only (latest stable) | File System Access API, OPFS, WebCodecs, `getAsFileSystemHandle()` all available. Chromium/Edge may work, but are not support targets. |
 | Framework | React 19 + TypeScript (strict) + Vite | Pure client-side SPA, no SSR |
+| Package manager | pnpm | Chosen for stable lockfiles, reproducible installs, and license-audit ergonomics |
+| Hosting | User-controlled static hosting | No server-side app logic. Vite `base` should assume root hosting unless the deployment target changes. |
 | Offline | Service worker via `vite-plugin-pwa` (Workbox) | Precache the app shell + wasm assets; app must fully work with no network after first load |
+| CI | GitHub Actions for pull requests | Run lint, typecheck, unit tests, Playwright Chromium e2e, and license audit |
 | SQLite | Official `@sqlite.org/sqlite-wasm` | Runs in a dedicated worker; `opfs-sahpool` VFS so COOP/COEP headers are NOT required |
 | Media decode | libheif (wasm) for HEIC; native `<video>`/WebCodecs for HEVC where hardware allows; ffmpeg.wasm (single-threaded) as fallback | LGPL allowed only for unmodified, dynamically-loaded wasm codec modules — see AGENTS.md licensing rules |
 | Worker RPC | Comlink (Apache-2.0) | Typed proxies over `postMessage`; transfer `ArrayBuffer`s, never copy large payloads |
@@ -70,11 +73,13 @@ more than ~16 ms.
 └─────────────────────┘   └─────────────────────────┘
 ```
 
-- **backup-worker** — owns the source `FileSystemDirectoryHandle`. Validates the backup,
-  parses `Info.plist`/`Manifest.plist`/`Manifest.db`, performs keybag/password key
-  derivation and per-file decryption for encrypted backups, streams file bytes to other
-  workers, computes SHA-256 hashes for provenance. This is the only component that
-  touches the source folder, and it only ever reads.
+- **backup-worker** — owns the source `FileSystemDirectoryHandle` after the UI obtains
+  it through a user gesture and hands it off. Validates the backup, parses
+  `Info.plist`/`Manifest.plist`/`Manifest.db`, performs keybag/password key derivation
+  and per-file decryption for encrypted backups, streams file bytes to other workers,
+  computes SHA-256 hashes for provenance. This is the only component that touches the
+  source folder, and it only ever reads; source access should go through read-only
+  wrapper helpers so writable handles never enter provider code.
 - **db-worker** — hosts sqlite-wasm. Owns the per-backup derived database in OPFS
   (normalized messages + FTS5 index + report selections). All queries the UI needs are
   RPC methods here; the UI never sees raw SQL.
@@ -102,6 +107,9 @@ interrupted, the derived DB is rebuilt from scratch (source is the source of tru
 - Derived data is always disposable: deleting a backup from recents deletes its OPFS
   directory; the source folder is untouched. A `derivedDbVersion` bump forces re-ingest
   after schema changes.
+- `derivedDbVersion` is a single shared constant in source code. UI recents, db-worker
+  schema setup, ingest invalidation, and tests must import that constant rather than
+  duplicating version numbers.
 
 For encrypted backups, the derived DB in OPFS contains **decrypted** message content
 (that's the point of the index). The UI must clearly state this, and "Remove backup"
@@ -235,6 +243,14 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
 - **No network I/O with user data, ever.** The service worker serves everything after
   first load; the only permissible fetches are same-origin app assets. No analytics, no
   telemetry, no CDN-loaded code.
+- **Network/offline behavior is test-enforced.** Playwright intercepts requests after
+  app load and fails on unexpected network access; offline reload of the installed app
+  shell is part of the M0 acceptance suite.
+- **Production assets use a restrictive security posture.** Static hosting should send
+  a CSP equivalent to same-origin scripts/styles/fonts/images/connect, with workers and
+  wasm loaded only from self or build-produced blob URLs as required by Vite/Workbox.
+  Note: compiling wasm (sqlite-wasm, libheif) in Chrome requires
+  `script-src 'wasm-unsafe-eval'` — include it; it does not permit JS `eval`.
 - **Source backups are read-only.** No code path receives a writable handle to the
   source folder.
 - **Backup content is hostile input.** SQL from backups is parsed by SQLite (wasm
@@ -263,5 +279,6 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
 
 Test strategy: Vitest for unit tests (parsers get golden-file tests against small
 fixture backups checked into `e2e/fixtures/` — synthetic, no real personal data ever in
-the repo); Playwright (Chromium) for end-to-end flows including drag/drop ingest and
-report printing.
+the repo, with generator scripts/metadata kept alongside them); Playwright (Chromium)
+for end-to-end flows including drag/drop ingest, offline/privacy invariants, and report
+printing.

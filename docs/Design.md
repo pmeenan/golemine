@@ -116,7 +116,7 @@ Scale (rem; base 14px — this is a data-dense app):
 
 | Token | Size/line | Weight | Use |
 |---|---|---|---|
-| `--type-display` | 32/38 | 600 | Landing hero only |
+| `--type-display` | 32/38 | 600 | Landing title only |
 | `--type-title` | 22/28 | 600 | Page titles |
 | `--type-heading` | 16/22 | 600 | Section/pane headers |
 | `--type-body` | 14/21 | 400 | Default UI + message text |
@@ -152,8 +152,10 @@ Depth model (lowest → highest): `bg` → `surface` → `surface-raised` → ov
   viewer chrome. Recipe: translucent `--surface` at 70–80% alpha + `blur(16px)
   saturate(1.4)` + hairline border. Never for content panes, cards, or dialogs.
 - **Gradients:** one brand gradient (`--gradient-lode`: gold → deep amber, ~35°) used
-  on the landing hero and empty-state illustrations only. Primary buttons get an
-  imperceptible top-light gradient (≤4% L shift) for richness; no other gradients.
+  only as a restrained accent on the landing screen and in empty-state illustrations —
+  the landing is an operational open-backup screen, not a marketing hero (Plan.md M1).
+  Primary buttons get an imperceptible top-light gradient (≤4% L shift) for richness;
+  no other gradients.
 
 ## 5. Motion
 

@@ -78,3 +78,25 @@ warm gold/bronze accent express both the automaton's metal and what it extracts
 (finds, selections, highlights), not a "gold mine" pun; the golem itself shows up as
 the calm, precise, machine-like feel and visible mechanical progress during ingest.
 Clay/terracotta styling was considered and rejected as off-theme (2026-07-07).
+
+## D-010 — pnpm, static hosting, PR-only CI, and generated fixtures (2026-07-07)
+
+M0 uses pnpm rather than npm for reproducible installs, stable lockfiles, and cleaner
+license-audit integration. The app is intended for a user-controlled static host with
+root-relative asset paths by default; GitHub Pages-specific path assumptions are out of
+scope unless deployment changes. GitHub Actions are used for pull-request validation
+only: lint, typecheck, unit tests, Playwright Chromium e2e, and license audit. Test
+fixtures must be synthetic and should include generator scripts or metadata so future
+contributors can regenerate and inspect them.
+
+Chrome latest stable is the only supported browser target. Chromium/Edge may work, but
+the project will not add fallbacks or compatibility work solely for them.
+
+## D-011 — M0 must prove privacy/offline/security invariants (2026-07-07)
+
+Scaffolding is not just an empty app. M0 establishes the guardrails the rest of the
+product depends on: offline reload after service-worker install, Playwright network
+interception that fails on unexpected post-load network access, a restrictive
+same-origin production CSP/security baseline, worker API type boundaries, a central
+`derivedDbVersion` constant, read-only source-handle wrappers, and dependency license
+auditing from the first installed packages onward.

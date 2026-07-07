@@ -27,10 +27,14 @@ offline after the first load.
 
 - Google Chrome (latest stable). The app is intentionally Chrome-only — it relies on
   the File System Access API and the Origin Private File System.
+- Static hosting under your control. No server application is required; all app code
+  and wasm/font assets are served same-origin and cached for offline use.
 
 ## Status
 
 Early development — architecture and plan are defined; implementation has not started.
+M0 will scaffold the offline PWA, worker boundaries, tests, CI checks, license audit,
+and privacy/offline guardrails.
 See [docs/Plan.md](docs/Plan.md) for the current milestone status.
 
 ## Documentation

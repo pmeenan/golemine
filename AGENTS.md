@@ -19,6 +19,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   decision was made), and `AGENTS.md` (this file) with anything future agents must know.
 - **Hygiene:** delete any throw-away diagnostic scripts, `.log` files, and scratch
   outputs from the repo root before concluding.
+- **Encoding:** keep all project text files UTF-8 clean. Preserve UTF-8 when editing,
+  avoid tools/settings that write mojibake, and fix accidental replacement characters
+  or mis-decoded punctuation before concluding.
 - **No Automatic Commits:** Never automatically commit or push changes to this project.
   All changes must be left in the workspace and will be manually reviewed before being
   committed.
@@ -52,12 +55,18 @@ metal and the ore it surfaces; no clay/terracotta styling).
     (no hardcoded colors/sizes/durations), every screen works in light AND dark theme,
     and the "definition of done" checklist in Design.md §11 applies to all UI work.
     Extend Design.md when a new pattern is needed — don't improvise one-offs.
+12. **UTF-8 is mandatory.** Documentation, source, fixtures, and generated text
+    checked into the repo must be valid UTF-8. Do not introduce mojibake; if a terminal
+    displays garbled punctuation, verify the file bytes before editing and preserve the
+    existing encoding.
 
 ## Key technical anchors (details in docs/)
 
 - Stack: React 19 + TS + Vite; zustand; react-router; Tailwind + shadcn/ui;
   react-virtuoso; Comlink for worker RPC; `@sqlite.org/sqlite-wasm` with
   **opfs-sahpool** VFS (no COOP/COEP — do not introduce SharedArrayBuffer deps, D-008).
+- Package manager: pnpm. CI runs on pull requests for lint, typecheck, unit tests,
+  Playwright Chromium e2e, and license audit.
 - Workers: `backup-worker` (source FS, manifest, crypto), `db-worker` (derived
   SQLite + FTS5 in OPFS), `media-worker` (HEIC/thumbnails/video fallback).
 - Storage: recents + directory handles in IndexedDB; per-backup derived data in

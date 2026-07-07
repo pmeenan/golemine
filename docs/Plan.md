@@ -8,26 +8,42 @@ rather than inventing new documents.
 
 ## M0 — Scaffolding
 
-Goal: empty app that builds, tests, lints, installs as an offline PWA.
+Goal: empty app that builds, tests, lints, installs as an offline PWA, and proves the
+core privacy/offline invariants before feature work begins.
 
-- [ ] Vite + React 19 + TypeScript (strict) scaffold, repo layout per Architecture §11.
+- [ ] pnpm + Vite + React 19 + TypeScript (strict) scaffold, repo layout per Architecture §11.
 - [ ] Tailwind + shadcn/ui setup; base app shell + react-router with placeholder routes.
 - [ ] Design system foundation per Design.md: `tokens.css` (all light/dark OKLCH tokens,
       type scale, spacing, radii, shadows, motion), Tailwind/shadcn variable mapping,
       self-hosted Inter + JetBrains Mono (OFL, recorded in NOTICE).
 - [ ] Theme switching: system/light/dark toggle, localStorage persistence, pre-paint
       inline script (no theme flash), `color-scheme` set; e2e test covers all three states.
-- [ ] Worker plumbing: Comlink helper, one demo round-trip per worker (backup/db/media).
+- [ ] Worker plumbing: Comlink helper, shared typed API boundaries (`BackupWorkerApi`,
+      `DbWorkerApi`, `MediaWorkerApi`, progress/error types), one demo round-trip per
+      worker (backup/db/media).
 - [ ] sqlite-wasm running in db-worker with opfs-sahpool VFS; smoke test (create/query a DB in OPFS).
-- [ ] Service worker via vite-plugin-pwa; verify full offline reload works.
-- [ ] Vitest + Playwright (Chromium) wired up with one trivial test each; CI (GitHub Actions: lint, typecheck, unit, e2e).
+- [ ] Central storage/version constants, including `derivedDbVersion`, before any ingest code lands.
+- [ ] Service worker via vite-plugin-pwa; precache app shell/fonts/wasm; Playwright verifies full offline reload works.
+- [ ] Privacy/network guardrail: Playwright route interception fails on unexpected network
+      after app load; production app assets are same-origin only.
+- [ ] Production security baseline: conservative CSP/meta or static-host header template
+      (no remote script/style/font/img/connect sources; self-hosted workers/wasm only;
+      `script-src` includes `'wasm-unsafe-eval'` for sqlite-wasm/codec compilation).
+- [ ] Vitest + Playwright (Chromium) wired up with one trivial test each; GitHub Actions
+      for pull requests runs lint, typecheck, unit tests, e2e tests, and license audit.
 - [ ] License audit script (fails CI on disallowed licenses; allowlist per AGENTS.md) + NOTICE file.
+- [ ] Fixture convention: `e2e/fixtures/` contains synthetic outputs only, with generator
+      scripts/metadata so fixtures can be regenerated and inspected.
 
 ## M1 — Landing, backup opening, recents
 
 Goal: user can open a backup folder, see it recognized, and manage a recents list.
 
-- [ ] Landing page: what/why, privacy statement, drag-drop + `showDirectoryPicker()` entry points; hero uses the Lode brand gradient (Design.md §4).
+- [ ] Landing page: operational open-backup screen first (drag-drop,
+      `showDirectoryPicker()`, recents, privacy statement) with a concise one/two-line
+      explanation of what the tool does and links to the backup guides; Lode brand
+      gradient may be used as a restrained accent per Design.md §4, not as a
+      marketing-first layout.
 - [ ] Backup detection in backup-worker: validate folder, parse `Info.plist` + `Manifest.plist`, detect encryption, surface device info. Clear errors for non-backup folders.
 - [ ] Recents list in IndexedDB (handle persistence, `requestPermission()` re-grant flow, rename, remove — remove also wipes OPFS derived data).
 - [ ] Backup overview page (`/backup/:id`): device info card, encrypted badge, ingest CTA.
@@ -100,7 +116,5 @@ Goal: court-exhibit-grade report from selected messages.
 
 ## Open questions
 
-- OQ-1: Hosting target (GitHub Pages vs other static host) — matters only if we ever
-  need COOP/COEP headers; currently avoided by design.
-- OQ-2: Exact shadcn/ui vs. hand-rolled component split for the three-pane messages UI.
-- OQ-3: Whether `AddressBookImages` contact avatars are worth surfacing in v1.
+- OQ-1: Exact shadcn/ui vs. hand-rolled component split for the three-pane messages UI.
+- OQ-2: Whether `AddressBookImages` contact avatars are worth surfacing in v1.
