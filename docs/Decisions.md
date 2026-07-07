@@ -100,3 +100,80 @@ interception that fails on unexpected post-load network access, a restrictive
 same-origin production CSP/security baseline, worker API type boundaries, a central
 `derivedDbVersion` constant, read-only source-handle wrappers, and dependency license
 auditing from the first installed packages onward.
+
+## D-012 — License audit fails closed with narrow package exceptions (2026-07-07)
+
+The M0 audit scans installed pnpm package manifests rather than trusting a lockfile key
+shape. It globally allows the project's approved permissive license families (MIT,
+BSD-2/3, Apache-2.0, ISC, Zlib, 0BSD) and rejects missing licenses, weak copyleft, and
+GPL/AGPL/LGPL by default. Non-standard licenses are package-specific exceptions with
+documented reasons: OFL font asset packages, build-time metadata/parser packages that
+do not ship app code, and BlueOak-licensed transitive Workbox glob/cache packages used
+only during `vite-plugin-pwa` service-worker generation. Future exceptions must be
+added deliberately in `scripts/license-audit.mjs`, not by broad license family.
+
+## D-013 — CSP is a static-host header template, not an HTML meta tag (2026-07-07)
+
+The production CSP baseline lives in `public/_headers` and is copied into `dist/` for
+static hosts that honor header files. The policy keeps `script-src` and `connect-src`
+same-origin, includes `'wasm-unsafe-eval'` for sqlite-wasm/codec compilation, and keeps
+other asset channels loose enough for self-hosted static output (`data:`/`blob:` where
+needed). The no-flash theme initializer is a same-origin static script
+(`public/theme-init.js`) so it works under `script-src 'self'`.
+
+We do not use a meta CSP in `index.html`: it cannot enforce `frame-ancestors`, it made
+the inline theme script hash-fragile, and it blocked Vite's development React-refresh
+preamble. Hosting-specific stricter headers can supersede `public/_headers`, but must
+preserve offline/PWA, worker, and wasm behavior.
+
+Because `vite preview` does not serve header files, the Playwright suite replays the
+`public/_headers` CSP onto every response (with service workers blocked so nothing
+bypasses the route handler) and runs the app shell, worker round-trips, and
+sqlite-wasm smoke under it, failing on any CSP console violation. Policy edits that
+would break the deployed app therefore fail CI.
+
+## D-014 — shadcn/ui vs. hand-rolled split for the messages UI (2026-07-07)
+
+Resolves Plan.md OQ-1. The rule: vendor shadcn/ui where Radix solves hard
+interaction/accessibility problems (focus traps, portals, keyboard navigation,
+positioning); hand-roll where the component is domain-specific, lives inside a
+virtualized list, or is simpler than the abstraction. Vendor per-milestone when a
+component is first used — never pre-vendor.
+
+Vendored from shadcn/ui (copied into `src/components/ui/`, restyled via the token
+mapping per Design.md §7; all MIT): Dialog/AlertDialog (attachment viewer, destructive
+confirms), Tooltip (icon-only buttons), DropdownMenu/Popover (message actions, filters,
+backup switcher), Resizable (`react-resizable-panels` — the three-pane splitters per
+Design.md §8), Toast (sonner), and Command (cmdk) if M3 search wants a palette input.
+
+Hand-rolled: the entire Design.md §7.1 message timeline (bubbles, sender runs, day
+separators, system events, reaction chips, edited/unsent annotations, search
+highlights), thread list rows, the detail panel, empty states, and the existing
+Button/Badge/Panel primitives from M0 (Panel/PanelHeader/StatusCard should be promoted
+from `src/features/m0/` into `src/components/` rather than replaced by shadcn Card).
+
+Performance constraint: nothing portal-based (Radix Tooltip/Popover/etc.) inside
+react-virtuoso rows — a portal per row breaks the 100k-message 60 fps budget (Plan.md
+M3). Hover timestamps and similar affordances in virtualized rows are CSS-driven per
+Design.md §7.1.
+
+## D-015 — Contact avatars ship in v1, thumbnails only (2026-07-07)
+
+Resolves Plan.md OQ-2: yes. Nearly all required infrastructure exists in v1
+regardless — Manifest.db lookup and read-only access (M1), the db-worker SQLite path
+and ABPerson rowid join from contacts resolution (M2), the content-addressed OPFS
+thumbnail cache (M3), the M4 per-file decrypt path, and the Design.md §7.1 avatar
+slots with the §1.5 fallback ramp. The marginal cost is one tolerant parser plus
+fixtures.
+
+Scope and posture:
+
+- Thumbnails only (`ABThumbnailImage`); full-size images (`ABFullSizeImage`) and
+  group-avatar composition are deferred (groups use the §1.5 fallback ramp).
+- Avatars are a progressive enhancement over the §1.5 hash-colored fallback, which
+  remains the guaranteed baseline; avatar failures never degrade contact resolution.
+- Blob parsing is tolerant per AGENTS rule 4: multiple `format` variants per record
+  exist across iOS versions, and blobs may carry a prefix before the image data — sniff
+  for JPEG/PNG magic bytes rather than trusting offset 0. Skip and report per record;
+  a missing or empty AddressBookImages.sqlitedb is a silent no-op.
+- Decoding is native browser JPEG/PNG — no HEIC/codec dependency for avatars.

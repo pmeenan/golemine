@@ -4,41 +4,51 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M0 not started — repo contains docs only.**
+**Current status: M0 complete — scaffold, offline PWA, worker/sqlite diagnostics,
+tests, CI, license audit, and fixture conventions are in place.**
 
 ## M0 — Scaffolding
 
 Goal: empty app that builds, tests, lints, installs as an offline PWA, and proves the
 core privacy/offline invariants before feature work begins.
 
-- [ ] pnpm + Vite + React 19 + TypeScript (strict) scaffold, repo layout per Architecture §11.
-- [ ] Tailwind + shadcn/ui setup; base app shell + react-router with placeholder routes.
-- [ ] Design system foundation per Design.md: `tokens.css` (all light/dark OKLCH tokens,
+- [x] pnpm + Vite + React 19 + TypeScript (strict) scaffold, repo layout per Architecture §11.
+- [x] Tailwind + shadcn/ui setup; base app shell + react-router with placeholder routes.
+- [x] Design system foundation per Design.md: `tokens.css` (all light/dark OKLCH tokens,
       type scale, spacing, radii, shadows, motion), Tailwind/shadcn variable mapping,
       self-hosted Inter + JetBrains Mono (OFL, recorded in NOTICE).
-- [ ] Theme switching: system/light/dark toggle, localStorage persistence, pre-paint
+- [x] Theme switching: system/light/dark toggle, localStorage persistence, pre-paint
       inline script (no theme flash), `color-scheme` set; e2e test covers all three states.
-- [ ] Worker plumbing: Comlink helper, shared typed API boundaries (`BackupWorkerApi`,
+- [x] Worker plumbing: Comlink helper, shared typed API boundaries (`BackupWorkerApi`,
       `DbWorkerApi`, `MediaWorkerApi`, progress/error types), one demo round-trip per
       worker (backup/db/media).
-- [ ] sqlite-wasm running in db-worker with opfs-sahpool VFS; smoke test (create/query a DB in OPFS).
-- [ ] Central storage/version constants, including `derivedDbVersion`, before any ingest code lands.
-- [ ] Service worker via vite-plugin-pwa; precache app shell/fonts/wasm; Playwright verifies full offline reload works.
-- [ ] Privacy/network guardrail: Playwright route interception fails on unexpected network
+- [x] sqlite-wasm running in db-worker with opfs-sahpool VFS; smoke test (create/query a DB in OPFS).
+- [x] Central storage/version constants, including `derivedDbVersion`, before any ingest code lands.
+- [x] Service worker via vite-plugin-pwa; precache app shell/fonts/wasm; Playwright verifies full offline reload works.
+- [x] Privacy/network guardrail: Playwright route interception fails on unexpected network
       after app load; production app assets are same-origin only.
-- [ ] Production security baseline: conservative CSP/meta or static-host header template
-      (no remote script/style/font/img/connect sources; self-hosted workers/wasm only;
-      `script-src` includes `'wasm-unsafe-eval'` for sqlite-wasm/codec compilation).
-- [ ] Vitest + Playwright (Chromium) wired up with one trivial test each; GitHub Actions
+- [x] Production security baseline: static-host header template in `public/_headers`
+      (same-origin scripts/connect; self-hosted workers/wasm; `script-src` includes
+      `'wasm-unsafe-eval'` for sqlite-wasm/codec compilation). Playwright replays the
+      CSP header onto every response and runs the worker/sqlite diagnostics under it.
+- [x] Vitest + Playwright (Chromium) wired up with one trivial test each; GitHub Actions
       for pull requests runs lint, typecheck, unit tests, e2e tests, and license audit.
-- [ ] License audit script (fails CI on disallowed licenses; allowlist per AGENTS.md) + NOTICE file.
-- [ ] Fixture convention: `e2e/fixtures/` contains synthetic outputs only, with generator
+- [x] License audit script (fails CI on disallowed licenses; allowlist per AGENTS.md) + NOTICE file.
+- [x] Fixture convention: `e2e/fixtures/` contains synthetic outputs only, with generator
       scripts/metadata so fixtures can be regenerated and inspected.
 
 ## M1 — Landing, backup opening, recents
 
 Goal: user can open a backup folder, see it recognized, and manage a recents list.
 
+- [ ] Browser capability gate: `src/lib/capabilities.ts` probes features, not the user
+      agent (`"showDirectoryPicker" in window`, `navigator.storage.getDirectory`,
+      `"createSyncAccessHandle" in FileSystemFileHandle.prototype`,
+      `"getAsFileSystemHandle" in DataTransferItem.prototype`), checked once at boot.
+      Unsupported browsers get a designed block screen (Design.md empty-state rules,
+      both themes) on workspace routes naming Chrome as the supported browser; the
+      backup guides stay accessible in any browser. e2e coverage via a page with the
+      relevant APIs deleted. Critical-API list maintained per AGENTS.md rule.
 - [ ] Landing page: operational open-backup screen first (drag-drop,
       `showDirectoryPicker()`, recents, privacy statement) with a concise one/two-line
       explanation of what the tool does and links to the backup guides; Lode brand
@@ -59,6 +69,10 @@ Goal: an opened, unencrypted backup becomes a browsable derived DB.
 - [ ] sms.db extraction: copy into db-worker memory/OPFS temp, apply WAL, open read-only.
 - [ ] Normalizer: chats → Conversations, handles → Participants, messages (Apple-epoch conversion, `attributedBody` typedstream text extraction, tapback folding, group events), attachments metadata.
 - [ ] Contacts resolution from AddressBook.sqlitedb (libphonenumber-js matching).
+- [ ] Contact avatar thumbnails from AddressBookImages.sqlitedb (D-015): join on
+      `record_id` = ABPerson rowid, sniff JPEG/PNG magic in blobs (offset may be
+      non-zero), skip-and-report on any parse failure, missing db is a no-op; store
+      content-addressed in OPFS alongside the M3 thumbnail cache.
 - [ ] Derived DB schema + ingest sink in db-worker (Architecture §6), incl. `ingest_meta` provenance (source hashes, timestamps, counts).
 - [ ] Streaming progress UI; ingest restartable; `derivedDbVersion` re-ingest trigger.
 - [ ] Golden-file unit tests for typedstream, timestamps, tapbacks against fixtures.
@@ -116,5 +130,8 @@ Goal: court-exhibit-grade report from selected messages.
 
 ## Open questions
 
-- OQ-1: Exact shadcn/ui vs. hand-rolled component split for the three-pane messages UI.
-- OQ-2: Whether `AddressBookImages` contact avatars are worth surfacing in v1.
+- OQ-1: ~~Exact shadcn/ui vs. hand-rolled component split for the three-pane messages
+  UI.~~ Resolved — see Decisions.md D-014.
+- OQ-2: ~~Whether `AddressBookImages` contact avatars are worth surfacing in v1.~~
+  Resolved — yes, thumbnails only, as a progressive enhancement; see Decisions.md
+  D-015.

@@ -1,0 +1,15 @@
+Golemine
+Copyright 2026 Golemine contributors
+
+This product includes software and assets developed by third parties.
+
+Fonts:
+- Inter, Copyright The Inter Project Authors, licensed under the SIL Open Font
+  License, Version 1.1.
+- JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors, licensed under
+  the SIL Open Font License, Version 1.1.
+
+Runtime libraries:
+- @sqlite.org/sqlite-wasm, licensed under the Apache License, Version 2.0.
+
+The full dependency license audit is enforced by scripts/license-audit.mjs.

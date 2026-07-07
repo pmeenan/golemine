@@ -29,12 +29,14 @@ offline after the first load.
   the File System Access API and the Origin Private File System.
 - Static hosting under your control. No server application is required; all app code
   and wasm/font assets are served same-origin and cached for offline use.
+- `pnpm build` writes the static end product to `dist/`.
 
 ## Status
 
-Early development — architecture and plan are defined; implementation has not started.
-M0 will scaffold the offline PWA, worker boundaries, tests, CI checks, license audit,
-and privacy/offline guardrails.
+M0 scaffolding is complete. The repo now contains the strict Vite/React/TypeScript app
+shell, token-driven light/dark theme foundation, offline PWA registration, worker and
+sqlite-wasm diagnostics, CI workflow, license audit, synthetic fixture convention, and
+privacy/offline Playwright guardrails. Feature work begins in M1.
 See [docs/Plan.md](docs/Plan.md) for the current milestone status.
 
 ## Documentation

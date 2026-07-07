@@ -203,6 +203,12 @@ shadcn/ui components are vendored then restyled with our tokens — the shadcn C
 variables (`--background`, `--primary`, …) are mapped to Lode tokens in one place
 (`tokens.css`), never redefined per component.
 
+Which components are vendored vs. hand-rolled is decided in Decisions.md D-014:
+vendor Radix-backed interaction primitives (dialogs, tooltips, menus, resizable
+panes, toasts); hand-roll domain-specific and virtualized content (§7.1, thread
+rows, detail panel). Never use portal-based primitives inside virtualized rows —
+hover affordances there are CSS-driven.
+
 - **Buttons:** variants `primary` (accent fill, dark text), `secondary` (surface +
   border), `ghost` (text only, hover surface), `destructive` (danger fill). One primary
   per view region. Icons 16px, gap 6px.

@@ -1,0 +1,11 @@
+node_modules/
+
+# Generated build and test output. Keep locally for review; never commit.
+dist/
+dev-dist/
+test-results/
+coverage/
+playwright-report/
+.vite/
+.DS_Store
+*.log

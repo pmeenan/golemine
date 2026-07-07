@@ -18,7 +18,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   line), `docs/Architecture.md` (if structure changed), `docs/Decisions.md` (if a
   decision was made), and `AGENTS.md` (this file) with anything future agents must know.
 - **Hygiene:** delete any throw-away diagnostic scripts, `.log` files, and scratch
-  outputs from the repo root before concluding.
+  outputs from the repo root before concluding. Do **not** delete generated build/test
+  output directories such as `dist/` or `test-results/`; they are ignored by git and
+  useful for local review.
 - **Encoding:** keep all project text files UTF-8 clean. Preserve UTF-8 when editing,
   avoid tools/settings that write mojibake, and fix accidental replacement characters
   or mis-decoded punctuation before concluding.
@@ -45,6 +47,11 @@ metal and the ore it surfaces; no clay/terracotta styling).
 6. **No real personal data in the repo.** Test fixtures are synthetic backups only.
 7. **Chrome-only is a feature.** Use Chrome APIs (File System Access, OPFS,
    `getAsFileSystemHandle`, WebCodecs) freely; do not add cross-browser fallbacks.
+   Unsupported browsers are handled by the boot-time capability gate
+   (`src/lib/capabilities.ts`, M1): when you take a dependency on a new
+   browser-specific API that the app cannot function without, add its feature probe
+   to the gate (sniff the capability, never the user-agent string). APIs with a
+   graceful in-app fallback (e.g. WebCodecs → poster frame) stay out of the gate.
 8. **Provider quirks stay in providers.** Everything above ingest works on the
    normalized model (Architecture §5); no Apple-isms leak into UI or db layers.
 9. **Provenance is sacred.** Keep source GUIDs, row ids, raw timestamps, and hashes
@@ -67,6 +74,23 @@ metal and the ore it surfaces; no clay/terracotta styling).
   **opfs-sahpool** VFS (no COOP/COEP — do not introduce SharedArrayBuffer deps, D-008).
 - Package manager: pnpm. CI runs on pull requests for lint, typecheck, unit tests,
   Playwright Chromium e2e, and license audit.
+- M0 guardrails live in `e2e/m0.spec.ts`; fixture conventions live in
+  `e2e/fixtures/fixtures.json` plus `e2e/fixtures/generate-fixtures.mjs`. Keep all
+  fixture data synthetic and regenerable.
+- Static-host security headers live in `public/_headers`, and the pre-paint theme
+  bootstrap lives in `public/theme-init.js`. Do not reintroduce a CSP meta tag in
+  `index.html`; it breaks dev mode and cannot enforce `frame-ancestors`. The e2e suite
+  replays the `_headers` CSP via Playwright header injection (D-013), so policy edits
+  are CI-guarded even though `vite preview` ignores header files.
+- The M0 landing shell includes browser-run worker diagnostics: backup/db/media
+  Comlink round-trips plus a db-worker sqlite-wasm `opfs-sahpool` smoke database. Keep
+  future diagnostics off the UI thread and behind typed worker APIs.
+- Read-only source handle wrappers begin in
+  `src/workers/backup/read-only-source.ts`; provider code should accept those wrappers
+  rather than raw writable-capable `FileSystemDirectoryHandle`s.
+- License audit is fail-closed in `scripts/license-audit.mjs`. Non-standard licenses
+  are package-specific exceptions only (see Decisions.md D-012); do not broaden the
+  global allowlist without a recorded decision.
 - Workers: `backup-worker` (source FS, manifest, crypto), `db-worker` (derived
   SQLite + FTS5 in OPFS), `media-worker` (HEIC/thumbnails/video fallback).
 - Storage: recents + directory handles in IndexedDB; per-backup derived data in

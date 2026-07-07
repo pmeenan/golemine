@@ -1,0 +1,9 @@
+{
+  "$schema": "https://golemine.local/schemas/e2e-fixtures-v1.json",
+  "policy": {
+    "syntheticOnly": true,
+    "noRealPersonalData": true,
+    "regenerable": true
+  },
+  "fixtures": []
+}

@@ -64,6 +64,13 @@ map to the backup by stripping `~/` → relativePath under `MediaDomain`, then h
 a fileID and looking it up in `Manifest.db` (don't recompute blindly — look up the path
 in `Files` to be safe about edge cases).
 
+Contact avatars in `AddressBookImages.sqlitedb`: `ABThumbnailImage` (and
+`ABFullSizeImage`) rows join to contacts via `record_id` = `ABPerson.ROWID` in
+`AddressBook.sqlitedb`. Multiple `format` variants per record exist across iOS
+versions, and image blobs may carry a binary prefix — sniff for JPEG/PNG magic bytes
+instead of assuming the image starts at offset 0. The database may be absent or empty;
+treat that as a no-op (see Decisions.md D-015 for v1 scope).
+
 ## 3. sms.db schema (Messages)
 
 Relevant tables and columns (schema varies slightly by iOS version — always feature-test

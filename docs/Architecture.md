@@ -246,11 +246,13 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
 - **Network/offline behavior is test-enforced.** Playwright intercepts requests after
   app load and fails on unexpected network access; offline reload of the installed app
   shell is part of the M0 acceptance suite.
-- **Production assets use a restrictive security posture.** Static hosting should send
-  a CSP equivalent to same-origin scripts/styles/fonts/images/connect, with workers and
-  wasm loaded only from self or build-produced blob URLs as required by Vite/Workbox.
-  Note: compiling wasm (sqlite-wasm, libheif) in Chrome requires
-  `script-src 'wasm-unsafe-eval'` — include it; it does not permit JS `eval`.
+- **Production assets use a static-host CSP header template.** The M0 template lives in
+  `public/_headers` so hosts that support static header files copy it into `dist/`.
+  Scripts and `connect` are same-origin only; other asset types stay loose enough for
+  generated static assets (`data:`/`blob:`) and workers. Compiling wasm (sqlite-wasm,
+  libheif) in Chrome requires `script-src 'wasm-unsafe-eval'` — include it; it does not
+  permit JS `eval`. Do not use a meta CSP for this app: it breaks Vite dev, cannot
+  enforce `frame-ancestors`, and makes the pre-paint theme script hash-fragile.
 - **Source backups are read-only.** No code path receives a writable handle to the
   source folder.
 - **Backup content is hostile input.** SQL from backups is parsed by SQLite (wasm
@@ -273,8 +275,12 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
       media/          media-worker: heic, thumbs, video fallback
     lib/              shared utils (time, bytes, comlink helpers, types)
   public/             static assets, wasm binaries
+    _headers          static-host security headers (CSP)
+    theme-init.js     pre-paint theme preference script
   docs/               this documentation
-  e2e/                Playwright tests (Chrome) + fixture backups
+  e2e/                Playwright Chromium tests
+    fixtures/         synthetic fixture metadata + generator stubs (no real personal data)
+  .github/workflows/  pull-request CI (lint, typecheck, unit, e2e, license audit)
 ```
 
 Test strategy: Vitest for unit tests (parsers get golden-file tests against small

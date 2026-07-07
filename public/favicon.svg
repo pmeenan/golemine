@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Golemine">
+  <rect width="64" height="64" rx="14" fill="oklch(0.20 0.012 255)" />
+  <path d="M20 40h24l5-14H15l5 14Z" fill="oklch(0.72 0.13 78)" />
+  <path d="M23 24h18l-3-7H26l-3 7Z" fill="oklch(0.82 0.12 82)" />
+  <path d="M24 40h16v7H24z" fill="oklch(0.58 0.15 62)" />
+  <path d="M19 29h26M22 35h20" stroke="oklch(0.22 0.02 78)" stroke-width="3" stroke-linecap="round" />
+</svg>
