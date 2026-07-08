@@ -226,3 +226,32 @@ To resolve inconsistencies in the golem's appearance and prevent it from resembl
 
 The identity, asset locations, and light/dark variant rules are codified in Design.md §12; the character sheet is the mandatory image context for any future golem art.
 
+## D-019 — Role-specific root plist size bounds for iOS detection (2026-07-08)
+
+Real iOS backups can have `Info.plist` files well above the original 8 MiB metadata
+guard because `Info.plist` includes installed-application metadata. A reference backup
+with a 12.1 MiB XML `Info.plist` should still detect normally.
+
+Decision: iOS backup detection uses a 32 MiB bound for `Info.plist` and keeps the
+existing 8 MiB bound for `Manifest.plist` and `Status.plist`. All three plists are
+still read and parsed only inside `backup-worker`, and malformed or too-large files
+remain recoverable detection errors.
+
+Rationale: this preserves a hostile-input memory bound while allowing realistic iPhone
+backup metadata. `Manifest.plist` and `Status.plist` do not carry the same bulky app
+inventory payload, so keeping their tighter limit catches malformed folders earlier.
+
+## D-020 — Keep sqlite-wasm out of Vite dependency optimization (2026-07-08)
+
+Vite's dev dependency optimizer can prebundle `@sqlite.org/sqlite-wasm` into a
+`node_modules/.vite/deps` module. In that form, sqlite-wasm's default wasm locator may
+request a path that Vite answers with the SPA HTML fallback, causing WebAssembly
+instantiation to fail with bytes beginning `<!do` instead of the wasm magic header.
+
+Decision: `vite.config.ts` excludes `@sqlite.org/sqlite-wasm` from `optimizeDeps`.
+The app still does not add COOP/COEP headers; sqlite's standard OPFS VFS may warn
+about missing `SharedArrayBuffer`, but the project uses `opfs-sahpool`, which works
+without those headers (D-008).
+
+Rationale: this follows the package's Vite guidance for wasm asset resolution while
+preserving Golemine's static-hosting constraint and no-`SharedArrayBuffer` posture.

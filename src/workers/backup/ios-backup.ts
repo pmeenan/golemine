@@ -25,7 +25,6 @@ import {
   type PlistDictionary,
 } from "./plist";
 
-const maxRootPlistBytes = 8 * 1024 * 1024;
 const sqliteHeader = "SQLite format 3\u0000";
 
 const requiredBackupFiles = [
@@ -36,6 +35,15 @@ const requiredBackupFiles = [
 ] as const;
 
 type RequiredBackupFileName = (typeof requiredBackupFiles)[number];
+type RootPlistFileName = Exclude<RequiredBackupFileName, "Manifest.db">;
+
+const maxCompanionRootPlistBytes = 8 * 1024 * 1024;
+const maxInfoPlistBytes = 32 * 1024 * 1024;
+const rootPlistByteLimits = {
+  "Info.plist": maxInfoPlistBytes,
+  "Manifest.plist": maxCompanionRootPlistBytes,
+  "Status.plist": maxCompanionRootPlistBytes,
+} satisfies Record<RootPlistFileName, number>;
 
 interface RequiredBackupFiles {
   "Info.plist": File;
@@ -207,10 +215,10 @@ async function readOptionalRootFile(
 
 async function parseDictionaryFile(
   file: File,
-  label: RequiredBackupFileName,
+  label: RootPlistFileName,
 ): Promise<PlistDictionary> {
   try {
-    if (file.size > maxRootPlistBytes) {
+    if (file.size > rootPlistByteLimits[label]) {
       throw new BackupDetectionError(
         "backup_invalid",
         `${label} is too large to be a normal backup metadata plist.`,

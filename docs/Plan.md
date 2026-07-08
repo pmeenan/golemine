@@ -6,10 +6,13 @@ rather than inventing new documents.
 
 **Current status: M1 complete — users can open a synthetic iPhone backup folder,
 recognize it through the backup worker, see device metadata, and manage recents with
-IndexedDB persistence plus OPFS derived-data wipe-on-remove. All primary brand and
+IndexedDB persistence plus OPFS derived-data wipe-on-remove. Detection also handles
+larger real-world iOS `Info.plist` app metadata with role-specific root-plist bounds
+(D-019), and the iPhone guide now covers copied backups, inline Finder steps, Apple
+Support references, and macOS `~/Library` Chrome access limits. All primary brand and
 illustration assets have been generated under the steampunk Talos golem identity
-(D-018; character sheet in `docs/assets/`); wiring them into the UI is tracked
-under M6.**
+(D-018; character sheet in `docs/assets/`); wiring them into the UI is tracked under
+M6.**
 
 ## M0 — Scaffolding
 
@@ -26,7 +29,10 @@ core privacy/offline invariants before feature work begins.
 - [x] Worker plumbing: Comlink helper, shared typed API boundaries (`BackupWorkerApi`,
       `DbWorkerApi`, `MediaWorkerApi`, progress/error types), one demo round-trip per
       worker (backup/db/media).
-- [x] sqlite-wasm running in db-worker with opfs-sahpool VFS; smoke test (create/query a DB in OPFS).
+- [x] sqlite-wasm running in db-worker with opfs-sahpool VFS; smoke test
+      (create/query a DB in OPFS). Vite keeps `@sqlite.org/sqlite-wasm` out of
+      dependency optimization so dev-server wasm loading resolves the real
+      `sqlite3.wasm` asset instead of the SPA HTML fallback (D-020).
 - [x] Central storage/version constants, including `derivedDbVersion`, before any ingest code lands.
 - [x] Service worker via vite-plugin-pwa; precache app shell/fonts/wasm; Playwright verifies full offline reload works.
 - [x] Privacy/network guardrail: Playwright route interception fails on unexpected network
@@ -64,14 +70,20 @@ Goal: user can open a backup folder, see it recognized, and manage a recents lis
 - [x] Backup detection in backup-worker: validate folder, parse `Info.plist` + `Manifest.plist`, detect encryption, surface device info. Clear errors for non-backup folders.
 - [x] Recents list in IndexedDB (handle persistence, `requestPermission()` re-grant flow, rename, remove — remove also wipes OPFS derived data).
 - [x] Backup overview page (`/backup/:id`): device info card, encrypted badge, ingest CTA.
-- [x] Info pages: how to back up an iPhone (Finder/iTunes, incl. why encrypted is OK) and Android (placeholder pointing at future support).
+- [x] Info pages: how to back up an iPhone (Finder/iTunes, incl. why encrypted is OK,
+      inline Finder steps, Apple Support references, backups may be created on another
+      computer, and macOS backups should be copied from
+      `~/Library/Application Support/MobileSync/Backup/` to a Chrome-readable folder
+      before opening) and Android (placeholder pointing at future support).
 - [x] Fixture mini-backup (synthetic) checked into `e2e/fixtures/`; e2e test for open → detect → recents.
 - [x] Post-review hardening: normalized `BackupDeviceInfo` across the worker boundary
       (rule 8), merge-aware `recordDetection` in the recents store (rename/ingest
       preservation, `derivedDbVersion` staleness, stale-record retirement),
       synchronous drag-drop handle collection, fail-open cached capability probe
       (D-017), skip-and-report recents parsing, binary-plist unsigned-integer and
-      CDATA fixes, shared synthetic-fixture module, and layout/error-format dedup.
+      CDATA fixes, shared synthetic-fixture module, layout/error-format dedup, and
+      role-specific root-plist size limits so large real-world `Info.plist`
+      application metadata does not block detection (D-019).
 
 ## M2 — Ingest pipeline (unencrypted)
 

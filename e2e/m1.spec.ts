@@ -70,6 +70,18 @@ test("blocks workspace routes without required Chrome APIs while guides remain a
   await expect(
     page.getByRole("heading", { level: 1, name: "iPhone backup guide" }),
   ).toBeVisible();
+  await expect(
+    page.getByText("The backup can be made on any Mac or Windows computer."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Open Finder and select the iPhone in the sidebar."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Chrome may not be allowed to read directly from the Library folder."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Apple: back up with your Mac" }),
+  ).toBeVisible();
 });
 
 test("opens a synthetic iPhone backup, persists recents, renames, and removes derived data", async ({

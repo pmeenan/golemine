@@ -156,9 +156,31 @@ describe("iOS backup detection", () => {
     });
   });
 
-  it("rejects oversized root plist metadata before reading it into memory", async () => {
+  it("accepts large Info.plist application metadata from real backups", async () => {
+    const root = new SyntheticReadonlyDirectory("large-info", backupFiles({
+      "Info.plist": file("Info.plist", largeInfoPlist()),
+    }));
+
+    const result = await detectIosBackup(root);
+
+    expect(result.id).toBe(iosMiniBackupDevice.udid);
+    expect(result.friendlyName).toBe(iosMiniBackupDevice.displayName);
+  });
+
+  it("keeps the tighter companion plist limit before reading into memory", async () => {
+    const root = new SyntheticReadonlyDirectory("oversized-manifest", backupFiles({
+      "Manifest.plist": oversizedFile("Manifest.plist", 9 * 1024 * 1024),
+    }));
+
+    await expect(detectIosBackup(root)).rejects.toMatchObject({
+      code: "backup_invalid",
+      message: "Manifest.plist is too large to be a normal backup metadata plist.",
+    });
+  });
+
+  it("rejects oversized Info.plist metadata before reading it into memory", async () => {
     const root = new SyntheticReadonlyDirectory("oversized-info", backupFiles({
-      "Info.plist": file("Info.plist", new Uint8Array(9 * 1024 * 1024)),
+      "Info.plist": oversizedFile("Info.plist", 33 * 1024 * 1024),
     }));
 
     await expect(detectIosBackup(root)).rejects.toMatchObject({
@@ -206,12 +228,49 @@ function minimalInfoPlist(): string {
   return iosMiniBackupInfoPlist();
 }
 
+function largeInfoPlist(): string {
+  return plistDict(`
+    <key>Device Name</key>
+    <string>${iosMiniBackupDevice.deviceName}</string>
+    <key>Display Name</key>
+    <string>${iosMiniBackupDevice.displayName}</string>
+    <key>Product Type</key>
+    <string>${iosMiniBackupDevice.productType}</string>
+    <key>Product Version</key>
+    <string>${iosMiniBackupDevice.productVersion}</string>
+    <key>Serial Number</key>
+    <string>${iosMiniBackupDevice.serialNumber}</string>
+    <key>Unique Identifier</key>
+    <string>${iosMiniBackupDevice.udid}</string>
+    <key>Phone Number</key>
+    <string>${iosMiniBackupDevice.phoneNumber}</string>
+    <key>Installed Applications</key>
+    <dict>
+      <key>com.example.large-app-metadata</key>
+      <dict>
+        <key>Placeholder</key>
+        <string>${"x".repeat(13 * 1024 * 1024)}</string>
+      </dict>
+    </dict>
+    <key>Last Backup Date</key>
+    <date>2026-07-01T12:34:56Z</date>
+  `);
+}
+
 function file(name: string, content: string | Uint8Array): File {
   if (typeof content === "string") {
     return new File([content], name);
   }
 
   return new File([copyToArrayBuffer(content)], name);
+}
+
+function oversizedFile(name: string, size: number): File {
+  return {
+    name,
+    size,
+    arrayBuffer: () => Promise.reject(new Error(`${name} should not be read.`)),
+  } as unknown as File;
 }
 
 function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {

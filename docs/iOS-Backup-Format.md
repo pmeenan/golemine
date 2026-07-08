@@ -31,6 +31,10 @@ Keys of interest: `Device Name`, `Display Name`, `Product Type` (e.g. `iPhone15,
 `Product Version` (iOS version), `Serial Number`, `Unique Identifier`/`Target Identifier`
 (UDID), `Phone Number`, `IMEI`, `Last Backup Date`, `Installed Applications`.
 
+Real `Info.plist` files can be much larger than the other root metadata plists because
+the installed-application section may carry bulky app metadata. Detection keeps this
+bounded separately from `Manifest.plist`/`Status.plist` (D-019).
+
 ### Manifest.plist (unencrypted always)
 
 Keys: `IsEncrypted` (bool), `Version`, `Date`, `Lockdown` (device info dict),

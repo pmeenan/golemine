@@ -93,6 +93,11 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `index.html`; it breaks dev mode and cannot enforce `frame-ancestors`. The e2e suite
   replays the `_headers` CSP via Playwright header injection (D-013), so policy edits
   are CI-guarded even though `vite preview` ignores header files.
+- `@sqlite.org/sqlite-wasm` must stay excluded from Vite dependency optimization
+  (`vite.config.ts`, D-020). If Vite prebundles it, the dev server can serve the SPA
+  HTML fallback where sqlite expects `sqlite3.wasm`, producing a wasm magic-word
+  compile error. Do not add COOP/COEP to solve this; the project uses `opfs-sahpool`
+  specifically to avoid `SharedArrayBuffer` hosting requirements (D-008).
 - The M0 landing shell includes browser-run worker diagnostics: backup/db/media
   Comlink round-trips plus a db-worker sqlite-wasm `opfs-sahpool` smoke database. Keep
   future diagnostics off the UI thread and behind typed worker APIs.
@@ -106,7 +111,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `src/workers/backup/plist.ts`. Detection returns the normalized
   `BackupDeviceInfo` (name/model/osVersion/udid/serial/phone); the Apple plist key
   translation lives inside `src/workers/backup/ios-backup.ts` so no Apple-isms
-  cross the worker boundary (hard rule 8).
+  cross the worker boundary (hard rule 8). Root plist size bounds are role-specific:
+  `Info.plist` allows up to 32 MiB because real backups can carry bulky installed-app
+  metadata there; `Manifest.plist` and `Status.plist` stay at 8 MiB (D-019).
 - M1 workspace capability gating lives in `src/lib/capabilities.ts`; the
   sync-access-handle probe intentionally falls back to
   `src/workers/capability/capability.worker.ts` because Chromium exposes that API in
@@ -126,6 +133,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
   ad hoc. Drop-event directory extraction lives in `src/lib/drag-drop.ts` and must
   collect `getAsFileSystemHandle()` promises synchronously during drop dispatch —
   the drag data store deactivates at the first `await`.
+- The iPhone guide must not imply backups have to be created on the same machine that
+  runs Golemine. Finder/iTunes backups can be created anywhere and copied over. Keep
+  concise inline Finder steps in the guide so it works offline, plus Apple Support
+  links for current screenshots/troubleshooting. On macOS, tell users to copy the
+  specific backup folder out of
+  `~/Library/Application Support/MobileSync/Backup/` before opening them because
+  Chrome may not be allowed to read directly from `~/Library`.
 - License audit is fail-closed in `scripts/license-audit.mjs`. Non-standard licenses
   are package-specific exceptions only (see Decisions.md D-012); do not broaden the
   global allowlist without a recorded decision.

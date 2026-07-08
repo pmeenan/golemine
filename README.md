@@ -41,11 +41,19 @@ sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
 guardrails, and the first usable opening flow.
 
 The app now gates unsupported browsers, opens iPhone Finder/iTunes backup folders via
-Chrome folder APIs, detects backup metadata in `backup-worker`, stores recent backups
-in IndexedDB, re-requests directory permission on reopen, and wipes OPFS derived data
-when a recent backup is removed. A generated synthetic mini-backup fixture covers the
-open -> detect -> recents flow in Playwright. M2 begins the unencrypted ingest
-pipeline.
+Chrome folder APIs, detects backup metadata in `backup-worker` (including larger
+real-world `Info.plist` app metadata), stores recent backups in IndexedDB, re-requests
+directory permission on reopen, and wipes OPFS derived data when a recent backup is
+removed. The db-worker sqlite-wasm OPFS smoke path runs in dev and production builds
+with sqlite-wasm excluded from Vite dependency optimization so its wasm asset resolves
+correctly. A generated synthetic mini-backup fixture covers the open -> detect ->
+recents flow in Playwright. M2 begins the unencrypted ingest pipeline.
+
+The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
+with inline Finder steps and links to Apple Support for current screenshots and
+troubleshooting. On macOS, copy the specific backup folder out of the default
+`~/Library/Application Support/MobileSync/Backup/` location before opening it in Chrome,
+because Chrome may not be allowed to read directly from `~/Library`.
 See [docs/Plan.md](docs/Plan.md) for the current milestone status.
 
 ## Documentation
