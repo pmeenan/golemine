@@ -1,5 +1,7 @@
 # Golemine
 
+![Golemine — a bronze automaton mining veins of data](docs/assets/readme-banner.png)
+
 Browser-based tool for exploring, searching, and extracting data from phone backups —
 starting with iPhone (iTunes/Finder) backups and their Messages data.
 

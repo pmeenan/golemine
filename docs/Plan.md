@@ -6,7 +6,10 @@ rather than inventing new documents.
 
 **Current status: M1 complete — users can open a synthetic iPhone backup folder,
 recognize it through the backup worker, see device metadata, and manage recents with
-IndexedDB persistence plus OPFS derived-data wipe-on-remove.**
+IndexedDB persistence plus OPFS derived-data wipe-on-remove. All primary brand and
+illustration assets have been generated under the steampunk Talos golem identity
+(D-018; character sheet in `docs/assets/`); wiring them into the UI is tracked
+under M6.**
 
 ## M0 — Scaffolding
 
@@ -122,6 +125,14 @@ Goal: court-exhibit-grade report from selected messages.
 
 ## M6 — Polish & hardening
 
+- [ ] Wire generated illustrations into the UI (landing, capability-gate block screen,
+      drag-drop overlay, backup guides) from `src/assets/illustrations/`, with
+      light/dark variants swapped per theme and decorative `alt=""` (Design.md §12).
+- [ ] Derive final favicon (retraced SVG) and PWA manifest icons (192/512/maskable)
+      from `src/assets/brand/icon-master.png`; keep favicon.svg and manifest in sync.
+- [x] Social/OG meta tags in `index.html` pointing at
+      `https://golemine.com/og-image.png` (1200×630, lives in `public/`).
+- [x] README banner (`docs/assets/readme-banner.png`) embedded at the top of README.
 - [ ] Offline audit: zero network requests after install (test-enforced).
 - [ ] Malformed-backup fuzz fixtures: ingest never crashes, always reports what was skipped.
 - [ ] Storage management UI: per-backup derived-data size, clear/rebuild.

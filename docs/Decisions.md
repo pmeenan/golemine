@@ -216,3 +216,13 @@ three Chrome-only window probes, so a missing answer is an environment hiccup, n
 evidence of an unsupported browser. Failing closed produced false block screens and
 flaky e2e; failing open costs nothing because sqlite-wasm surfaces a clear error in
 the ingest path if the API is genuinely absent.
+
+## D-018 — Steampunk Automaton Visual Identity & Image Post-Processing Workflow (2026-07-08)
+
+To resolve inconsistencies in the golem's appearance and prevent it from resembling a sleek sci-fi superhero, we established a clear steampunk-inspired visual identity for the "Talos" mechanical automaton:
+- **Design Elements:** Articulated brass-gold plates, cogs/gears on joints/chest, rivets, exposed copper pipes/pistons, and a dome head with a single circular optical gear lens in the center.
+- **Cohesive Workflow:** We generated a primary character sheet (`docs/assets/golem-reference-sheet.png`) and passed it as context (`ImagePaths`) to all subsequent `generate_image` calls.
+- **Format & Transparency Processing:** Since the image generation tool outputs JPEGs (RGB mode), all assets are generated directly against their target UI backgrounds (`#1E2127` for dark mode/brand, `#F9FAFB` for light mode). A throw-away Pillow script (deleted per AGENTS.md hygiene; technique recorded here for regeneration) converted the JPEGs to the final transparent WebP/PNG assets by keying out the target background color with tolerance, avoiding mosquito noise and edge haloing.
+
+The identity, asset locations, and light/dark variant rules are codified in Design.md §12; the character sheet is the mandatory image context for any future golem art.
+

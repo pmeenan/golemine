@@ -301,10 +301,13 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
       db/             db-worker: schema, queries, ingest sink, FTS
       media/          media-worker: heic, thumbs, video fallback
     lib/              shared utils (time, bytes, comlink helpers, types)
+    assets/           bundled images: brand/ (icon master), illustrations/ (light/dark WebP pairs)
   public/             static assets, wasm binaries
     _headers          static-host security headers (CSP)
     theme-init.js     pre-paint theme preference script
+    og-image.png      1200×630 social card (absolute URL in index.html OG tags)
   docs/               this documentation
+    assets/           repo-facing images (README banner, golem character sheet)
   e2e/                Playwright Chromium tests
     fixtures/         synthetic fixture metadata + generator stubs (no real personal data)
   .github/workflows/  pull-request CI (lint, typecheck, unit, e2e, license audit)

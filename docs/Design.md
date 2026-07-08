@@ -16,7 +16,8 @@ the app is the golem working it, and the warm gold/bronze accent is both the
 automaton's metal and the ore it surfaces — selections, search hits, active work. The
 overall feel of a precise, tireless machine (calm chrome, visible mechanical progress,
 exact counts) is the golem made visual. Earthy clay/terracotta styling is explicitly
-off-theme.
+off-theme. The golem's concrete visual identity (steampunk automaton, character sheet,
+asset rules) is specified in §12.
 
 ## 0. Non-negotiables
 
@@ -295,3 +296,48 @@ toggle states) · AA contrast checked for new color pairs · keyboard path works
 focus is visible · reduced-motion honored · loading, empty, and error states exist ·
 long content (10k-message thread, 400-char message, 60-char name) doesn't break
 layout · no hardcoded style values (tokens only) · print view unaffected or updated.
+
+## 12. Illustration & brand imagery
+
+Generated artwork is the one place raster images and non-token colors are permitted.
+Everything else in this section is binding.
+
+### 12.1 The golem's identity (D-018)
+
+A **steampunk mechanical automaton**: articulated brass-gold plates, cogs/gears at the
+joints and chest, rivets, exposed copper pipes/pistons, and a dome head with a single
+circular optical gear lens centered in the face. Never a clay golem, never a sleek
+sci-fi robot or superhero silhouette. Approximate palette for generation prompts:
+brass-gold `#C9973D`, deep amber `#8F6224`, cool charcoal `#1E2127`, near-white
+`#F9FAFB` (these approximate the Lode tokens; raster art is exempt from the
+tokens-only rule but must sit on token-colored backgrounds without halos).
+
+**Character sheet:** `docs/assets/golem-reference-sheet.png` is the canonical
+reference. Any new golem artwork must be generated with the character sheet supplied
+as image context — never from a text prompt alone.
+
+### 12.2 Where imagery is allowed
+
+Illustrations appear only on the landing screen, backup guides, the capability-gate
+block screen, and the drag-drop overlay (§7 empty-state rule stands: ordinary empty
+states get a lucide icon, not an illustration). Print output carries no illustrations
+(§9). Illustrations are decorative: `alt=""` / `aria-hidden="true"`, and they never
+carry information that isn't also in text.
+
+### 12.3 Asset inventory & rules
+
+| Location | Contents |
+|---|---|
+| `src/assets/illustrations/` | In-app spot illustrations (WebP, transparent), imported by components |
+| `src/assets/brand/icon-master.png` | 1024×1024 icon master — source for favicon retrace and PWA manifest icons |
+| `public/og-image.png` | 1200×630 social card, referenced absolutely from `index.html` (`https://golemine.com/og-image.png`) |
+| `docs/assets/` | Repo-facing images: README banner, golem character sheet |
+
+- Every in-app illustration ships **both** `-light.webp` and `-dark.webp` variants.
+  Components stay theme-blind: render both and gate visibility with CSS theme
+  selectors (or use `<picture>` + `prefers-color-scheme` where the manual override
+  is also handled) — do not query the theme in JS to pick an image source.
+- Illustrations are generated against the target background color and keyed to
+  transparency (D-018); verify edges on both themes before shipping.
+- New generated assets follow the same pipeline: character sheet as context, target
+  background color, transparency keying, WebP for in-app use.

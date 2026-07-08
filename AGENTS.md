@@ -80,6 +80,14 @@ metal and the ore it surfaces; no clay/terracotta styling).
 - M0 guardrails live in `e2e/m0.spec.ts`; fixture conventions live in
   `e2e/fixtures/fixtures.json` plus `e2e/fixtures/generate-fixtures.mjs`. Keep all
   fixture data synthetic and regenerable.
+- Brand/illustration assets: the golem's visual identity is a steampunk automaton
+  (D-018, rules in Design.md §12). The canonical character sheet is
+  `docs/assets/golem-reference-sheet.png` — pass it as image context when generating
+  any new golem artwork; never generate from a text prompt alone. In-app
+  illustrations live in `src/assets/illustrations/` (paired `-light`/`-dark` WebP
+  variants, decorative only), the icon master in `src/assets/brand/`, the social
+  card in `public/og-image.png` (referenced absolutely as
+  `https://golemine.com/og-image.png` from `index.html`).
 - Static-host security headers live in `public/_headers`, and the pre-paint theme
   bootstrap lives in `public/theme-init.js`. Do not reintroduce a CSP meta tag in
   `index.html`; it breaks dev mode and cannot enforce `frame-ancestors`. The e2e suite
