@@ -33,10 +33,17 @@ offline after the first load.
 
 ## Status
 
-M0 scaffolding is complete. The repo now contains the strict Vite/React/TypeScript app
-shell, token-driven light/dark theme foundation, offline PWA registration, worker and
-sqlite-wasm diagnostics, CI workflow, license audit, synthetic fixture convention, and
-privacy/offline Playwright guardrails. Feature work begins in M1.
+M1 is complete. The repo contains the strict Vite/React/TypeScript app shell,
+token-driven light/dark theme foundation, offline PWA registration, worker and
+sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
+guardrails, and the first usable opening flow.
+
+The app now gates unsupported browsers, opens iPhone Finder/iTunes backup folders via
+Chrome folder APIs, detects backup metadata in `backup-worker`, stores recent backups
+in IndexedDB, re-requests directory permission on reopen, and wipes OPFS derived data
+when a recent backup is removed. A generated synthetic mini-backup fixture covers the
+open -> detect -> recents flow in Playwright. M2 begins the unencrypted ingest
+pipeline.
 See [docs/Plan.md](docs/Plan.md) for the current milestone status.
 
 ## Documentation

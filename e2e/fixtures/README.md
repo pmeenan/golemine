@@ -14,5 +14,9 @@ Generated fixture outputs should live under `generated/<fixture-id>/`. Keep sour
 fixture material small and reviewable; large generated blobs should have a documented
 reason before they are added.
 
-The generator stub currently records the convention only. Add real generators when M1
-or parser milestones introduce the first synthetic backup.
+Current generated fixtures:
+
+- `generated/ios-mini-backup/00008030-001C195E0A88802E/` — minimal synthetic
+  iPhone Finder/iTunes backup root for M1 open and detection flows. It contains only
+  synthetic plist metadata and tiny placeholder database files; M1 validates metadata
+  but does not parse messages.

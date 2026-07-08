@@ -1,4 +1,4 @@
-import { Database, HardDrive, Search } from "lucide-react";
+import { Database } from "lucide-react";
 import { Link, NavLink, type NavLinkRenderProps } from "react-router";
 
 import { appName } from "../../lib/constants";
@@ -34,14 +34,6 @@ export function TopBar() {
       </nav>
 
       <div className="ml-auto flex items-center gap-2">
-        <NavLink className={navItemClassName} to="/backup/sample">
-          <HardDrive aria-hidden="true" className="size-4" />
-          Backup route
-        </NavLink>
-        <NavLink className={navItemClassName} to="/backup/sample/search">
-          <Search aria-hidden="true" className="size-4" />
-          Search
-        </NavLink>
         <ThemeToggle />
       </div>
     </header>

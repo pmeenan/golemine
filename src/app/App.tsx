@@ -1,17 +1,22 @@
 import { createBrowserRouter, RouterProvider } from "react-router";
+import { type ReactNode } from "react";
 
 import { AppFrame } from "../components/shell/app-frame";
+import { BackupOverviewRoute } from "../features/m1/backup-overview-route";
+import { WorkspaceCapabilityGate } from "../features/m1/capability-gate";
+import { AndroidGuideRoute, IphoneGuideRoute } from "../features/m1/guide-routes";
+import { LandingRoute } from "../features/m1/landing-route";
 import {
-  AndroidGuideRoute,
-  BackupOverviewRoute,
-  IphoneGuideRoute,
-  LandingRoute,
   MessagesRoute,
   NotFoundRoute,
   PrintReportRoute,
   ReportRoute,
   SearchRoute,
 } from "../features/m0/route-placeholders";
+
+function workspaceRoute(element: ReactNode) {
+  return <WorkspaceCapabilityGate>{element}</WorkspaceCapabilityGate>;
+}
 
 const router = createBrowserRouter([
   {
@@ -20,7 +25,7 @@ const router = createBrowserRouter([
     children: [
       {
         path: "/",
-        element: <LandingRoute />,
+        element: workspaceRoute(<LandingRoute />),
       },
       {
         path: "/guide/iphone",
@@ -32,23 +37,23 @@ const router = createBrowserRouter([
       },
       {
         path: "/backup/:id",
-        element: <BackupOverviewRoute />,
+        element: workspaceRoute(<BackupOverviewRoute />),
       },
       {
         path: "/backup/:id/messages",
-        element: <MessagesRoute />,
+        element: workspaceRoute(<MessagesRoute />),
       },
       {
         path: "/backup/:id/search",
-        element: <SearchRoute />,
+        element: workspaceRoute(<SearchRoute />),
       },
       {
         path: "/backup/:id/report/:reportId",
-        element: <ReportRoute />,
+        element: workspaceRoute(<ReportRoute />),
       },
       {
         path: "/backup/:id/report/:reportId/print",
-        element: <PrintReportRoute />,
+        element: workspaceRoute(<PrintReportRoute />),
       },
       {
         path: "*",

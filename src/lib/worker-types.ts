@@ -12,6 +12,10 @@ export type WorkerProgressPhase =
 export type WorkerStructuredValue = string | number | boolean | null;
 
 export type WorkerErrorCode =
+  | "backup_access_failed"
+  | "backup_invalid"
+  | "backup_not_found"
+  | "backup_parse_failed"
   | "unsupported_environment"
   | "sqlite_unavailable"
   | "sqlite_init_failed"
@@ -79,11 +83,45 @@ export interface SqliteSmokeStatus {
   at: string;
 }
 
+export type BackupProviderId = "ios-itunes";
+
+/**
+ * Provider-agnostic device identity (Architecture §5). Providers translate
+ * their source-specific metadata (Apple plist keys, future Android formats)
+ * into this shape before it crosses the worker boundary; UI and storage
+ * layers never see provider-specific field names.
+ */
+export interface BackupDeviceInfo {
+  udid: string;
+  name?: string;
+  model?: string;
+  osVersion?: string;
+  serialNumber?: string;
+  phoneNumber?: string;
+}
+
+export interface BackupDetectionResult {
+  provider: BackupProviderId;
+  sourceKind: "itunes-finder";
+  id: string;
+  friendlyName: string;
+  sourceFolderName: string;
+  isEncrypted: boolean;
+  deviceInfo: BackupDeviceInfo;
+  lastBackupDate?: string;
+  backupDate?: string;
+  backupFormatVersion?: string;
+}
+
 export interface BackupWorkerApi {
   demoRoundTrip(
     request: WorkerDemoRequest,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<WorkerDemoResponse>>;
+  detectBackup(
+    root: FileSystemDirectoryHandle,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<BackupDetectionResult>>;
 }
 
 export interface DbWorkerApi {
@@ -154,6 +192,12 @@ export function toWorkerError(input: {
     ...causeFields,
     ...(input.details === undefined ? {} : { details: input.details }),
   };
+}
+
+export function formatWorkerErrorPayload(error: WorkerErrorPayload): string {
+  return error.causeMessage === undefined
+    ? error.message
+    : `${error.message} (${error.causeMessage})`;
 }
 
 function formatUnknownCause(cause: unknown): string {

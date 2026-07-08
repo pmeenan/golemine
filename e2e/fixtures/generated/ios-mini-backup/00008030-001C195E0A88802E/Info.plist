@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+  <dict>
+
+          <key>Unique Identifier</key>
+          <string>00008030-001C195E0A88802E</string>
+          <key>Display Name</key>
+          <string>Mina&apos;s iPhone backup</string>
+          <key>Device Name</key>
+          <string>Mina&apos;s iPhone</string>
+          <key>Product Type</key>
+          <string>iPhone15,2</string>
+          <key>Product Version</key>
+          <string>18.5</string>
+          <key>Serial Number</key>
+          <string>C39SYNTH0001</string>
+          <key>Phone Number</key>
+          <string>+15555550123</string>
+          <key>Last Backup Date</key>
+          <date>2026-07-01T12:34:56Z</date>
+  
+  </dict>
+</plist>

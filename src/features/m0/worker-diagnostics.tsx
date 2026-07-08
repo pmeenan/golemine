@@ -8,11 +8,11 @@ import {
   createMediaWorkerClient,
   proxiedWorkerProgress,
 } from "../../lib/worker-client";
-import type {
-  WorkerErrorPayload,
-  WorkerKind,
-  WorkerProgressEvent,
-  WorkerResult,
+import {
+  formatWorkerErrorPayload,
+  type WorkerKind,
+  type WorkerProgressEvent,
+  type WorkerResult,
 } from "../../lib/worker-types";
 import { cn } from "../../lib/cn";
 
@@ -244,11 +244,7 @@ function statusFromResult<TValue>(
     return { state: "passed", detail: successDetail };
   }
 
-  return { state: "failed", detail: summarizeWorkerError(result.error) };
-}
-
-function summarizeWorkerError(error: WorkerErrorPayload): string {
-  return `${error.code}: ${error.causeMessage ?? error.message}`;
+  return { state: "failed", detail: formatWorkerErrorPayload(result.error) };
 }
 
 function summarizeUnknownError(cause: unknown): string {

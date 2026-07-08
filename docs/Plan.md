@@ -4,8 +4,9 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M0 complete — scaffold, offline PWA, worker/sqlite diagnostics,
-tests, CI, license audit, and fixture conventions are in place.**
+**Current status: M1 complete — users can open a synthetic iPhone backup folder,
+recognize it through the backup worker, see device metadata, and manage recents with
+IndexedDB persistence plus OPFS derived-data wipe-on-remove.**
 
 ## M0 — Scaffolding
 
@@ -41,24 +42,33 @@ core privacy/offline invariants before feature work begins.
 
 Goal: user can open a backup folder, see it recognized, and manage a recents list.
 
-- [ ] Browser capability gate: `src/lib/capabilities.ts` probes features, not the user
+- [x] Browser capability gate: `src/lib/capabilities.ts` probes features, not the user
       agent (`"showDirectoryPicker" in window`, `navigator.storage.getDirectory`,
       `"createSyncAccessHandle" in FileSystemFileHandle.prototype`,
       `"getAsFileSystemHandle" in DataTransferItem.prototype`), checked once at boot.
+      The sync-access-handle probe falls back to a tiny capability worker because
+      Chromium exposes the API in the worker/OPFS context used by sqlite-wasm even
+      when it is absent on the window prototype.
       Unsupported browsers get a designed block screen (Design.md empty-state rules,
       both themes) on workspace routes naming Chrome as the supported browser; the
       backup guides stay accessible in any browser. e2e coverage via a page with the
       relevant APIs deleted. Critical-API list maintained per AGENTS.md rule.
-- [ ] Landing page: operational open-backup screen first (drag-drop,
+- [x] Landing page: operational open-backup screen first (drag-drop,
       `showDirectoryPicker()`, recents, privacy statement) with a concise one/two-line
       explanation of what the tool does and links to the backup guides; Lode brand
       gradient may be used as a restrained accent per Design.md §4, not as a
       marketing-first layout.
-- [ ] Backup detection in backup-worker: validate folder, parse `Info.plist` + `Manifest.plist`, detect encryption, surface device info. Clear errors for non-backup folders.
-- [ ] Recents list in IndexedDB (handle persistence, `requestPermission()` re-grant flow, rename, remove — remove also wipes OPFS derived data).
-- [ ] Backup overview page (`/backup/:id`): device info card, encrypted badge, ingest CTA.
-- [ ] Info pages: how to back up an iPhone (Finder/iTunes, incl. why encrypted is OK) and Android (placeholder pointing at future support).
-- [ ] Fixture mini-backup (synthetic) checked into `e2e/fixtures/`; e2e test for open → detect → recents.
+- [x] Backup detection in backup-worker: validate folder, parse `Info.plist` + `Manifest.plist`, detect encryption, surface device info. Clear errors for non-backup folders.
+- [x] Recents list in IndexedDB (handle persistence, `requestPermission()` re-grant flow, rename, remove — remove also wipes OPFS derived data).
+- [x] Backup overview page (`/backup/:id`): device info card, encrypted badge, ingest CTA.
+- [x] Info pages: how to back up an iPhone (Finder/iTunes, incl. why encrypted is OK) and Android (placeholder pointing at future support).
+- [x] Fixture mini-backup (synthetic) checked into `e2e/fixtures/`; e2e test for open → detect → recents.
+- [x] Post-review hardening: normalized `BackupDeviceInfo` across the worker boundary
+      (rule 8), merge-aware `recordDetection` in the recents store (rename/ingest
+      preservation, `derivedDbVersion` staleness, stale-record retirement),
+      synchronous drag-drop handle collection, fail-open cached capability probe
+      (D-017), skip-and-report recents parsing, binary-plist unsigned-integer and
+      CDATA fixes, shared synthetic-fixture module, and layout/error-format dedup.
 
 ## M2 — Ingest pipeline (unencrypted)
 

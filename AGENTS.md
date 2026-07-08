@@ -14,6 +14,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
 
 - **Start:** read `docs/Architecture.md` and `docs/Plan.md`. For iOS parsing work also
   read `docs/iOS-Backup-Format.md`. For any UI work also read `docs/Design.md`.
+- **Terminal:** on Windows, run terminal commands with PowerShell 7 (`pwsh`) by default,
+  not Windows PowerShell 5.1 (`powershell`), so UTF-8 output stays readable. Use
+  Windows PowerShell only when a task specifically requires it, and note why.
 - **End:** update `README.md`, `docs/Plan.md` (check off / add tasks and the status
   line), `docs/Architecture.md` (if structure changed), `docs/Decisions.md` (if a
   decision was made), and `AGENTS.md` (this file) with anything future agents must know.
@@ -88,12 +91,54 @@ metal and the ore it surfaces; no clay/terracotta styling).
 - Read-only source handle wrappers begin in
   `src/workers/backup/read-only-source.ts`; provider code should accept those wrappers
   rather than raw writable-capable `FileSystemDirectoryHandle`s.
+- M1 backup detection is exposed as `BackupWorkerApi.detectBackup(root, progress?)`.
+  It wraps the UI-provided `FileSystemDirectoryHandle` with
+  `asReadonlySourceDirectory()` before provider detection, validates the iTunes/Finder
+  root files, and parses XML plus bounded common binary plist values in
+  `src/workers/backup/plist.ts`. Detection returns the normalized
+  `BackupDeviceInfo` (name/model/osVersion/udid/serial/phone); the Apple plist key
+  translation lives inside `src/workers/backup/ios-backup.ts` so no Apple-isms
+  cross the worker boundary (hard rule 8).
+- M1 workspace capability gating lives in `src/lib/capabilities.ts`; the
+  sync-access-handle probe intentionally falls back to
+  `src/workers/capability/capability.worker.ts` because Chromium exposes that API in
+  the worker/OPFS context used by sqlite-wasm (headless Chromium exercises this
+  path on every boot). The probe fails open on timeout/startup errors (D-017),
+  caches its answer in sessionStorage, is skipped entirely when other required
+  window checks already failed, and boot detection starts lazily via
+  `getBootBrowserCapabilities()` — never at module evaluation (a module-eval
+  probe caused a TDZ crash in production bundles). Worker construction
+  (including the probe worker) is centralized in `src/lib/worker-client.ts`. UI
+  actions create a fresh backup worker client per operation and release it in a
+  `finally` — a shared cached client was tried and reverted because a dead
+  worker would poison every later open and per-call progress proxies leaked.
+- Chrome-only File System Access typings are declared once in
+  `src/types/file-system-access.d.ts` (included by both tsconfig projects); do not
+  re-declare `showDirectoryPicker`/`queryPermission`/`getAsFileSystemHandle` shapes
+  ad hoc. Drop-event directory extraction lives in `src/lib/drag-drop.ts` and must
+  collect `getAsFileSystemHandle()` promises synchronously during drop dispatch —
+  the drag data store deactivates at the first `await`.
 - License audit is fail-closed in `scripts/license-audit.mjs`. Non-standard licenses
   are package-specific exceptions only (see Decisions.md D-012); do not broaden the
   global allowlist without a recorded decision.
 - Workers: `backup-worker` (source FS, manifest, crypto), `db-worker` (derived
   SQLite + FTS5 in OPFS), `media-worker` (HEIC/thumbnails/video fallback).
 - Storage: recents + directory handles in IndexedDB; per-backup derived data in
-  OPFS keyed by UDID; `derivedDbVersion` bump forces re-ingest.
+  OPFS keyed by UDID; `derivedDbVersion` bump forces re-ingest. M1 recents storage
+  lives in `src/lib/recents.ts`: IndexedDB database `golemine-recents`, store
+  `backups`, permission re-grant helpers for stored directory handles, and wipe on
+  remove for OPFS derived data under `golemine/backups/<UDID-or-id>`. Keep db-worker
+  derived paths aligned with the exported constants there. All detection writes go
+  through `BackupRecentsStore.recordDetection`, which preserves user renames and
+  ingest status across every entry point, applies the `derivedDbVersion` staleness
+  rule, and retires stale records (wiping only derived-data directories the new
+  record does not share). Recents parsing is skip-and-report per record; unknown
+  ingest statuses map to `needs-reingest` instead of rejecting the row.
+- The M1 synthetic mini-backup fixture is generated under
+  `e2e/fixtures/generated/ios-mini-backup/` and covers open -> detect -> recents in
+  `e2e/m1.spec.ts`. The synthetic device values and plist builder live once in
+  `e2e/fixtures/ios-mini-backup.mjs` (shared by the generator, ios-backup unit
+  tests, and the Playwright spec) — extend that module rather than re-declaring
+  fixture metadata.
 - Crypto: WebCrypto only (PBKDF2, AES-KW, AES-CBC, SHA-256); passwords/keys are
   session memory only, never persisted.

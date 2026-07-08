@@ -46,6 +46,15 @@ single-threaded codecs) so the app can be hosted anywhere static files can be se
 with no special headers. If a future feature truly needs SAB (multithreaded ffmpeg),
 that is a hosting decision to raise explicitly, not a silent dependency.
 
+**Capability gate:** workspace routes are guarded at boot by `src/lib/capabilities.ts`.
+The gate probes Chrome APIs rather than sniffing user agents. The
+`createSyncAccessHandle` check is validated through a tiny capability worker because
+that API is needed in the worker/OPFS runtime used by sqlite-wasm and is not reliably
+exposed on the window prototype. The worker probe fails open when it cannot run
+(timeout or worker startup failure) and blocks only on an explicit negative answer;
+successful answers are cached in `sessionStorage`, and detection starts lazily via
+`getBootBrowserCapabilities()` (D-017).
+
 ## 3. Process model: UI thread vs workers
 
 The UI thread runs React and nothing else. All parsing, decryption, hashing, SQL, and
@@ -99,14 +108,23 @@ interrupted, the derived DB is rebuilt from scratch (source is the source of tru
   `{ id, friendlyName, directoryHandle, deviceInfo snapshot, isEncrypted, lastOpened,
   ingestStatus, derivedDbVersion }`. `FileSystemDirectoryHandle` is structured-cloneable
   and persists across sessions; reopening a recent backup requires one
-  `requestPermission()` user gesture.
-- **OPFS** (bulk derived data): one directory per backup, keyed by backup UDID:
+  `requestPermission()` user gesture. The storage facade lives in
+  `src/lib/recents.ts` and owns rename/remove helpers plus permission re-grant helpers.
+  Detection results are written through `BackupRecentsStore.recordDetection`, which
+  preserves user renames and ingest status when a known backup is re-opened from any
+  entry point, applies the `derivedDbVersion` staleness rule, and retires stale
+  records (including their orphaned derived-data directories) when a folder detects
+  under a new identity. Malformed stored records are skipped and reported rather
+  than failing the whole list.
+- **OPFS** (bulk derived data): one directory per backup under
+  `golemine/backups/`, keyed by backup UDID when known and falling back to the recents
+  id before detection has a UDID:
   - `golemine.sqlite` — the normalized message store + FTS5 index (schema below).
   - `thumbs/` — cached attachment thumbnails (content-addressed by attachment hash).
 - Request `navigator.storage.persist()` on first ingest so Chrome doesn't evict data.
 - Derived data is always disposable: deleting a backup from recents deletes its OPFS
-  directory; the source folder is untouched. A `derivedDbVersion` bump forces re-ingest
-  after schema changes.
+  directory through `src/lib/recents.ts`; the source folder is untouched. A
+  `derivedDbVersion` bump forces re-ingest after schema changes.
 - `derivedDbVersion` is a single shared constant in source code. UI recents, db-worker
   schema setup, ingest invalidation, and tests must import that constant rather than
   duplicating version numbers.
@@ -124,18 +142,27 @@ the Android provider (format TBD — see Decisions.md D-007) plugs in later.
 ```ts
 interface BackupProvider {
   id: string;                              // 'ios-itunes', later 'android-...'
-  detect(root: FileSystemDirectoryHandle): Promise<DetectResult>; // is this ours? encrypted?
+  detect(root: ReadonlySourceDirectoryHandle): Promise<DetectResult>; // is this ours? encrypted?
   open(root, opts: { password?: string }): Promise<BackupSession>;
 }
 
 interface BackupSession {
-  deviceInfo: DeviceInfo;                  // name, model, OS version, UDID, phone number
+  deviceInfo: DeviceInfo;                  // name, model, OS version, UDID, serial, phone number
   capabilities: Capability[];              // ['messages', 'contacts', ...]
   ingest(sink: IngestSink, progress: ProgressFn): Promise<IngestReport>;
   readAttachment(ref: AttachmentRef): Promise<ReadableStream>; // decrypts on the fly if needed
   hashSourceFile(ref: SourceFileRef): Promise<Sha256>;         // provenance for reports
 }
 ```
+
+At the worker RPC boundary, `BackupWorkerApi.detectBackup(root, progress?)` accepts the
+structured-cloned `FileSystemDirectoryHandle` from the UI and immediately wraps it with
+`asReadonlySourceDirectory()`. Provider detection/opening code accepts
+`ReadonlySourceDirectoryHandle`; raw writable-capable source handles do not cross into
+provider modules. Detection results carry the normalized `BackupDeviceInfo`
+(name, model, osVersion, udid, serialNumber, phoneNumber): the iOS provider
+translates Apple plist keys into that shape internally, so UI routes and the recents
+store never see provider-specific field names.
 
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 
@@ -205,7 +232,7 @@ later enhancement).
 
 Every report includes a **provenance appendix**, generated at export time:
 
-- Device identity: name, model, iOS version, UDID, phone number (from `Info.plist`).
+- Device identity: name, model, iOS version, UDID, serial number, phone number (from `Info.plist`).
 - Backup identity: backup date, encrypted flag, source folder name.
 - Integrity: SHA-256 of the source message database (`sms.db`) and of every attachment
   file included in the report, computed from the **source** bytes (for encrypted
@@ -288,3 +315,6 @@ fixture backups checked into `e2e/fixtures/` — synthetic, no real personal dat
 the repo, with generator scripts/metadata kept alongside them); Playwright (Chromium)
 for end-to-end flows including drag/drop ingest, offline/privacy invariants, and report
 printing.
+
+The first generated fixture is `e2e/fixtures/generated/ios-mini-backup/`, a minimal
+synthetic iPhone backup root used by the M1 open -> detect -> recents Playwright flow.

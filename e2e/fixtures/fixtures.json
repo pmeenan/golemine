@@ -5,5 +5,26 @@
     "noRealPersonalData": true,
     "regenerable": true
   },
-  "fixtures": []
+  "fixtures": [
+    {
+      "id": "ios-mini-backup",
+      "provider": "ios-itunes",
+      "path": "generated/ios-mini-backup/00008030-001C195E0A88802E",
+      "description": "Minimal synthetic iPhone Finder/iTunes backup root for M1 open and detection flows.",
+      "device": {
+        "displayName": "Mina's iPhone backup",
+        "deviceName": "Mina's iPhone",
+        "productType": "iPhone15,2",
+        "productVersion": "18.5",
+        "serialNumber": "C39SYNTH0001",
+        "udid": "00008030-001C195E0A88802E",
+        "phoneNumber": "+15555550123"
+      },
+      "provenance": [
+        "Generated from static synthetic metadata in generate-fixtures.mjs.",
+        "Contains no real personal data and no copied backup content.",
+        "Manifest.db carries a SQLite header plus synthetic placeholder bytes because M1 validates metadata but does not read Manifest.db rows."
+      ]
+    }
+  ]
 }

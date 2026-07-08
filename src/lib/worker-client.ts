@@ -47,6 +47,22 @@ export function createBackupWorkerClient(): WorkerClient<BackupWorkerApi> {
   );
 }
 
+/**
+ * Raw worker for the boot capability probe. The probe speaks a one-shot
+ * postMessage protocol with its own timeout, so it does not go through the
+ * Comlink client factory — but all worker construction conventions
+ * (bundler-visible URL, golemine-* name, module type) stay in this module.
+ */
+export function createCapabilityProbeWorker(): Worker {
+  return new Worker(
+    new URL("../workers/capability/capability.worker.ts", import.meta.url),
+    {
+      name: "golemine-capability-worker",
+      type: "module",
+    },
+  );
+}
+
 export function createDbWorkerClient(): WorkerClient<DbWorkerApi> {
   return createWorkerClient<DbWorkerApi>(
     new Worker(new URL("../workers/db/db.worker.ts", import.meta.url), {

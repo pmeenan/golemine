@@ -177,3 +177,42 @@ Scope and posture:
   for JPEG/PNG magic bytes rather than trusting offset 0. Skip and report per record;
   a missing or empty AddressBookImages.sqlitedb is a silent no-op.
 - Decoding is native browser JPEG/PNG — no HEIC/codec dependency for avatars.
+
+## D-016 — Probe sync OPFS access in a worker for the capability gate (2026-07-07)
+
+M1 adds a boot-time browser capability gate for workspace routes. Most required APIs
+are window-visible (`showDirectoryPicker`, OPFS root access, and dragged directory
+handles), but `FileSystemFileHandle.prototype.createSyncAccessHandle` is the capability
+sqlite-wasm's OPFS path depends on in a worker context. Chromium may not expose that
+method on the window prototype even when the worker/OPFS runtime supports the app's
+SQLite path.
+
+Decision: `src/lib/capabilities.ts` performs the normal window probes, then falls back
+to `src/workers/capability/capability.worker.ts` for the sync-access-handle probe. The
+gate still checks once at boot and still blocks workspace routes when required APIs are
+missing. Backup guides remain accessible without the gate.
+
+Rationale: this keeps the gate feature-based and Chrome-only without blocking supported
+Chromium runs because a worker-only API is absent from the UI global.
+
+## D-017 — Worker capability probe fails open and caches per session (2026-07-07)
+
+The M1 code review confirmed two reliability problems with the D-016 worker probe:
+a slow worker startup (cold dev server, overloaded CI) hit the 3-second timeout and
+rendered the "Chrome is required" block screen on fully-capable Chrome, and because
+Chromium does not expose `createSyncAccessHandle` on the window prototype, every
+boot paid a worker spawn before workspace routes rendered.
+
+Decision: the probe distinguishes "the worker answered `false`" (the API is truly
+missing — the gate blocks) from "the probe could not run" (timeout, worker startup
+failure — the gate fails open and logs a warning). Successful probe answers are
+cached in `sessionStorage`; boot detection starts lazily via
+`getBootBrowserCapabilities()` rather than at module evaluation, and
+`detectBootBrowserCapabilities` accepts an injectable probe so the fallback path is
+unit-testable.
+
+Rationale: a browser that reaches the worker fallback has already passed the other
+three Chrome-only window probes, so a missing answer is an environment hiccup, not
+evidence of an unsupported browser. Failing closed produced false block screens and
+flaky e2e; failing open costs nothing because sqlite-wasm surfaces a clear error in
+the ingest path if the API is genuinely absent.
