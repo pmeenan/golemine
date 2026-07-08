@@ -132,6 +132,52 @@ describe("backup recents store", () => {
     await expect(store.remove("missing")).resolves.toBeUndefined();
     expect(derivedDataStorage.wipedDirectoryNames).toEqual([]);
   });
+
+  it("recovers interrupted ingesting records as needing re-ingest", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: new RecordingDerivedDataStorage(),
+    });
+
+    await persistence.put(createRecentBackupRecord({
+      id: "backup-id",
+      friendlyName: "Backup",
+      directoryHandle: fakeDirectoryHandle("source"),
+      deviceInfo: {},
+      isEncrypted: false,
+      ingestStatus: "ingesting",
+    }));
+
+    expect((await store.get("backup-id"))?.ingestStatus).toBe("needs-reingest");
+    expect((await store.list())[0]?.ingestStatus).toBe("needs-reingest");
+  });
+
+  it("stamps the current derived DB version only after successful ingest", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: new RecordingDerivedDataStorage(),
+    });
+
+    await persistence.put(createRecentBackupRecord({
+      id: "backup-id",
+      friendlyName: "Backup",
+      directoryHandle: fakeDirectoryHandle("source"),
+      deviceInfo: {},
+      isEncrypted: false,
+      ingestStatus: "ingested",
+      derivedDbVersion: derivedDbVersion - 1,
+    }));
+
+    const running = await store.updateIngestStatus("backup-id", "ingesting");
+    const failed = await store.updateIngestStatus("backup-id", "failed");
+    const ingested = await store.updateIngestStatus("backup-id", "ingested");
+
+    expect(running.derivedDbVersion).toBe(derivedDbVersion - 1);
+    expect(failed.derivedDbVersion).toBe(derivedDbVersion - 1);
+    expect(ingested.derivedDbVersion).toBe(derivedDbVersion);
+  });
 });
 
 describe("recordDetection", () => {
@@ -202,6 +248,30 @@ describe("recordDetection", () => {
       isEncrypted: false,
       ingestStatus: "ingested",
       derivedDbVersion: derivedDbVersion - 1,
+    }));
+
+    const record = await store.recordDetection(
+      detection(),
+      fakeDirectoryHandle("source"),
+    );
+
+    expect(record.ingestStatus).toBe("needs-reingest");
+  });
+
+  it("does not preserve an interrupted ingesting state when the backup is re-opened", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: new RecordingDerivedDataStorage(),
+    });
+
+    await persistence.put(createRecentBackupRecord({
+      id: "udid-1",
+      friendlyName: "Evidence iPhone",
+      directoryHandle: fakeDirectoryHandle("source"),
+      deviceInfo: { udid: "udid-1" },
+      isEncrypted: false,
+      ingestStatus: "ingesting",
     }));
 
     const record = await store.recordDetection(

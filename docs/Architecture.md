@@ -96,8 +96,9 @@ more than ~16 ms.
   transcodes/extracts frames for unsupported video as a fallback. Codec wasm modules are
   lazy-loaded only when first needed.
 
-Ingest (the one long-running pipeline) flows backup-worker → db-worker with progress
-events surfaced to the UI (phase, counts, ETA). Ingest is resumable/restartable: if
+Ingest (the one long-running pipeline) flows backup-worker → db-worker directly, with
+progress events surfaced to the UI (phase, counts, ETA). The UI starts and observes
+ingest but does not relay ingest batches. Ingest is resumable/restartable: if
 interrupted, the derived DB is rebuilt from scratch (source is the source of truth).
 
 ## 4. Storage model
@@ -120,7 +121,7 @@ interrupted, the derived DB is rebuilt from scratch (source is the source of tru
   `golemine/backups/`, keyed by backup UDID when known and falling back to the recents
   id before detection has a UDID:
   - `golemine.sqlite` — the normalized message store + FTS5 index (schema below).
-  - `thumbs/` — cached attachment thumbnails (content-addressed by attachment hash).
+  - `thumbs/` — cached attachment/contact-avatar thumbnails (content-addressed by hash).
 - Request `navigator.storage.persist()` on first ingest so Chrome doesn't evict data.
 - Derived data is always disposable: deleting a backup from recents deletes its OPFS
   directory through `src/lib/recents.ts`; the source folder is untouched. A
@@ -164,6 +165,24 @@ provider modules. Detection results carry the normalized `BackupDeviceInfo`
 translates Apple plist keys into that shape internally, so UI routes and the recents
 store never see provider-specific field names.
 
+The production unencrypted iOS ingest RPC is
+`BackupWorkerApi.ingestUnencryptedBackupToDb(root, request, progress?)`. The
+backup-worker re-wraps the source handle as read-only, validates that the backup is
+unencrypted, creates a dedicated db-worker ingest sink, opens `Manifest.db` with any
+root `Manifest.db-wal`/`Manifest.db-shm` sidecars applied, locates
+the sms/contact SQLite files plus `-wal`/`-shm` sidecars by domain and relative path,
+hashes source database files used for provenance, and copies only needed source bytes
+into transient worker memory. The sink-taking
+`BackupWorkerApi.ingestUnencryptedBackup(root, request, sink, progress?)` remains as a
+test seam. Ingest progress emits a `prepare` phase before the destructive db-worker
+`prepareIngest` call so the UI can distinguish pre-prepare failures (derived DB
+untouched — an existing `ingested` record stays valid) from failures during or after
+prepare. Source SQLite WAL files are validated (magic/version/page size/header
+checksum and source-derived size bounds) and reconstructed by applying committed WAL
+frames from the valid WAL prefix to a copy of the main database bytes before opening
+the copy read-only with sqlite-wasm (D-021, superseded by D-022 for stale/torn frame
+handling); the source backup directory is never written.
+
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 
 - **Conversation** — thread; 1:1 or group; participants; display name; service.
@@ -171,8 +190,10 @@ store never see provider-specific field names.
 - **Message** — conversation ref, sender, UTC timestamp (+ raw source timestamp),
   body text, service (iMessage/SMS), status (sent/delivered/read timestamps),
   edited/unsent flags, source GUID + source row id (provenance).
-- **Attachment** — message ref, filename, MIME, size, source path ref, transfer name.
-- **Reaction** — tapbacks etc., linked to their target message, never shown as rows.
+- **Attachment** — message ref, filename, MIME, size, source path ref, transfer name,
+  source GUID, and optional source hash when bounded source bytes were read.
+- **Reaction** — tapbacks etc., linked to their target message, source GUID/row id/raw
+  timestamp, never shown as rows.
 
 Rule: provider-specific quirks (Apple epochs, `attributedBody` parsing, tapback
 encodings) are resolved **inside the provider** at ingest time. The normalized model and
@@ -185,18 +206,35 @@ under `src/workers/db/schema.ts`):
 
 ```sql
 conversations(id, provider_key, kind, display_name, service, last_message_at, message_count)
-participants(id, handle, kind, contact_name, is_self)
+participants(id, handle, kind, contact_name, is_self, avatar_sha256, avatar_mime, avatar_path)
+contact_avatars(participant_id, sha256, mime, byte_length, opfs_path, created_at)
 conversation_participants(conversation_id, participant_id)
 messages(id, conversation_id, sender_id, sent_at_utc, raw_timestamp, body, service,
          is_from_me, date_delivered, date_read, edited, unsent,
-         source_guid, source_rowid)              -- provenance
-attachments(id, message_id, filename, mime, bytes, source_path, source_domain, sha256)
-reactions(id, target_message_id, sender_id, kind, sent_at_utc)
+         source_guid, source_rowid, is_system_event)              -- provenance
+attachments(id, message_id, filename, mime, bytes, source_path, source_domain,
+            sha256, source_guid)
+reactions(id, target_message_id, sender_id, kind, sent_at_utc, raw_timestamp,
+          source_guid, source_rowid)
 messages_fts(body)   -- FTS5, external-content table on messages
 report_items(report_id, message_id, added_at, note)
 reports(id, title, created_at, case_meta_json)
-ingest_meta(key, value)  -- provider id/version, source hashes, ingest timestamps, counts
+ingest_meta(key, value)  -- summary_json (machine-read ingest summary) + scalar debug rows
 ```
+
+The db-worker ingest sink lives in `src/workers/db/ingest-sink.ts`. `prepareIngest`
+rebuilds the schema for the per-backup derived DB opened through `opfs-sahpool` under
+`golemine/backups/<UDID-or-id>/sqlite-sahpool`; tests inject an in-memory sqlite
+factory so schema and batch writes are validated without OPFS. Batch writes go through
+a generic per-entity upsert spec table rather than per-entity insert functions.
+`finalizeIngest` stores `summary_json` as the only machine-read ingest record plus
+scalar debugging rows (provider, started_at, completed_at, database_name,
+derived_db_version); stored summaries are validated by a shallow provider-agnostic
+structural check gated on `derivedDbVersion` (D-023). Contact avatar bytes are
+written under `thumbs/contact-avatars/` and referenced by path metadata in SQLite.
+Attachment source hashes may be absent for large, unknown-size, deceptive-size, or
+budget-deferred media; the source path, domain, GUID, and manifest/source-file
+provenance are still kept so report/export code can hash selected originals on demand.
 
 Search = FTS5 `MATCH` with filters (conversation, participant, date range, has-attachment)
 compiled into SQL in the db-worker. Results return message ids + snippets; the UI
@@ -300,6 +338,7 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
       backup/         backup-worker: providers/ios/, crypto/, plist/, typedstream/
       db/             db-worker: schema, queries, ingest sink, FTS
       media/          media-worker: heic, thumbs, video fallback
+      shared/         helpers shared across workers (sqlite init, binary, progress)
     lib/              shared utils (time, bytes, comlink helpers, types)
     assets/           bundled images: brand/ (icon master), illustrations/ (light/dark WebP pairs)
   public/             static assets, wasm binaries
@@ -319,5 +358,8 @@ the repo, with generator scripts/metadata kept alongside them); Playwright (Chro
 for end-to-end flows including drag/drop ingest, offline/privacy invariants, and report
 printing.
 
-The first generated fixture is `e2e/fixtures/generated/ios-mini-backup/`, a minimal
-synthetic iPhone backup root used by the M1 open -> detect -> recents Playwright flow.
+The first generated fixture is `e2e/fixtures/generated/ios-mini-backup/`, a synthetic
+unencrypted iPhone backup root used by the M1 open -> detect -> recents Playwright flow
+and the M2 open -> ingest -> derived summary flow. Its source module and generator
+produce deterministic Manifest/sms/contact SQLite data, real WAL sidecars, tapbacks,
+attachments, contact-avatar happy/error cases, and expected normalized metadata.

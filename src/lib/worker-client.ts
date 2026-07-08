@@ -3,9 +3,16 @@ import type { Remote } from "comlink";
 import type {
   BackupWorkerApi,
   DbWorkerApi,
+  IngestSinkApi,
   MediaWorkerApi,
   WorkerProgressCallback,
 } from "./worker-types";
+import {
+  backupWorkerName,
+  capabilityWorkerName,
+  dbWorkerName,
+  mediaWorkerName,
+} from "./worker-names";
 
 export interface WorkerClient<TApi extends object> {
   api: Remote<TApi>;
@@ -38,10 +45,14 @@ export function proxiedWorkerProgress(
   return proxy(callback);
 }
 
+export function proxiedIngestSink(sink: IngestSinkApi): IngestSinkApi {
+  return proxy(sink);
+}
+
 export function createBackupWorkerClient(): WorkerClient<BackupWorkerApi> {
   return createWorkerClient<BackupWorkerApi>(
     new Worker(new URL("../workers/backup/backup.worker.ts", import.meta.url), {
-      name: "golemine-backup-worker",
+      name: backupWorkerName,
       type: "module",
     }),
   );
@@ -57,7 +68,7 @@ export function createCapabilityProbeWorker(): Worker {
   return new Worker(
     new URL("../workers/capability/capability.worker.ts", import.meta.url),
     {
-      name: "golemine-capability-worker",
+      name: capabilityWorkerName,
       type: "module",
     },
   );
@@ -66,7 +77,7 @@ export function createCapabilityProbeWorker(): Worker {
 export function createDbWorkerClient(): WorkerClient<DbWorkerApi> {
   return createWorkerClient<DbWorkerApi>(
     new Worker(new URL("../workers/db/db.worker.ts", import.meta.url), {
-      name: "golemine-db-worker",
+      name: dbWorkerName,
       type: "module",
     }),
   );
@@ -75,7 +86,7 @@ export function createDbWorkerClient(): WorkerClient<DbWorkerApi> {
 export function createMediaWorkerClient(): WorkerClient<MediaWorkerApi> {
   return createWorkerClient<MediaWorkerApi>(
     new Worker(new URL("../workers/media/media.worker.ts", import.meta.url), {
-      name: "golemine-media-worker",
+      name: mediaWorkerName,
       type: "module",
     }),
   );

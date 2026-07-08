@@ -1,3 +1,6 @@
+import { bytesStartWith, stringFromCodeUnits } from "../shared/binary";
+import { appleEpochMs } from "./apple-time";
+
 export type PlistValue =
   | null
   | boolean
@@ -29,13 +32,11 @@ export class PlistParseError extends Error {
 const binaryPlistMagic = new Uint8Array([
   0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30,
 ]);
-const appleEpochMs = Date.UTC(2001, 0, 1);
 const maxContainerLength = 1_000_000;
-const maxStringChunkCodeUnits = 8_192;
 const textDecoder = new TextDecoder("utf-8", { fatal: false });
 
 export function parsePlist(bytes: Uint8Array): ParsedPlist {
-  if (startsWith(bytes, binaryPlistMagic)) {
+  if (bytesStartWith(bytes, binaryPlistMagic)) {
     return { format: "binary", value: new BinaryPlistReader(bytes).parse() };
   }
 
@@ -110,20 +111,6 @@ export function getPlistDateIso(
   }
 
   return undefined;
-}
-
-function startsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
-  if (bytes.byteLength < prefix.byteLength) {
-    return false;
-  }
-
-  for (let index = 0; index < prefix.byteLength; index += 1) {
-    if (bytes[index] !== prefix[index]) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 type XmlNode =
@@ -855,16 +842,4 @@ class BinaryPlistReader {
       throw new PlistParseError(`Binary plist ${label} is out of bounds.`);
     }
   }
-}
-
-function stringFromCodeUnits(codeUnits: readonly number[]): string {
-  let text = "";
-
-  for (let offset = 0; offset < codeUnits.length; offset += maxStringChunkCodeUnits) {
-    text += String.fromCharCode(
-      ...codeUnits.slice(offset, offset + maxStringChunkCodeUnits),
-    );
-  }
-
-  return text;
 }

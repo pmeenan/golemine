@@ -155,12 +155,76 @@ metal and the ore it surfaces; no clay/terracotta styling).
   ingest status across every entry point, applies the `derivedDbVersion` staleness
   rule, and retires stale records (wiping only derived-data directories the new
   record does not share). Recents parsing is skip-and-report per record; unknown
-  ingest statuses map to `needs-reingest` instead of rejecting the row.
+  ingest statuses map to `needs-reingest` instead of rejecting the row, and persisted
+  interrupted `ingesting` records are recovered as `needs-reingest` on read. Only a
+  successful `ingested` status stamps the current `derivedDbVersion`; `ingesting` and
+  `failed` preserve the prior version.
+- M2 db-worker derived schema and ingest sink live in `src/workers/db/schema.ts` and
+  `src/workers/db/ingest-sink.ts`. `prepareIngest` recreates the schema for
+  `golemine.sqlite` in the per-backup OPFS `opfs-sahpool` directory under
+  `golemine/backups/<UDID-or-id>/sqlite-sahpool`. `writeIngestBatch` writes
+  normalized batches (and FTS trigger population) through a generic per-entity
+  upsert spec table (`upsertMany` + `entityBatchWriters`) — extend the spec table
+  rather than adding hand-written insert functions. `finalizeIngest` stores
+  `summary_json` (the only machine-read representation, D-023) plus scalar
+  debugging rows (provider, started_at, completed_at, database_name,
+  derived_db_version) in `ingest_meta`. Stored-summary validation is a shallow
+  provider-agnostic structural check gated on `derivedDbVersion`; do not add deep
+  per-field guards or provider/role enumerations. Contact avatar bytes are
+  content-addressed under `thumbs/contact-avatars/` with only path metadata in
+  SQLite. Unit tests inject an in-memory sqlite factory; keep that seam when
+  extending db-worker queries.
+- Shared worker helper modules — extend these instead of re-declaring helpers:
+  `src/workers/shared/sqlite-init.ts` (single memoized `getSqlite()` used by
+  source-sqlite, ingest-sink, sqlite-smoke, and tests), `src/workers/shared/binary.ts`
+  (`stringFromCodeUnits`, `bytesStartWith` — the single byte-prefix/chunked-string
+  helpers), `src/workers/shared/progress.ts` (`emitWorkerProgress`),
+  `src/workers/backup/apple-time.ts` (single Apple epoch constant), and
+  `src/lib/worker-names.ts` (worker name constants; the db-worker nested inside
+  backup.worker is named `golemine-db-worker-nested`). Worker options objects must
+  stay literal at each construction site because Vite statically parses
+  `new Worker(new URL(...), { type: "module" })`.
+- M2 unencrypted iOS ingest is exposed for production as
+  `BackupWorkerApi.ingestUnencryptedBackupToDb(root, request, progress?)` and
+  implemented in `src/workers/backup/ios-ingest.ts` plus the backup-worker db-worker
+  bridge. The older `ingestUnencryptedBackup(root, request, sink, progress?)` remains
+  as a test seam. The route uses Web Locks to prevent same-backup concurrent rebuilds
+  and must not relay ingest batches through React. Ingest emits a `prepare` progress
+  phase before the destructive db-worker `prepareIngest` call; the route treats the
+  first non-`starting` phase as "the derived DB is about to be (or has been)
+  modified", so pre-prepare failures never downgrade a previously `ingested` record
+  while prepare/later failures do. `WorkerErrorCode` `backup_manifest_unreadable`
+  means a required database's MBFile record could not be read; it is distinct from
+  `backup_file_missing` (entry absent from Manifest.db). Ingest validates
+  detection/encryption, opens `Manifest.db` with root `Manifest.db-wal`/`-shm`
+  sidecars applied when present, reads only the needed
+  sms/contact/contact-image databases and sidecars, normalizes
+  Messages/contacts/attachments/tapbacks/avatars (tapback classification is
+  open-ended: `associated_message_type` 2000–2999 = reaction adds with unmapped kinds
+  folded as `unknown`, 3000–3999 = removals diverted from messages; undecodable
+  `attributedBody` with empty `text` emits a `message-body-undecodable` warning, and
+  contact resolution runs once per handle during participant building), and streams
+  batches to the db-worker sink. `src/workers/backup/source-sqlite.ts` applies committed SQLite WAL frames to a
+  copy of source bytes before opening a transient read-only DB (D-021, D-022); it
+  rejects invalid WAL headers/impossible committed sizes, but for frames it follows
+  SQLite end-of-log behavior: apply the valid committed prefix and stop at the first
+  invalid/stale/torn frame. Do not try to make sqlite-wasm open Manifest-file-ID
+  sidecars directly. Timestamp normalization must accept sqlite bigint values for Apple
+  nanosecond epochs and omit out-of-range dates instead of throwing. Attachment source
+  hashing during ingest is bounded to Manifest-known files at or below 64 MiB, guarded
+  by actual `File.size`, and capped by a per-ingest eager hash budget; larger,
+  unknown-size, deceptive-size, or budget-exhausted media keeps path/domain/GUID
+  provenance and is hashed later on demand by extraction/report code.
 - The M1 synthetic mini-backup fixture is generated under
   `e2e/fixtures/generated/ios-mini-backup/` and covers open -> detect -> recents in
   `e2e/m1.spec.ts`. The synthetic device values and plist builder live once in
   `e2e/fixtures/ios-mini-backup.mjs` (shared by the generator, ios-backup unit
-  tests, and the Playwright spec) — extend that module rather than re-declaring
-  fixture metadata.
+  tests, and the Playwright specs) — extend that module rather than re-declaring
+  fixture metadata. M2 extends the same fixture with real generated Manifest/sms/
+  AddressBook/AddressBookImages SQLite data, real WAL sidecars created through
+  Node's experimental `node:sqlite` `DatabaseSync` and then normalized to deterministic
+  salts/checksums, a WAL-only message/contact, a tapback, an attachment file, a
+  prefixed valid PNG avatar, and a malformed avatar warning case. The generator may
+  print Node's experimental warning for `node:sqlite`; that is fixture-build-time only.
 - Crypto: WebCrypto only (PBKDF2, AES-KW, AES-CBC, SHA-256); passwords/keys are
   session memory only, never persisted.

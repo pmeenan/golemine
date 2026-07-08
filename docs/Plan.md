@@ -4,15 +4,22 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M1 complete — users can open a synthetic iPhone backup folder,
-recognize it through the backup worker, see device metadata, and manage recents with
-IndexedDB persistence plus OPFS derived-data wipe-on-remove. Detection also handles
-larger real-world iOS `Info.plist` app metadata with role-specific root-plist bounds
-(D-019), and the iPhone guide now covers copied backups, inline Finder steps, Apple
-Support references, and macOS `~/Library` Chrome access limits. All primary brand and
-illustration assets have been generated under the steampunk Talos golem identity
-(D-018; character sheet in `docs/assets/`); wiring them into the UI is tracked under
-M6.**
+**Current status: M2 complete and post-review hardened — users can open an unencrypted
+synthetic iPhone backup, run ingest from the backup overview, and rebuild a per-backup
+OPFS derived database with normalized conversations, participants, messages,
+attachments, tapbacks, contact avatars, FTS rows, warnings, and source-file
+provenance. The fixture now carries real Manifest/sms/contact SQLite data plus WAL
+sidecars, and Playwright covers open -> ingest -> derived summary. M2 hardening now
+uses SQLite-like WAL end-of-log handling for stale/torn WAL tails including root
+`Manifest.db-wal`, avoids eager hashing of large, unknown-size, deceptive-size, or
+budget-exhausted attachment media, preserves attachment GUIDs and reaction raw
+timestamps, sends production ingest batches backup-worker -> db-worker without a UI
+relay, and recovers interrupted `ingesting` recents as `needs-reingest` (D-022).
+Encrypted ingest is next in M4; M3 builds the browser/search UI over the derived
+database. M1 also handles larger real-world iOS `Info.plist` app metadata with
+role-specific root-plist bounds (D-019), and all primary brand and illustration assets
+have been generated under the steampunk Talos golem identity (D-018; character sheet
+in `docs/assets/`); wiring them into the UI is tracked under M6.**
 
 ## M0 — Scaffolding
 
@@ -89,18 +96,60 @@ Goal: user can open a backup folder, see it recognized, and manage a recents lis
 
 Goal: an opened, unencrypted backup becomes a browsable derived DB.
 
-- [ ] Manifest.db reader (locate files by domain/relativePath, incl. WAL sidecar handling).
-- [ ] Binary + XML plist parser (or vetted MIT dependency) for MBFile records.
-- [ ] sms.db extraction: copy into db-worker memory/OPFS temp, apply WAL, open read-only.
-- [ ] Normalizer: chats → Conversations, handles → Participants, messages (Apple-epoch conversion, `attributedBody` typedstream text extraction, tapback folding, group events), attachments metadata.
-- [ ] Contacts resolution from AddressBook.sqlitedb (libphonenumber-js matching).
-- [ ] Contact avatar thumbnails from AddressBookImages.sqlitedb (D-015): join on
+- [x] Manifest.db reader (locate files by domain/relativePath, incl. WAL sidecar handling).
+- [x] Binary + XML plist parser (or vetted MIT dependency) for MBFile records.
+- [x] sms.db extraction: copy into backup-worker transient sqlite memory, apply
+      committed WAL frames to a source-byte copy (D-021), open read-only.
+- [x] Synthetic ios-mini-backup fixture upgraded from M1 placeholders to real
+      unencrypted M2 data: Manifest.db `Files` rows, sms.db direct/group/tapback/
+      attachment rows, AddressBook contacts, and prefixed contact-thumbnail image
+      blob.
+- [x] Defensive typedstream text extractor for iOS Messages `attributedBody` blobs
+      (bounded UTF-8/UTF-16 NSString-like payload extraction; malformed input returns
+      `undefined`).
+- [x] Normalizer: chats → Conversations, handles → Participants, messages
+      (Apple-epoch seconds/nanoseconds conversion including sqlite bigint values,
+      `attributedBody` typedstream text extraction, tapback folding, group events),
+      attachments metadata and source hashes.
+- [x] Contacts resolution from AddressBook.sqlitedb (libphonenumber-js matching).
+- [x] Contact avatar thumbnails from AddressBookImages.sqlitedb (D-015): join on
       `record_id` = ABPerson rowid, sniff JPEG/PNG magic in blobs (offset may be
       non-zero), skip-and-report on any parse failure, missing db is a no-op; store
       content-addressed in OPFS alongside the M3 thumbnail cache.
-- [ ] Derived DB schema + ingest sink in db-worker (Architecture §6), incl. `ingest_meta` provenance (source hashes, timestamps, counts).
-- [ ] Streaming progress UI; ingest restartable; `derivedDbVersion` re-ingest trigger.
-- [ ] Golden-file unit tests for typedstream, timestamps, tapbacks against fixtures.
+- [x] Derived DB schema + ingest sink in db-worker (Architecture §6), incl.
+      `ingest_meta` provenance (`summary_json` as the single machine-read record —
+      source hashes, timestamps, counts live inside it — plus scalar debug rows,
+      D-023), FTS population, per-backup OPFS `opfs-sahpool` opening, contact-avatar
+      path metadata, and in-memory sqlite test seams.
+- [x] Streaming progress UI; ingest restartable from source; `derivedDbVersion`
+      re-ingest trigger is preserved through recents and updated on ingest status
+      writes.
+- [x] Golden-file unit tests for typedstream, timestamps, tapbacks, WAL sidecars,
+      contacts, avatars, attachments, and db sink behavior against fixtures.
+- [x] Post-review hardening: WAL replay stops at the first invalid/stale/torn frame
+      while keeping the valid committed prefix (including root `Manifest.db-wal`,
+      D-022), typedstream scanning continues past malformed string candidates,
+      attachment source lookups are skip-and-report with actual-`File.size` guarded
+      bounded/deferred hashing, absolute iOS attachment paths normalize back to
+      `Library/SMS/Attachments/**`, iOS 17 unknown/custom tapback types are folded
+      instead of emitted as message rows, attachment GUID and reaction raw timestamp
+      provenance persists into SQLite, production ingest streams backup-worker ->
+      db-worker directly, Web Locks guard same-backup rebuilds, and interrupted
+      `ingesting` recents recover as `needs-reingest`.
+- [x] Post-review cleanup pass: shared worker helper modules
+      (`src/workers/shared/` sqlite-init/binary/progress, `apple-time.ts`,
+      `src/lib/worker-names.ts`), `ingest_meta` slimmed to `summary_json` + scalar
+      debug rows with shallow `derivedDbVersion`-gated summary validation (D-023),
+      generic per-entity upsert specs in the ingest sink, a `prepare` progress phase
+      before destructive db-worker prepare (pre-prepare failures never downgrade an
+      `ingested` recent) with a distinct `backup_manifest_unreadable` error code,
+      open-ended tapback ranges (2000–2999 adds folded to `unknown`, 3000–3999
+      removals), `message-body-undecodable` warnings, single-pass contact resolution
+      during participant building, and unit tests for shrinking-final-commit WAL
+      replay and detection tolerating unparseable Manifest.db content.
+
+Deferred (not M2): streaming row normalization — normalize currently materializes
+full row arrays before batching; a streaming rewrite is deferred to M3-scale work.
 
 ## M3 — Browse & search
 

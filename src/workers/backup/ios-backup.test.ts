@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   iosMiniBackupDevice,
+  iosMiniBackupExpectedMetadata,
   iosMiniBackupInfoPlist,
+  iosMiniBackupManifestPlist,
   plistDict,
 } from "../../../e2e/fixtures/ios-mini-backup.mjs";
 import type {
@@ -41,6 +43,70 @@ describe("iOS backup detection", () => {
       lastBackupDate: "2026-07-01T12:34:56.000Z",
       backupFormatVersion: "10.0",
       backupDate: "2026-07-01T12:35:10.000Z",
+    });
+  });
+
+  it("detects an encrypted backup without reading Manifest.db content", async () => {
+    // Detection must validate root metadata only; encrypted Manifest.db bytes
+    // are opaque until M3 decryption, so garbage content must not fail detect.
+    const root = new SyntheticReadonlyDirectory(
+      iosMiniBackupDevice.udid,
+      backupFiles({
+        "Manifest.db": file("Manifest.db", garbageBytes(256 * 1024)),
+      }),
+    );
+
+    const result = await detectIosBackup(root);
+
+    expect(result.provider).toBe("ios-itunes");
+    expect(result.isEncrypted).toBe(true);
+    expect(result.deviceInfo).toEqual({
+      udid: iosMiniBackupDevice.udid,
+      name: iosMiniBackupDevice.deviceName,
+      model: iosMiniBackupDevice.productType,
+      osVersion: iosMiniBackupDevice.productVersion,
+      serialNumber: iosMiniBackupDevice.serialNumber,
+      phoneNumber: iosMiniBackupDevice.phoneNumber,
+    });
+  });
+
+  it("detects an unencrypted backup whose Manifest.db body is unparseable", async () => {
+    // Restores the guarantee originally covered by the M1 header-only
+    // placeholder fixture: detection checks only the 16-byte SQLite magic and
+    // never parses Manifest.db rows, so a corrupt body must not fail detect.
+    const root = new SyntheticReadonlyDirectory(
+      iosMiniBackupDevice.udid,
+      backupFiles({
+        "Manifest.plist": file("Manifest.plist", iosMiniBackupManifestPlist()),
+        "Manifest.db": file(
+          "Manifest.db",
+          sqliteHeaderThenGarbage(256 * 1024),
+        ),
+      }),
+    );
+
+    const result = await detectIosBackup(root);
+
+    expect(result).toEqual({
+      provider: "ios-itunes",
+      sourceKind: "itunes-finder",
+      id: iosMiniBackupDevice.udid,
+      friendlyName: iosMiniBackupDevice.displayName,
+      sourceFolderName: iosMiniBackupDevice.udid,
+      isEncrypted: false,
+      deviceInfo: {
+        udid: iosMiniBackupDevice.udid,
+        name: iosMiniBackupDevice.deviceName,
+        model: iosMiniBackupDevice.productType,
+        osVersion: iosMiniBackupDevice.productVersion,
+        serialNumber: iosMiniBackupDevice.serialNumber,
+        phoneNumber: iosMiniBackupDevice.phoneNumber,
+      },
+      lastBackupDate: "2026-07-01T12:34:56.000Z",
+      backupFormatVersion: "10.0",
+      backupDate: new Date(
+        iosMiniBackupExpectedMetadata.backupDate,
+      ).toISOString(),
     });
   });
 
@@ -263,6 +329,27 @@ function file(name: string, content: string | Uint8Array): File {
   }
 
   return new File([copyToArrayBuffer(content)], name);
+}
+
+function garbageBytes(byteLength: number): Uint8Array {
+  const bytes = new Uint8Array(byteLength);
+
+  // Deterministic non-SQLite noise (byte 0 is 0x07, so no SQLite magic).
+  for (let index = 0; index < byteLength; index += 1) {
+    bytes[index] = (index * 31 + 7) & 0xff;
+  }
+
+  return bytes;
+}
+
+function sqliteHeaderThenGarbage(byteLength: number): Uint8Array {
+  const bytes = garbageBytes(byteLength);
+  const header = new TextEncoder().encode("SQLite format 3");
+
+  bytes.set(header, 0);
+  bytes[15] = 0; // NUL terminator completes the 16-byte SQLite magic.
+
+  return bytes;
 }
 
 function oversizedFile(name: string, size: number): File {

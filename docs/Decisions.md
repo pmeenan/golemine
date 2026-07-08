@@ -255,3 +255,76 @@ without those headers (D-008).
 
 Rationale: this follows the package's Vite guidance for wasm asset resolution while
 preserving Golemine's static-hosting constraint and no-`SharedArrayBuffer` posture.
+
+## D-021 — Apply iOS source SQLite WAL frames before opening transient DBs (2026-07-08)
+
+Unencrypted iOS ingest needs the current contents of source SQLite files such as
+`Library/SMS/sms.db`, including committed transactions still present in `sms.db-wal`.
+The iTunes/Finder backup stores those files under Manifest file IDs, not adjacent
+runtime filenames, and sqlite-wasm's transient POSIX VFS did not reliably replay copied
+sidecar files as a normal filesystem pair.
+
+Decision: the backup-worker reads the main database and optional WAL sidecar through the
+read-only Manifest lookup, validates the WAL magic/version/page size/salts, verifies the
+SQLite rolling header/frame checksums, bounds the committed database size from the main
+file plus frame count, applies only frames up to the last commit frame to a copy of the
+main database bytes, resets the reconstructed copy to rollback journal mode in the
+database header, and then opens that transient copy read-only with sqlite-wasm. Source
+bytes and source hashes are still preserved for provenance, and the user's backup folder
+is never modified.
+
+Rationale: this keeps provider-specific SQLite recovery inside backup-worker, avoids
+COOP/COEP or host filesystem assumptions, handles in-backup WAL sidecars deterministically,
+and remains compatible with the future encrypted path, which can feed decrypted main/WAL
+bytes into the same reconstruction helper.
+
+## D-022 — M2 ingest hardening after adversarial review (2026-07-08)
+
+Supersedes the strict WAL-frame portions of D-021. The WAL reader still rejects invalid
+headers and impossible committed database sizes, but frame validation now follows
+SQLite end-of-log behavior: apply the valid frame prefix, stop at the first invalid
+frame checksum/salt/page number or torn tail, and ignore stale bytes after that point.
+This handles checkpoint-reset WALs and copied sidecars with leftover frames without
+dropping a valid committed prefix.
+
+M2 ingest also avoids eager full-media reads. Attachment metadata is normalized for
+all rows, but source SHA-256 is computed during ingest only when Manifest.db gives a
+bounded size at or below 64 MiB, the actual `File.size` is within the read limit, and
+the per-ingest eager attachment-hash budget has not been exhausted. Larger,
+unknown-size, deceptive-size, or budget-exhausted attachments keep path/domain/GUID
+provenance and emit a warning that source hashing is deferred to later
+attachment/report extraction. Manifest.db lookup failures for individual attachments
+are skip-and-report, not whole-ingest failures, and root `Manifest.db-wal`/`-shm`
+sidecars are applied before querying Manifest records.
+
+Production unencrypted ingest uses `BackupWorkerApi.ingestUnencryptedBackupToDb`,
+where backup-worker creates a dedicated db-worker and streams batches directly to it.
+The older sink-taking RPC remains as a test seam, but the React route no longer relays
+backup-worker -> UI -> db-worker ingest batches. The route guards same-backup rebuilds
+with Web Locks, marks recents `failed` only after the derived DB has actually been
+prepared or db-worker reports a prepare/write/finalize failure, and recovers stale
+persisted `ingesting` statuses as `needs-reingest` on read.
+
+Rationale: real backups contain stale WAL tails, huge media attachments, malformed
+per-file metadata, and users can open multiple tabs. These changes preserve the
+offline/read-only/provenance posture while keeping the UI thread out of ingest data
+transport and preventing transient pre-ingest failures from hiding a valid existing
+derived database.
+
+## D-023 — ingest_meta stores summary_json as the single machine-read record (2026-07-08)
+
+The M2 cleanup pass removed the duplicated `counts_json`/`source_files_json`/
+`warnings_json`/`count.*` rows from `ingest_meta`. `summary_json` is now the only
+machine-read representation of an ingest (read back by the db-worker summary API);
+the remaining scalar rows (`provider`, `started_at`, `completed_at`, `database_name`,
+`derived_db_version`) exist purely as debugging aids for inspecting a derived DB
+directly. Stored-summary validation is a shallow, provider-agnostic structural check —
+no deep per-field guards or provider/role enumerations. A structurally-valid summary
+written under a different `derivedDbVersion` is treated as absent (falling back to the
+re-ingest path), not as malformed; only structural garbage raises `db_ingest_failed`.
+
+Rationale: duplicated rows only stay correct if every writer keeps them in sync with
+`summary_json`; a single canonical JSON blob removes that drift risk while keeping
+quick manual SQLite inspection possible. Deep validation of the stored summary is
+unnecessary because any change to the summary shape ships with a `derivedDbVersion`
+bump, which already forces re-ingest.

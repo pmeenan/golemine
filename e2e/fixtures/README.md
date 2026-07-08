@@ -16,7 +16,9 @@ reason before they are added.
 
 Current generated fixtures:
 
-- `generated/ios-mini-backup/00008030-001C195E0A88802E/` — minimal synthetic
-  iPhone Finder/iTunes backup root for M1 open and detection flows. It contains only
-  synthetic plist metadata and tiny placeholder database files; M1 validates metadata
-  but does not parse messages.
+- `generated/ios-mini-backup/00008030-001C195E0A88802E/` — synthetic unencrypted
+  iPhone Finder/iTunes backup root for M1 open/detection flows and M2 ingest
+  fixtures. It contains real generated Manifest/sms/contact SQLite databases with
+  synthetic messages, contacts, one attachment, real sms/contact WAL sidecars, a
+  WAL-only message/contact, one tapback reaction, a prefixed valid contact thumbnail,
+  and one malformed avatar blob for skip-and-report coverage.

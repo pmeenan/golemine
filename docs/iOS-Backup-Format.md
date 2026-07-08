@@ -53,6 +53,8 @@ Files(fileID TEXT PRIMARY KEY, domain TEXT, relativePath TEXT, flags INT, file B
 `file` is a binary plist (NSKeyedArchiver) holding an `MBFile` record: `Size`, `Mode`,
 `ProtectionClass`, `LastModified`, and — in encrypted backups — `EncryptionKey`
 (NSMutableData: 4-byte protection class LE + 40-byte AES-wrapped per-file key).
+If root `Manifest.db-wal`/`Manifest.db-shm` sidecars exist, apply the WAL before
+querying `Files`; uncheckpointed Manifest rows can otherwise hide source files.
 
 ## 2. Key files for our features
 
@@ -63,10 +65,13 @@ Files(fileID TEXT PRIMARY KEY, domain TEXT, relativePath TEXT, flags INT, file B
 | Contacts DB | `HomeDomain` | `Library/AddressBook/AddressBook.sqlitedb` | `31bb7ba8914766d4ba40d6dfb6113c8b614be442` |
 | Contact images | `HomeDomain` | `Library/AddressBook/AddressBookImages.sqlitedb` | `cd6702cea29fe89cf280a76794405adb17f9a0ee` |
 
-Attachment paths inside `sms.db` look like `~/Library/SMS/Attachments/ab/11/<GUID>/file.heic`;
-map to the backup by stripping `~/` → relativePath under `MediaDomain`, then hashing to
-a fileID and looking it up in `Manifest.db` (don't recompute blindly — look up the path
-in `Files` to be safe about edge cases).
+Attachment paths inside `sms.db` usually look like
+`~/Library/SMS/Attachments/ab/11/<GUID>/file.heic`, but real rows may also carry
+absolute device paths such as `/var/mobile/Library/SMS/Attachments/...` or
+`/private/var/mobile/Library/SMS/Attachments/...`. Normalize by extracting the
+`Library/SMS/Attachments/` suffix as the `MediaDomain` relativePath, then look that
+path up in Manifest.db (don't recompute blindly — look up the path in `Files` to be
+safe about edge cases).
 
 Contact avatars in `AddressBookImages.sqlitedb`: `ABThumbnailImage` (and
 `ABFullSizeImage`) rows join to contacts via `record_id` = `ABPerson.ROWID` in
@@ -120,11 +125,13 @@ row; it may carry attachments or be an app/balloon message).
 
 ### Tapbacks / reactions
 
-Rows with `associated_message_type` 2000–2005 (add: loved/liked/disliked/laughed/
-emphasized/questioned) and 3000–3005 (remove). `associated_message_guid` is
-`p:<part>/<target GUID>` or `bp:<target GUID>`. Fold these onto their target message;
-never render them as timeline rows. iOS 17.4+ also has emoji "stickers" reactions
-(`associated_message_type` 2006 area + sticker attachments) — handle gracefully.
+Rows with `associated_message_type` in 2000–2999 are reaction adds (2000–2005 are the
+classic tapbacks: loved/liked/disliked/laughed/emphasized/questioned; iOS 17-era
+custom/emoji reactions land above that). Treat the ranges as open-ended: fold any
+unmapped add as a reaction of kind `unknown` — never drop it. 3000–3999 are removals:
+divert them from the message timeline and do not emit a reaction for them.
+`associated_message_guid` is `p:<part>/<target GUID>` or `bp:<target GUID>`. Fold these
+onto their target message; never render them as timeline rows.
 
 ### Group chats & system events
 
@@ -191,7 +198,11 @@ password.
 - Feature-test columns per iOS version; never assume schema.
 - `sms.db` may have WAL sidecars in the backup (`sms.db-wal`, `sms.db-shm` as separate
   backup files) — locate and apply them, or messages written since the last checkpoint
-  are silently missing. Same for other DBs.
+  are silently missing. Same for other DBs. When reconstructing a source DB from bytes,
+  scan the WAL like SQLite: apply committed frames from the valid prefix, stop at the
+  first invalid/stale/torn frame, and ignore frames after the last valid commit (D-022).
+  Frames after that point can be uncommitted or stale and must not enter normalized
+  output.
 - Deleted messages may linger in DB free pages; recovery is out of scope for now
   (documented as a future forensic feature — do not accidentally surface half-parsed
   deleted content as real messages).

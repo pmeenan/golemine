@@ -35,7 +35,8 @@ offline after the first load.
 
 ## Status
 
-M1 is complete. The repo contains the strict Vite/React/TypeScript app shell,
+M2 is complete for unencrypted iPhone backups. The repo contains the strict
+Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
 guardrails, and the first usable opening flow.
@@ -47,7 +48,17 @@ directory permission on reopen, and wipes OPFS derived data when a recent backup
 removed. The db-worker sqlite-wasm OPFS smoke path runs in dev and production builds
 with sqlite-wasm excluded from Vite dependency optimization so its wasm asset resolves
 correctly. A generated synthetic mini-backup fixture covers the open -> detect ->
-recents flow in Playwright. M2 begins the unencrypted ingest pipeline.
+recents flow in Playwright and now carries real unencrypted Manifest/sms/contact
+SQLite data. The unencrypted M2 ingest path reads Manifest.db, applies committed WAL
+frames to source SQLite copies, normalizes iPhone Messages, contacts, tapbacks,
+attachments, and contact thumbnails, then writes a rebuildable OPFS derived database
+with FTS, avatar paths, counts, warnings, and source-file provenance. The backup
+overview can run and rebuild ingest; M3 adds the thread browser and search UI on top of
+that database.
+The M2 path is hardened for real-world backup quirks: stale/torn SQLite WAL tails are
+handled like SQLite end-of-log, large attachment media is not eagerly read just to hash
+it, ingest batches flow worker-to-worker without a UI relay, and interrupted rebuilds
+recover as needing re-ingest.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

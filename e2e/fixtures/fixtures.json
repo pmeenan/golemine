@@ -10,7 +10,7 @@
       "id": "ios-mini-backup",
       "provider": "ios-itunes",
       "path": "generated/ios-mini-backup/00008030-001C195E0A88802E",
-      "description": "Minimal synthetic iPhone Finder/iTunes backup root for M1 open and detection flows.",
+      "description": "Synthetic unencrypted iPhone Finder/iTunes backup root for M1 open/detection flows and M2 ingest fixtures.",
       "device": {
         "displayName": "Mina's iPhone backup",
         "deviceName": "Mina's iPhone",
@@ -21,9 +21,10 @@
         "phoneNumber": "+15555550123"
       },
       "provenance": [
-        "Generated from static synthetic metadata in generate-fixtures.mjs.",
+        "Generated from static synthetic device, message, contact, and file metadata in ios-mini-backup.mjs plus deterministic sqlite-wasm database builders in generate-fixtures.mjs.",
         "Contains no real personal data and no copied backup content.",
-        "Manifest.db carries a SQLite header plus synthetic placeholder bytes because M1 validates metadata but does not read Manifest.db rows."
+        "Manifest.db is a real SQLite database with Files rows for sms.db, sms.db-wal, AddressBook.sqlitedb, AddressBook.sqlitedb-wal, AddressBookImages.sqlitedb, and one MediaDomain attachment path.",
+        "sms.db, AddressBook.sqlitedb, and AddressBookImages.sqlitedb are real SQLite databases containing synthetic M2 ingest data, including typedstream message text, WAL-only rows, a tapback reaction row, attachment metadata, contact handles, a prefixed thumbnail blob for image magic sniffing, and a malformed avatar blob for warning coverage."
       ]
     }
   ]

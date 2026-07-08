@@ -62,6 +62,10 @@ export interface BackupRecentsStore {
     directoryHandle: FileSystemDirectoryHandle,
     options?: RecordDetectionOptions,
   ): Promise<RecentBackupRecord>;
+  updateIngestStatus(
+    id: string,
+    ingestStatus: RecentBackupIngestStatus,
+  ): Promise<RecentBackupRecord>;
   rename(id: string, friendlyName: string): Promise<RecentBackupRecord>;
   remove(id: string): Promise<void>;
 }
@@ -102,8 +106,13 @@ export function createBackupRecentsStore(
   const derivedDataStorage = options.derivedDataStorage ?? createOpfsDerivedDataStorage();
 
   return {
-    list: async () => sortRecentBackups(await persistence.list()),
-    get: (id) => persistence.get(normalizeRecentBackupId(id)),
+    list: async () =>
+      sortRecentBackups((await persistence.list()).map(recoverInterruptedIngest)),
+    get: async (id) => {
+      const record = await persistence.get(normalizeRecentBackupId(id));
+
+      return record === undefined ? undefined : recoverInterruptedIngest(record);
+    },
     // Detection writes go through recordDetection only — a raw upsert would
     // bypass the rename/ingest-status preservation and staleness handling.
     recordDetection: async (detection, directoryHandle, options = {}) => {
@@ -169,6 +178,27 @@ export function createBackupRecentsStore(
       }
 
       return record;
+    },
+    updateIngestStatus: async (id, ingestStatus) => {
+      const normalizedId = normalizeRecentBackupId(id);
+      const existing = await persistence.get(normalizedId);
+
+      if (existing === undefined) {
+        throw new RecentBackupStoreError(
+          `Cannot update ingest status for missing recent backup "${normalizedId}".`,
+        );
+      }
+
+      const updated: RecentBackupRecord = {
+        ...existing,
+        ingestStatus,
+        derivedDbVersion:
+          ingestStatus === "ingested" ? derivedDbVersion : existing.derivedDbVersion,
+      };
+
+      await persistence.put(updated);
+
+      return updated;
     },
     rename: async (id, friendlyName) => {
       const normalizedId = normalizeRecentBackupId(id);
@@ -385,7 +415,17 @@ function reconcileIngestStatus(
     return "needs-reingest";
   }
 
+  if (existing.ingestStatus === "ingesting") {
+    return "needs-reingest";
+  }
+
   return existing.ingestStatus;
+}
+
+function recoverInterruptedIngest(record: RecentBackupRecord): RecentBackupRecord {
+  return record.ingestStatus === "ingesting"
+    ? { ...record, ingestStatus: "needs-reingest" }
+    : record;
 }
 
 let recentsDatabasePromise: Promise<IDBDatabase> | undefined;
@@ -532,13 +572,22 @@ async function removeDerivedDataDirectories(
   directoryNames: readonly string[],
 ): Promise<void> {
   for (const directoryName of directoryNames) {
-    try {
-      await parent.removeEntry(directoryName, { recursive: true });
-    } catch (cause) {
-      if (isNotFoundError(cause)) {
-        continue;
-      }
+    await removeEntryIfFound(parent, directoryName);
+  }
+}
 
+/**
+ * Removes a directory entry recursively, tolerating entries that do not
+ * exist. Shared by recents wipe-on-remove and db-worker derived-data resets.
+ */
+export async function removeEntryIfFound(
+  directory: Pick<OpfsDirectoryHandle, "removeEntry">,
+  name: string,
+): Promise<void> {
+  try {
+    await directory.removeEntry(name, { recursive: true });
+  } catch (cause) {
+    if (!isNotFoundError(cause)) {
       throw cause;
     }
   }
@@ -585,7 +634,7 @@ function parseRecentBackupRecord(value: unknown): RecentBackupRecord {
     deviceInfo,
     isEncrypted,
     lastOpened,
-    ingestStatus,
+    ingestStatus: ingestStatus === "ingesting" ? "needs-reingest" : ingestStatus,
     derivedDbVersion: recordDerivedDbVersion,
   };
 }
@@ -801,7 +850,7 @@ function uniqueNonEmptyStrings(values: readonly (string | undefined)[]): readonl
   return result;
 }
 
-function isNotFoundError(cause: unknown): boolean {
+export function isNotFoundError(cause: unknown): boolean {
   if (!isObjectRecord(cause)) {
     return false;
   }

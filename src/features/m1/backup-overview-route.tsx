@@ -12,7 +12,29 @@ import {
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { appVersion, derivedDbVersion } from "../../lib/constants";
-import { createBackupRecentsStore, type RecentBackupRecord } from "../../lib/recents";
+import {
+  createBackupRecentsStore,
+  ensureRecentBackupDirectoryPermission,
+  type RecentBackupIngestStatus,
+  type RecentBackupRecord,
+} from "../../lib/recents";
+import {
+  createBackupWorkerClient,
+  createDbWorkerClient,
+  proxiedWorkerProgress,
+} from "../../lib/worker-client";
+import {
+  formatWorkerErrorPayload,
+  type BackupIngestRequest,
+  type DbIngestSummary,
+  type WorkerProgressEvent,
+} from "../../lib/worker-types";
+
+type IngestUiStatus =
+  | { kind: "idle" }
+  | { kind: "running"; label: string }
+  | { kind: "success"; label: string }
+  | { kind: "error"; label: string };
 
 export function BackupOverviewRoute() {
   // react-router already percent-decodes route params; decoding again would
@@ -23,6 +45,8 @@ export function BackupOverviewRoute() {
   const [record, setRecord] = useState<RecentBackupRecord | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [ingestStatus, setIngestStatus] = useState<IngestUiStatus>({ kind: "idle" });
+  const [summary, setSummary] = useState<DbIngestSummary | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -54,6 +78,37 @@ export function BackupOverviewRoute() {
       active = false;
     };
   }, [decodedId, recentsStore]);
+
+  useEffect(() => {
+    if (record?.ingestStatus !== "ingested") {
+      setSummary(null);
+      return;
+    }
+
+    const active = { current: true };
+    const client = createDbWorkerClient();
+
+    void (async () => {
+      try {
+        const result = await client.api.getIngestSummary(record.id);
+
+        if (!active.current) {
+          return;
+        }
+
+        if (result.ok) {
+          setSummary(result.value ?? null);
+        }
+      } finally {
+        client.release();
+      }
+    })();
+
+    return () => {
+      active.current = false;
+      client.release();
+    };
+  }, [record]);
 
   if (isLoading) {
     return (
@@ -110,6 +165,154 @@ export function BackupOverviewRoute() {
   }
 
   const detailRows = buildDeviceRows(record);
+  const startIngest = async () => {
+    // startIngest is void-invoked from the click handler, so nothing may
+    // escape it: even a rejection from navigator.locks.request itself (for
+    // example when the document is not fully active) must surface in the UI
+    // instead of becoming an unhandled rejection.
+    try {
+      await runWithOptionalIngestLock(
+        `golemine-ingest:${record.id}`,
+        async () => {
+          await runIngest();
+        },
+        () => {
+          setIngestStatus({
+            kind: "error",
+            label: "Another tab is already rebuilding this backup.",
+          });
+        },
+      );
+    } catch (cause) {
+      setIngestStatus({
+        kind: "error",
+        label: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  };
+  const runIngest = async () => {
+    if (record.isEncrypted) {
+      setIngestStatus({
+        kind: "error",
+        label: "Encrypted backup ingest arrives in M4. Open an unencrypted backup for M2 ingest.",
+      });
+      return;
+    }
+
+    const didPrepareDerivedDb = { current: false };
+
+    const updateStoredIngestStatus = async (
+      status: RecentBackupIngestStatus,
+    ): Promise<RecentBackupRecord | undefined> => {
+      try {
+        const updated = await recentsStore.updateIngestStatus(record.id, status);
+
+        setRecord(updated);
+
+        return updated;
+      } catch (cause) {
+        console.warn(`Could not update recent backup ingest status to ${status}.`, cause);
+
+        return undefined;
+      }
+    };
+    const markPrepared = async () => {
+      if (didPrepareDerivedDb.current) {
+        return;
+      }
+
+      didPrepareDerivedDb.current = true;
+      await updateStoredIngestStatus("ingesting");
+    };
+
+    setIngestStatus({
+      kind: "running",
+      label: "Requesting read permission for this backup.",
+    });
+
+    try {
+      const permission = await ensureRecentBackupDirectoryPermission(record, {
+        request: true,
+      });
+
+      if (permission !== "granted") {
+        setIngestStatus({
+          kind: "error",
+          label: `Chrome did not grant read access to ${record.friendlyName}.`,
+        });
+        return;
+      }
+
+      await navigator.storage.persist();
+      const backupClient = createBackupWorkerClient();
+
+      try {
+        const request = buildIngestRequest(record);
+        const result = await backupClient.api.ingestUnencryptedBackupToDb(
+          record.directoryHandle,
+          request,
+          proxiedWorkerProgress(async (progress: WorkerProgressEvent) => {
+            // Any phase past "starting" (beginning with "prepare", which the
+            // worker awaits before the destructive prepareIngest call) means
+            // the derived database is about to be, or has been, rebuilt.
+            if (progress.phase !== "starting") {
+              await markPrepared();
+            }
+
+            setIngestStatus({ kind: "running", label: progress.label });
+          }),
+        );
+
+        if (!result.ok) {
+          if (didPrepareDerivedDb.current) {
+            await updateStoredIngestStatus("failed");
+          }
+
+          setIngestStatus({
+            kind: "error",
+            label: formatWorkerErrorPayload(result.error),
+          });
+          return;
+        }
+
+        // updateStoredIngestStatus already calls setRecord; the [record]
+        // effect owns summary fetching and refetches it when the record
+        // flips to "ingested". The success label sources its counts from
+        // the ingest result, so no manual summary fetch is needed here.
+        const ingested = await updateStoredIngestStatus("ingested");
+
+        if (ingested === undefined) {
+          // The IndexedDB write failed (already logged and reflected in the
+          // degraded success label below), but the ingest itself succeeded.
+          // Update the in-memory record so this session's UI matches reality:
+          // the button re-enables and the [record] effect fetches the summary.
+          // A reload re-reads the stored (stale) status, which is recoverable.
+          setRecord({ ...record, ingestStatus: "ingested", derivedDbVersion });
+        }
+
+        setIngestStatus({
+          kind: "success",
+          label:
+            ingested === undefined
+              ? `Extracted ${result.value.counts.messages.toLocaleString()} messages from ${result.value.counts.conversations.toLocaleString()} conversations, but the recent-backup metadata could not be updated.`
+              : `Extracted ${result.value.counts.messages.toLocaleString()} messages from ${result.value.counts.conversations.toLocaleString()} conversations.`,
+        });
+      } finally {
+        backupClient.release();
+      }
+    } catch (cause) {
+      if (didPrepareDerivedDb.current) {
+        await updateStoredIngestStatus("failed");
+      }
+
+      setIngestStatus({
+        kind: "error",
+        label: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  };
+  const isIngestRunning =
+    ingestStatus.kind === "running" || record.ingestStatus === "ingesting";
 
   return (
     <PageShell
@@ -123,7 +326,7 @@ export function BackupOverviewRoute() {
           </Badge>
         </>
       }
-      description="The backup was recognized from local iPhone backup metadata. Ingest is the next milestone."
+      description="The backup was recognized from local iPhone backup metadata. Run ingest to build or refresh the local message database."
       eyebrow="Backup overview"
       title={record.friendlyName}
     >
@@ -143,8 +346,8 @@ export function BackupOverviewRoute() {
 
         <Panel>
           <PanelHeader
-            badge={<Badge variant="info">M2</Badge>}
-            description="Message extraction is intentionally disabled until ingest lands."
+            badge={<Badge variant={record.ingestStatus === "ingested" ? "success" : "info"}>M2</Badge>}
+            description="Unencrypted message extraction rebuilds the derived OPFS database from source."
             title="Ingest"
           />
           <div className="mt-4 rounded-md border border-border bg-surface-sunken p-3">
@@ -160,9 +363,32 @@ export function BackupOverviewRoute() {
               </div>
             </div>
           </div>
-          <Button className="mt-4 w-full" disabled size="lg" type="button" variant="primary">
-            Ingest messages
+          {summary ? (
+            <dl className="mt-3 grid grid-cols-2 gap-2">
+              <MetadataRow label="Messages" value={String(summary.counts.messages)} />
+              <MetadataRow label="Conversations" value={String(summary.counts.conversations)} />
+              <MetadataRow label="Attachments" value={String(summary.counts.attachments)} />
+              <MetadataRow label="Warnings" value={String(summary.counts.warnings)} />
+            </dl>
+          ) : null}
+          <IngestStatusMessage status={ingestStatus} />
+          <Button
+            className="mt-4 w-full"
+            disabled={record.isEncrypted || isIngestRunning}
+            onClick={() => {
+              void startIngest();
+            }}
+            size="lg"
+            type="button"
+            variant="primary"
+          >
+            {record.ingestStatus === "ingested" ? "Rebuild messages" : "Ingest messages"}
           </Button>
+          {record.isEncrypted ? (
+            <p className="mt-2 text-caption text-text-secondary">
+              Encrypted backup ingest is scheduled for M4.
+            </p>
+          ) : null}
         </Panel>
       </div>
 
@@ -187,6 +413,79 @@ export function BackupOverviewRoute() {
         />
       </div>
     </PageShell>
+  );
+}
+
+function buildIngestRequest(record: RecentBackupRecord): BackupIngestRequest {
+  return {
+    backupId: record.id,
+    provider: "ios-itunes",
+    sourceKind: "itunes-finder",
+    sourceFolderName: record.directoryHandle.name,
+    friendlyName: record.friendlyName,
+    deviceInfo: {
+      udid: record.deviceInfo.udid ?? record.id,
+      ...(record.deviceInfo.name === undefined ? {} : { name: record.deviceInfo.name }),
+      ...(record.deviceInfo.model === undefined ? {} : { model: record.deviceInfo.model }),
+      ...(record.deviceInfo.osVersion === undefined
+        ? {}
+        : { osVersion: record.deviceInfo.osVersion }),
+      ...(record.deviceInfo.serialNumber === undefined
+        ? {}
+        : { serialNumber: record.deviceInfo.serialNumber }),
+      ...(record.deviceInfo.phoneNumber === undefined
+        ? {}
+        : { phoneNumber: record.deviceInfo.phoneNumber }),
+    },
+    isEncrypted: record.isEncrypted,
+    derivedDbVersion,
+  };
+}
+
+async function runWithOptionalIngestLock(
+  lockName: string,
+  operation: () => Promise<void>,
+  onUnavailable: () => void,
+): Promise<void> {
+  const locks = getBrowserLocks();
+
+  if (locks === undefined) {
+    await operation();
+    return;
+  }
+
+  await locks.request(lockName, { ifAvailable: true }, async (lock) => {
+    if (lock === null) {
+      onUnavailable();
+      return;
+    }
+
+    await operation();
+  });
+}
+
+function getBrowserLocks(): LockManager | undefined {
+  return "locks" in navigator ? navigator.locks : undefined;
+}
+
+function IngestStatusMessage({ status }: { status: IngestUiStatus }) {
+  if (status.kind === "idle") {
+    return null;
+  }
+
+  return (
+    <p
+      className={
+        status.kind === "error"
+          ? "mt-3 rounded-md border border-danger bg-danger-subtle px-3 py-2 text-caption text-danger"
+          : status.kind === "success"
+            ? "mt-3 rounded-md bg-[var(--success-subtle)] px-3 py-2 text-caption text-[var(--success-foreground)]"
+            : "mt-3 rounded-md bg-[var(--info-subtle)] px-3 py-2 text-caption text-[var(--info-foreground)]"
+      }
+      role={status.kind === "error" ? "alert" : "status"}
+    >
+      {status.label}
+    </p>
   );
 }
 
@@ -220,4 +519,3 @@ function formatIngestStatus(status: RecentBackupRecord["ingestStatus"]): string 
       return "Failed";
   }
 }
-
