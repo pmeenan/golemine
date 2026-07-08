@@ -162,10 +162,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
 - M2 db-worker derived schema and ingest sink live in `src/workers/db/schema.ts` and
   `src/workers/db/ingest-sink.ts`. `prepareIngest` recreates the schema for
   `golemine.sqlite` in the per-backup OPFS `opfs-sahpool` directory under
-  `golemine/backups/<UDID-or-id>/sqlite-sahpool`. `writeIngestBatch` writes
-  normalized batches (and FTS trigger population) through a generic per-entity
-  upsert spec table (`upsertMany` + `entityBatchWriters`) — extend the spec table
-  rather than adding hand-written insert functions. `finalizeIngest` stores
+  `golemine/backups/<UDID-or-id>/sqlite-sahpool`; that pool intentionally reserves a
+  16-slot minimum because stale journal/temp files from interrupted real-backup
+  rebuilds can otherwise surface as `SQLITE_CANTOPEN` during prepare (D-024). Keep
+  derived DB open errors reporting pool details. `writeIngestBatch` writes normalized
+  batches (and FTS trigger population) through a generic per-entity upsert spec table
+  (`upsertMany` + `entityBatchWriters`) — extend the spec table rather than adding
+  hand-written insert functions. `finalizeIngest` stores
   `summary_json` (the only machine-read representation, D-023) plus scalar
   debugging rows (provider, started_at, completed_at, database_name,
   derived_db_version) in `ingest_meta`. Stored-summary validation is a shallow
@@ -178,7 +181,8 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `src/workers/shared/sqlite-init.ts` (single memoized `getSqlite()` used by
   source-sqlite, ingest-sink, sqlite-smoke, and tests), `src/workers/shared/binary.ts`
   (`stringFromCodeUnits`, `bytesStartWith` — the single byte-prefix/chunked-string
-  helpers), `src/workers/shared/progress.ts` (`emitWorkerProgress`),
+  helpers), `src/workers/shared/progress.ts` (`emitWorkerProgress`,
+  `createThrottledWorkerProgress` for counted long-loop updates about every 500 ms),
   `src/workers/backup/apple-time.ts` (single Apple epoch constant), and
   `src/lib/worker-names.ts` (worker name constants; the db-worker nested inside
   backup.worker is named `golemine-db-worker-nested`). Worker options objects must
@@ -204,13 +208,23 @@ metal and the ore it surfaces; no clay/terracotta styling).
   folded as `unknown`, 3000–3999 = removals diverted from messages; undecodable
   `attributedBody` with empty `text` emits a `message-body-undecodable` warning, and
   contact resolution runs once per handle during participant building), and streams
-  batches to the db-worker sink. `src/workers/backup/source-sqlite.ts` applies committed SQLite WAL frames to a
+  batches to the db-worker sink. Long counted loops in normalization and aggregate
+  writes should use `createThrottledWorkerProgress`; the overview displays item counts
+  only for large totals so phase progress stays compact. The backup overview's
+  read-only summary db-worker is released synchronously when a rebuild starts (through
+  a release ref, not just React effect-cleanup timing) and stays released while ingest
+  runs so rebuilds cannot contend with prepare for the same per-backup SAH pool
+  (D-024). `src/workers/backup/source-sqlite.ts` applies committed SQLite WAL frames to a
   copy of source bytes before opening a transient read-only DB (D-021, D-022); it
   rejects invalid WAL headers/impossible committed sizes, but for frames it follows
   SQLite end-of-log behavior: apply the valid committed prefix and stop at the first
-  invalid/stale/torn frame. Do not try to make sqlite-wasm open Manifest-file-ID
-  sidecars directly. Timestamp normalization must accept sqlite bigint values for Apple
-  nanosecond epochs and omit out-of-range dates instead of throwing. Attachment source
+  invalid/stale/torn frame. It always forces copied source DB header bytes 18/19 to
+  rollback-journal mode before the read-only transient sqlite-wasm open, including
+  no-sidecar and no-committed-frame cases; otherwise sqlite may try to open missing
+  transient sidecars and throw `SQLITE_CANTOPEN` (D-025). Do not try to make
+  sqlite-wasm open Manifest-file-ID sidecars directly. Timestamp normalization must
+  accept sqlite bigint values for Apple nanosecond epochs and omit out-of-range dates
+  instead of throwing. Attachment source
   hashing during ingest is bounded to Manifest-known files at or below 64 MiB, guarded
   by actual `File.size`, and capped by a per-ingest eager hash budget; larger,
   unknown-size, deceptive-size, or budget-exhausted media keeps path/domain/GUID

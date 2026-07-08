@@ -1,5 +1,5 @@
 import { Database, FileText, MessageSquareText, Search } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import {
@@ -47,6 +47,13 @@ export function BackupOverviewRoute() {
   const [error, setError] = useState<string | null>(null);
   const [ingestStatus, setIngestStatus] = useState<IngestUiStatus>({ kind: "idle" });
   const [summary, setSummary] = useState<DbIngestSummary | null>(null);
+  // Lets startIngest release the read-only summary db-worker synchronously,
+  // before ingest can reach prepareIngest, instead of relying on React to
+  // commit the "running" state and run the summary effect cleanup in time
+  // (the two workers must not contend for the same per-backup SAH pool,
+  // D-024). release() is idempotent, so the effect cleanup staying in place
+  // is safe.
+  const summaryReaderRelease = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -80,13 +87,14 @@ export function BackupOverviewRoute() {
   }, [decodedId, recentsStore]);
 
   useEffect(() => {
-    if (record?.ingestStatus !== "ingested") {
+    if (record?.ingestStatus !== "ingested" || ingestStatus.kind === "running") {
       setSummary(null);
       return;
     }
 
     const active = { current: true };
     const client = createDbWorkerClient();
+    summaryReaderRelease.current = client.release;
 
     void (async () => {
       try {
@@ -107,8 +115,9 @@ export function BackupOverviewRoute() {
     return () => {
       active.current = false;
       client.release();
+      summaryReaderRelease.current = null;
     };
-  }, [record]);
+  }, [record, ingestStatus.kind]);
 
   if (isLoading) {
     return (
@@ -229,6 +238,9 @@ export function BackupOverviewRoute() {
       kind: "running",
       label: "Requesting read permission for this backup.",
     });
+    setSummary(null);
+    summaryReaderRelease.current?.();
+    summaryReaderRelease.current = null;
 
     try {
       const permission = await ensureRecentBackupDirectoryPermission(record, {
@@ -259,7 +271,10 @@ export function BackupOverviewRoute() {
               await markPrepared();
             }
 
-            setIngestStatus({ kind: "running", label: progress.label });
+            setIngestStatus({
+              kind: "running",
+              label: formatIngestProgressLabel(progress),
+            });
           }),
         );
 
@@ -518,4 +533,16 @@ function formatIngestStatus(status: RecentBackupRecord["ingestStatus"]): string 
     case "failed":
       return "Failed";
   }
+}
+
+function formatIngestProgressLabel(progress: WorkerProgressEvent): string {
+  if (
+    progress.completedUnits === undefined ||
+    progress.totalUnits === undefined ||
+    progress.totalUnits <= 10
+  ) {
+    return progress.label;
+  }
+
+  return `${progress.label} (${progress.completedUnits.toLocaleString()} / ${progress.totalUnits.toLocaleString()})`;
 }

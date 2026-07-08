@@ -1,5 +1,6 @@
 import { bytesStartWith } from "../shared/binary";
 import { getSqlite, type Sqlite3Api } from "../shared/sqlite-init";
+import type { WorkerStructuredValue } from "../../lib/worker-types";
 
 export type SqliteDatabase = InstanceType<Sqlite3Api["oo1"]["DB"]>;
 type SqliteBindValue = string | number | bigint | boolean | null | Uint8Array;
@@ -19,6 +20,17 @@ interface WalFrameScan {
   validCommittedFrameCount: number;
 }
 
+export class SourceSqliteOpenError extends Error {
+  constructor(
+    message: string,
+    readonly details: Record<string, WorkerStructuredValue>,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "SourceSqliteOpenError";
+  }
+}
+
 export async function openSourceSqliteDatabase(input: {
   label: string;
   main: Uint8Array;
@@ -27,15 +39,53 @@ export async function openSourceSqliteDatabase(input: {
 }): Promise<SourceSqliteDatabase> {
   const sqlite3 = await getSqlite();
   const databaseName = makeTransientDatabaseName(input.label);
-  const mainBytes =
-    input.wal === undefined ? input.main : applySqliteWal(input.main, input.wal);
+  const details = sourceOpenDetails(input, databaseName);
 
-  sqlite3.capi.sqlite3_js_posix_create_file(databaseName, mainBytes);
+  let mainBytes: Uint8Array;
+
+  try {
+    mainBytes = prepareSourceSqliteBytesForReadOnlyOpen(input.main, input.wal);
+  } catch (cause) {
+    throw new SourceSqliteOpenError(
+      sourceSqliteOpenErrorMessage(
+        `Could not reconstruct source SQLite database "${input.label}" before opening it.`,
+        cause,
+      ),
+      details,
+      cause,
+    );
+  }
+
+  try {
+    sqlite3.capi.sqlite3_js_posix_create_file(databaseName, mainBytes);
+  } catch (cause) {
+    throw new SourceSqliteOpenError(
+      sourceSqliteOpenErrorMessage(
+        `Could not copy source SQLite database "${input.label}" into the transient sqlite VFS.`,
+        cause,
+      ),
+      details,
+      cause,
+    );
+  }
 
   // Source bytes are copied into sqlite-wasm's transient in-worker VFS first.
   // WAL frames are applied to that copy above; the user's backup folder
   // remains read-only and SQLite opens a normal reconstructed database.
-  const db = new sqlite3.oo1.DB(databaseName, "r");
+  let db: SqliteDatabase;
+
+  try {
+    db = new sqlite3.oo1.DB(databaseName, "r");
+  } catch (cause) {
+    throw new SourceSqliteOpenError(
+      sourceSqliteOpenErrorMessage(
+        `Could not open source SQLite database "${input.label}" from the transient sqlite VFS.`,
+        cause,
+      ),
+      details,
+      cause,
+    );
+  }
 
   return {
     db,
@@ -45,9 +95,19 @@ export async function openSourceSqliteDatabase(input: {
   };
 }
 
+export function prepareSourceSqliteBytesForReadOnlyOpen(
+  main: Uint8Array,
+  wal?: Uint8Array,
+): Uint8Array {
+  const mainBytes =
+    wal === undefined ? copySqliteBytes(main) : applySqliteWal(main, wal);
+
+  return forceRollbackJournalMode(mainBytes);
+}
+
 export function applySqliteWal(main: Uint8Array, wal: Uint8Array): Uint8Array {
   if (wal.byteLength === 0) {
-    return main;
+    return forceRollbackJournalMode(copySqliteBytes(main));
   }
 
   if (wal.byteLength < 32) {
@@ -79,7 +139,7 @@ export function applySqliteWal(main: Uint8Array, wal: Uint8Array): Uint8Array {
   const { lastCommitFrameEnd, lastCommittedPageCount, validCommittedFrameCount } = scan;
 
   if (lastCommittedPageCount === 0) {
-    return main;
+    return forceRollbackJournalMode(copySqliteBytes(main));
   }
 
   const committedByteLength = lastCommittedPageCount * pageSize;
@@ -116,12 +176,7 @@ export function applySqliteWal(main: Uint8Array, wal: Uint8Array): Uint8Array {
     output = output.slice(0, committedByteLength);
   }
 
-  if (output.byteLength >= 20) {
-    output[18] = 1;
-    output[19] = 1;
-  }
-
-  return output;
+  return forceRollbackJournalMode(output);
 }
 
 function scanCommittedWalFrames(
@@ -303,6 +358,44 @@ function makeTransientDatabaseName(label: string): string {
   const safeLabel = label.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 48);
 
   return `/golemine-source-${safeLabel}-${String(databaseCounter)}.sqlite`;
+}
+
+function sourceOpenDetails(
+  input: {
+    label: string;
+    main: Uint8Array;
+    wal?: Uint8Array;
+    shm?: Uint8Array;
+  },
+  databaseName: string,
+): Record<string, WorkerStructuredValue> {
+  return {
+    label: input.label,
+    databaseName,
+    mainByteLength: input.main.byteLength,
+    walByteLength: input.wal?.byteLength ?? null,
+    shmByteLength: input.shm?.byteLength ?? null,
+    mainLooksSqlite: bytesStartWith(input.main, sqliteFormat3Magic),
+    mainWriteVersion: input.main.byteLength > 18 ? input.main[18] : null,
+    mainReadVersion: input.main.byteLength > 19 ? input.main[19] : null,
+  };
+}
+
+function copySqliteBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes);
+}
+
+function forceRollbackJournalMode(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength >= 20 && bytesStartWith(bytes, sqliteFormat3Magic)) {
+    bytes[18] = 1;
+    bytes[19] = 1;
+  }
+
+  return bytes;
+}
+
+function sourceSqliteOpenErrorMessage(message: string, cause: unknown): string {
+  return cause instanceof Error ? `${message} (${cause.message})` : message;
 }
 
 function readWalPageSize(wal: Uint8Array): number | undefined {

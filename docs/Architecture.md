@@ -97,8 +97,10 @@ more than ~16 ms.
   lazy-loaded only when first needed.
 
 Ingest (the one long-running pipeline) flows backup-worker → db-worker directly, with
-progress events surfaced to the UI (phase, counts, ETA). The UI starts and observes
-ingest but does not relay ingest batches. Ingest is resumable/restartable: if
+progress events surfaced to the UI (phase, counts, ETA). Long counted loops use the
+shared throttled progress helper so normalization and aggregate writes can update item
+counts about every 500 ms without spamming Comlink. The UI starts and observes ingest
+but does not relay ingest batches. Ingest is resumable/restartable: if
 interrupted, the derived DB is rebuilt from scratch (source is the source of truth).
 
 ## 4. Storage model
@@ -181,7 +183,10 @@ prepare. Source SQLite WAL files are validated (magic/version/page size/header
 checksum and source-derived size bounds) and reconstructed by applying committed WAL
 frames from the valid WAL prefix to a copy of the main database bytes before opening
 the copy read-only with sqlite-wasm (D-021, superseded by D-022 for stale/torn frame
-handling); the source backup directory is never written.
+handling). Every copied source DB is forced to rollback-journal header bytes before the
+transient read-only open, even when no WAL sidecar exists or no frame commits, so
+sqlite-wasm does not try to open transient sidecars that backup-worker intentionally
+does not create (D-025). The source backup directory is never written.
 
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 
@@ -224,9 +229,13 @@ ingest_meta(key, value)  -- summary_json (machine-read ingest summary) + scalar 
 
 The db-worker ingest sink lives in `src/workers/db/ingest-sink.ts`. `prepareIngest`
 rebuilds the schema for the per-backup derived DB opened through `opfs-sahpool` under
-`golemine/backups/<UDID-or-id>/sqlite-sahpool`; tests inject an in-memory sqlite
-factory so schema and batch writes are validated without OPFS. Batch writes go through
-a generic per-entity upsert spec table rather than per-entity insert functions.
+`golemine/backups/<UDID-or-id>/sqlite-sahpool`. That SAH pool reserves a 16-slot
+minimum because sqlite-wasm persists pool files and interrupted real-world rebuilds can
+leave journal/temp slots behind; the overview route releases its read-only summary
+db-worker synchronously when a rebuild starts and keeps it released while the rebuild
+runs so it cannot contend with `prepareIngest` (D-024). Tests inject an in-memory sqlite factory so schema and batch writes are
+validated without OPFS. Batch writes go through a generic per-entity upsert spec table
+rather than per-entity insert functions.
 `finalizeIngest` stores `summary_json` as the only machine-read ingest record plus
 scalar debugging rows (provider, started_at, completed_at, database_name,
 derived_db_version); stored summaries are validated by a shallow provider-agnostic

@@ -93,6 +93,7 @@ interface IngestMetaEntry {
 
 const sqliteSahPoolDirectoryName = "sqlite-sahpool";
 const sqliteSahPoolVfsPrefix = "golemine-db";
+const sqliteSahPoolMinimumCapacity = 16;
 const sha256HexPattern = /^[a-fA-F0-9]{64}$/u;
 const ingestCountSql = {
   conversations: "SELECT COUNT(*) FROM conversations;",
@@ -136,10 +137,32 @@ export function createOpfsDerivedDatabaseFactory(): DerivedDatabaseFactory {
       });
     }
 
-    const sqlite3 = await getSqlite();
     const backupDirectoryName = getBackupDerivedDataDirectoryName(request);
-    const pool = await getSahPool(sqlite3, backupDirectoryName);
-    const db = new pool.OpfsSAHPoolDb(derivedDatabaseFilename);
+    const sqlite3 = await getSqlite();
+    const poolConfig = getSahPoolConfig(backupDirectoryName);
+    let pool: SahPool | undefined;
+    let db: DerivedSqliteDatabase;
+
+    try {
+      pool = await getSahPool(sqlite3, backupDirectoryName);
+      db = new pool.OpfsSAHPoolDb(derivedDatabaseFilename);
+    } catch (cause) {
+      throw new DbIngestError({
+        code: "db_ingest_failed",
+        message: "Derived SQLite database could not be opened.",
+        recoverable: true,
+        details: {
+          databaseName: derivedDatabaseFilename,
+          vfs: "opfs-sahpool",
+          opfsDirectory: poolConfig.opfsDirectory,
+          vfsName: poolConfig.vfsName,
+          minimumPoolCapacity: sqliteSahPoolMinimumCapacity,
+          poolCapacity: pool?.getCapacity() ?? null,
+          poolFileCount: pool?.getFileCount() ?? null,
+        },
+        cause,
+      });
+    }
 
     return {
       db,
@@ -940,8 +963,7 @@ async function getSahPool(
   sqlite3: Sqlite3Api,
   backupDirectoryName: string,
 ): Promise<SahPool> {
-  const opfsDirectory = getBackupSqliteSahPoolDirectory(backupDirectoryName);
-  const vfsName = `${sqliteSahPoolVfsPrefix}-${stableHash(opfsDirectory)}`;
+  const { opfsDirectory, vfsName } = getSahPoolConfig(backupDirectoryName);
   const existing = sahPoolPromises.get(opfsDirectory);
 
   if (existing !== undefined) {
@@ -950,9 +972,14 @@ async function getSahPool(
 
   const promise = sqlite3
     .installOpfsSAHPoolVfs({
-      initialCapacity: 4,
+      initialCapacity: sqliteSahPoolMinimumCapacity,
       name: vfsName,
       directory: opfsDirectory,
+    })
+    .then(async (pool) => {
+      await pool.reserveMinimumCapacity(sqliteSahPoolMinimumCapacity);
+
+      return pool;
     })
     .catch((cause: unknown) => {
       sahPoolPromises.delete(opfsDirectory);
@@ -962,6 +989,18 @@ async function getSahPool(
   sahPoolPromises.set(opfsDirectory, promise);
 
   return promise;
+}
+
+function getSahPoolConfig(backupDirectoryName: string): {
+  opfsDirectory: string;
+  vfsName: string;
+} {
+  const opfsDirectory = getBackupSqliteSahPoolDirectory(backupDirectoryName);
+
+  return {
+    opfsDirectory,
+    vfsName: `${sqliteSahPoolVfsPrefix}-${stableHash(opfsDirectory)}`,
+  };
 }
 
 function getBackupSqliteSahPoolDirectory(backupDirectoryName: string): string {

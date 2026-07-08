@@ -11,6 +11,7 @@ import type {
   NormalizedParticipantKind,
   NormalizedReaction,
   NormalizedReactionKind,
+  WorkerProgressCallback,
 } from "../../lib/worker-types";
 import {
   readSourceFileBytes,
@@ -20,6 +21,10 @@ import {
   type ManifestFileRecord,
 } from "./manifest-db";
 import { bytesStartWith } from "../shared/binary";
+import {
+  createThrottledWorkerProgress,
+  type ThrottledWorkerProgress,
+} from "../shared/progress";
 import { appleEpochMs } from "./apple-time";
 import type { ReadonlySourceDirectoryHandle } from "./read-only-source";
 import {
@@ -57,6 +62,7 @@ export interface IosNormalizeInput {
   manifest: ManifestDbReader;
   root: ReadonlySourceDirectoryHandle;
   initialWarnings?: IngestWarning[];
+  progress?: WorkerProgressCallback;
 }
 
 export interface IosNormalizedData {
@@ -194,7 +200,19 @@ export async function normalizeIosMessages(
     messageIdByGuid,
     pendingReactionRows,
     conversationStats,
-  } = buildMessages(messageRows, chatIdsByMessageId, participantByHandleRowId, warnings);
+  } = await buildMessages(
+    messageRows,
+    chatIdsByMessageId,
+    participantByHandleRowId,
+    warnings,
+    createThrottledWorkerProgress({
+      worker: "backup",
+      progress: input.progress,
+      phase: "normalizing",
+      label: "Normalizing messages",
+      totalUnits: messageRows.length,
+    }),
+  );
   const conversations = buildConversations(
     chats,
     chatHandles,
@@ -215,6 +233,7 @@ export async function normalizeIosMessages(
     input.smsDb,
     messageIdByRowId,
     warnings,
+    input.progress,
   );
 
   return {
@@ -409,107 +428,122 @@ function buildParticipants(
   return { participants, contactAvatars };
 }
 
-function buildMessages(
+async function buildMessages(
   rows: readonly MessageRow[],
   chatIdsByMessageId: ReadonlyMap<number, number>,
   participantByHandleRowId: ReadonlyMap<number, NormalizedParticipant>,
   warnings: IngestWarning[],
-): {
+  progress: ThrottledWorkerProgress,
+): Promise<{
   messages: NormalizedMessage[];
   messageIdByRowId: Map<number, string>;
   messageIdByGuid: Map<string, string>;
   pendingReactionRows: MessageRow[];
   conversationStats: Map<string, ConversationStats>;
-} {
+}> {
   const messages: NormalizedMessage[] = [];
   const messageIdByRowId = new Map<number, string>();
   const messageIdByGuid = new Map<string, string>();
   const pendingReactionRows: MessageRow[] = [];
   const conversationStats = new Map<string, ConversationStats>();
+  let processedRows = 0;
 
   for (const row of rows) {
-    const associatedType = readNumber(row.associated_message_type) ?? 0;
+    try {
+      const associatedType = readNumber(row.associated_message_type) ?? 0;
 
-    if (classifyTapback(associatedType) !== undefined) {
-      pendingReactionRows.push(row);
-      continue;
+      if (classifyTapback(associatedType) !== undefined) {
+        pendingReactionRows.push(row);
+        continue;
+      }
+
+      const rowid = readNumber(row.rowid);
+      if (rowid === undefined) {
+        warnings.push({
+          code: "message-rowid-missing",
+          message: "Skipped a message row without a numeric ROWID.",
+        });
+        continue;
+      }
+
+      const hasConversationJoin = chatIdsByMessageId.has(rowid);
+      const conversationId = conversationIdForMessage(rowid, chatIdsByMessageId);
+      const senderId = senderParticipantId(row, participantByHandleRowId);
+      const sentAtUtc = appleTimestampToIso(row.date);
+      const messageId = `message:${String(rowid)}`;
+      const guid = readString(row.guid);
+      const service = readString(row.service);
+      const dateDelivered = appleTimestampToIso(row.date_delivered);
+      const dateRead = appleTimestampToIso(row.date_read);
+
+      if (!hasConversationJoin) {
+        warnings.push({
+          code: "message-chat-missing",
+          message: "Placed a message without a chat join into the unassigned conversation.",
+          source: String(rowid),
+        });
+      }
+
+      if (sentAtUtc === undefined && isPositiveIntegerish(row.date)) {
+        warnings.push({
+          code: "message-timestamp-invalid",
+          message: "Kept a message row but omitted an out-of-range sent timestamp.",
+          source: String(rowid),
+        });
+      }
+
+      const message: NormalizedMessage = {
+        id: messageId,
+        conversationId,
+        ...(senderId === undefined ? {} : { senderId }),
+        ...(sentAtUtc === undefined ? {} : { sentAtUtc }),
+        rawTimestamp: formatRawTimestamp(row.date),
+        body: messageBody(row, rowid, warnings),
+        ...(service === undefined ? {} : { service }),
+        isFromMe: readBooleanish(row.is_from_me),
+        ...(dateDelivered === undefined ? {} : { dateDelivered }),
+        ...(dateRead === undefined ? {} : { dateRead }),
+        edited: isPositiveIntegerish(row.date_edited),
+        unsent: isPositiveIntegerish(row.date_retracted),
+        ...(guid === undefined ? {} : { sourceGuid: guid }),
+        sourceRowId: rowid,
+        isSystemEvent: (readNumber(row.item_type) ?? 0) !== 0,
+      };
+
+      messages.push(message);
+      messageIdByRowId.set(rowid, messageId);
+
+      if (guid !== undefined) {
+        messageIdByGuid.set(guid, messageId);
+      }
+
+      const stats =
+        conversationStats.get(conversationId) ??
+        { messageCount: 0, participantIds: new Set<string>(["self"]) };
+      stats.messageCount += 1;
+      if (senderId !== undefined) {
+        stats.participantIds.add(senderId);
+      }
+      if (senderId !== "self") {
+        stats.participantIds.add("self");
+      }
+      if (sentAtUtc !== undefined) {
+        stats.lastMessageAt = sentAtUtc;
+      }
+      conversationStats.set(conversationId, stats);
+    } finally {
+      processedRows += 1;
+      // Only await when something is emitted so this per-row loop stays
+      // synchronous between throttled progress updates.
+      const progressEmission = progress.maybeEmit(processedRows);
+
+      if (progressEmission !== undefined) {
+        await progressEmission;
+      }
     }
-
-    const rowid = readNumber(row.rowid);
-    if (rowid === undefined) {
-      warnings.push({
-        code: "message-rowid-missing",
-        message: "Skipped a message row without a numeric ROWID.",
-      });
-      continue;
-    }
-
-    const hasConversationJoin = chatIdsByMessageId.has(rowid);
-    const conversationId = conversationIdForMessage(rowid, chatIdsByMessageId);
-    const senderId = senderParticipantId(row, participantByHandleRowId);
-    const sentAtUtc = appleTimestampToIso(row.date);
-    const messageId = `message:${String(rowid)}`;
-    const guid = readString(row.guid);
-    const service = readString(row.service);
-    const dateDelivered = appleTimestampToIso(row.date_delivered);
-    const dateRead = appleTimestampToIso(row.date_read);
-
-    if (!hasConversationJoin) {
-      warnings.push({
-        code: "message-chat-missing",
-        message: "Placed a message without a chat join into the unassigned conversation.",
-        source: String(rowid),
-      });
-    }
-
-    if (sentAtUtc === undefined && isPositiveIntegerish(row.date)) {
-      warnings.push({
-        code: "message-timestamp-invalid",
-        message: "Kept a message row but omitted an out-of-range sent timestamp.",
-        source: String(rowid),
-      });
-    }
-
-    const message: NormalizedMessage = {
-      id: messageId,
-      conversationId,
-      ...(senderId === undefined ? {} : { senderId }),
-      ...(sentAtUtc === undefined ? {} : { sentAtUtc }),
-      rawTimestamp: formatRawTimestamp(row.date),
-      body: messageBody(row, rowid, warnings),
-      ...(service === undefined ? {} : { service }),
-      isFromMe: readBooleanish(row.is_from_me),
-      ...(dateDelivered === undefined ? {} : { dateDelivered }),
-      ...(dateRead === undefined ? {} : { dateRead }),
-      edited: isPositiveIntegerish(row.date_edited),
-      unsent: isPositiveIntegerish(row.date_retracted),
-      ...(guid === undefined ? {} : { sourceGuid: guid }),
-      sourceRowId: rowid,
-      isSystemEvent: (readNumber(row.item_type) ?? 0) !== 0,
-    };
-
-    messages.push(message);
-    messageIdByRowId.set(rowid, messageId);
-
-    if (guid !== undefined) {
-      messageIdByGuid.set(guid, messageId);
-    }
-
-    const stats =
-      conversationStats.get(conversationId) ??
-      { messageCount: 0, participantIds: new Set<string>(["self"]) };
-    stats.messageCount += 1;
-    if (senderId !== undefined) {
-      stats.participantIds.add(senderId);
-    }
-    if (senderId !== "self") {
-      stats.participantIds.add("self");
-    }
-    if (sentAtUtc !== undefined) {
-      stats.lastMessageAt = sentAtUtc;
-    }
-    conversationStats.set(conversationId, stats);
   }
+
+  await progress.finish(processedRows);
 
   return {
     messages,
@@ -714,6 +748,7 @@ async function buildAttachments(
   db: SqliteDatabase,
   messageIdByRowId: ReadonlyMap<number, string>,
   warnings: IngestWarning[],
+  progress: WorkerProgressCallback | undefined,
 ): Promise<NormalizedAttachment[]> {
   if (!sqliteTableExists(db, "attachment") || !sqliteTableExists(db, "message_attachment_join")) {
     return [];
@@ -738,85 +773,106 @@ async function buildAttachments(
   );
   const attachments: NormalizedAttachment[] = [];
   let remainingAttachmentHashBytes = maxInlineAttachmentHashTotalBytes;
+  let processedRows = 0;
+  const attachmentProgress = createThrottledWorkerProgress({
+    worker: "backup",
+    progress,
+    phase: "normalizing",
+    label: "Normalizing attachments",
+    totalUnits: rows.length,
+  });
 
   for (const row of rows) {
-    const attachmentRowId = readNumber(row.attachment_rowid);
-    const sourceMessageId = readNumber(row.message_id);
-    const messageId = sourceMessageId === undefined ? undefined : messageIdByRowId.get(sourceMessageId);
+    try {
+      const attachmentRowId = readNumber(row.attachment_rowid);
+      const sourceMessageId = readNumber(row.message_id);
+      const messageId = sourceMessageId === undefined ? undefined : messageIdByRowId.get(sourceMessageId);
 
-    if (attachmentRowId === undefined || messageId === undefined) {
-      warnings.push({
-        code: "attachment-message-missing",
-        message: "Skipped an attachment whose message row was not present.",
-      });
-      continue;
-    }
+      if (attachmentRowId === undefined || messageId === undefined) {
+        warnings.push({
+          code: "attachment-message-missing",
+          message: "Skipped an attachment whose message row was not present.",
+        });
+        continue;
+      }
 
-    const normalizedPath = normalizeAttachmentPath(readString(row.filename));
-    let manifestRecord: ManifestFileRecord | undefined;
-    let sourceSha256: string | undefined;
+      const normalizedPath = normalizeAttachmentPath(readString(row.filename));
+      let manifestRecord: ManifestFileRecord | undefined;
+      let sourceSha256: string | undefined;
 
-    if (normalizedPath !== undefined) {
-      try {
-        manifestRecord = manifest.findFile("MediaDomain", normalizedPath);
+      if (normalizedPath !== undefined) {
+        try {
+          manifestRecord = manifest.findFile("MediaDomain", normalizedPath);
 
-        if (manifestRecord === undefined) {
-          warnings.push({
-            code: "attachment-source-missing",
-            message: "Attachment metadata was kept, but the source file was not present in Manifest.db.",
-            source: normalizedPath,
-          });
-        } else if (shouldHashAttachmentSource(manifestRecord, remainingAttachmentHashBytes)) {
-          const source = await readSourceFileBytes(root, manifestRecord, {
-            maxReadBytes: Math.min(
-              maxInlineAttachmentHashBytes,
-              remainingAttachmentHashBytes,
-            ),
-          });
-          sourceSha256 = source.sha256;
-          remainingAttachmentHashBytes -= source.sourceByteLength;
-        } else {
-          warnings.push({
-            code: "attachment-source-hash-deferred",
-            message: "Attachment metadata was kept, but source hashing was deferred because the file is too large or its manifest size is unknown.",
-            source: normalizedPath,
-          });
-        }
-      } catch (cause) {
-        if (cause instanceof SourceFileTooLargeError) {
-          warnings.push({
-            code: "attachment-source-hash-deferred",
-            message: "Attachment metadata was kept, but source hashing was deferred because the file is too large or the ingest hash budget is exhausted.",
-            source: normalizedPath,
-          });
-        } else {
-          warnings.push({
-            code: "attachment-source-unreadable",
-            message: "Attachment metadata was kept, but the source file could not be hashed.",
-            source: normalizedPath,
-          });
-          console.warn("Skipping attachment source hash.", cause);
+          if (manifestRecord === undefined) {
+            warnings.push({
+              code: "attachment-source-missing",
+              message: "Attachment metadata was kept, but the source file was not present in Manifest.db.",
+              source: normalizedPath,
+            });
+          } else if (shouldHashAttachmentSource(manifestRecord, remainingAttachmentHashBytes)) {
+            const source = await readSourceFileBytes(root, manifestRecord, {
+              maxReadBytes: Math.min(
+                maxInlineAttachmentHashBytes,
+                remainingAttachmentHashBytes,
+              ),
+            });
+            sourceSha256 = source.sha256;
+            remainingAttachmentHashBytes -= source.sourceByteLength;
+          } else {
+            warnings.push({
+              code: "attachment-source-hash-deferred",
+              message: "Attachment metadata was kept, but source hashing was deferred because the file is too large or its manifest size is unknown.",
+              source: normalizedPath,
+            });
+          }
+        } catch (cause) {
+          if (cause instanceof SourceFileTooLargeError) {
+            warnings.push({
+              code: "attachment-source-hash-deferred",
+              message: "Attachment metadata was kept, but source hashing was deferred because the file is too large or the ingest hash budget is exhausted.",
+              source: normalizedPath,
+            });
+          } else {
+            warnings.push({
+              code: "attachment-source-unreadable",
+              message: "Attachment metadata was kept, but the source file could not be hashed.",
+              source: normalizedPath,
+            });
+            console.warn("Skipping attachment source hash.", cause);
+          }
         }
       }
+
+      const displayName = attachmentDisplayName(row, normalizedPath);
+      const mime = readString(row.mime_type);
+      const bytes = readNumber(row.total_bytes);
+      const guid = readString(row.guid);
+
+      attachments.push({
+        id: `attachment:${String(attachmentRowId)}`,
+        messageId,
+        ...(displayName === undefined ? {} : { filename: displayName }),
+        ...(mime === undefined ? {} : { mime }),
+        ...(bytes === undefined ? {} : { bytes }),
+        ...(normalizedPath === undefined ? {} : { sourcePath: normalizedPath }),
+        ...(normalizedPath === undefined ? {} : { sourceDomain: "MediaDomain" }),
+        ...(sourceSha256 === undefined ? {} : { sha256: sourceSha256 }),
+        ...(guid === undefined ? {} : { sourceGuid: guid }),
+      });
+    } finally {
+      processedRows += 1;
+      // Only await when something is emitted so this per-row loop stays
+      // synchronous between throttled progress updates.
+      const progressEmission = attachmentProgress.maybeEmit(processedRows);
+
+      if (progressEmission !== undefined) {
+        await progressEmission;
+      }
     }
-
-    const displayName = attachmentDisplayName(row, normalizedPath);
-    const mime = readString(row.mime_type);
-    const bytes = readNumber(row.total_bytes);
-    const guid = readString(row.guid);
-
-    attachments.push({
-      id: `attachment:${String(attachmentRowId)}`,
-      messageId,
-      ...(displayName === undefined ? {} : { filename: displayName }),
-      ...(mime === undefined ? {} : { mime }),
-      ...(bytes === undefined ? {} : { bytes }),
-      ...(normalizedPath === undefined ? {} : { sourcePath: normalizedPath }),
-      ...(normalizedPath === undefined ? {} : { sourceDomain: "MediaDomain" }),
-      ...(sourceSha256 === undefined ? {} : { sha256: sourceSha256 }),
-      ...(guid === undefined ? {} : { sourceGuid: guid }),
-    });
   }
+
+  await attachmentProgress.finish(processedRows);
 
   return attachments;
 }

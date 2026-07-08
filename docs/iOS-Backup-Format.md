@@ -202,7 +202,10 @@ password.
   scan the WAL like SQLite: apply committed frames from the valid prefix, stop at the
   first invalid/stale/torn frame, and ignore frames after the last valid commit (D-022).
   Frames after that point can be uncommitted or stale and must not enter normalized
-  output.
+  output. Always force the copied main DB header to rollback-journal mode before the
+  transient read-only sqlite-wasm open, even when no sidecar is present or no WAL frame
+  commits; otherwise sqlite may try to open missing transient sidecars and report
+  `SQLITE_CANTOPEN` (D-025).
 - Deleted messages may linger in DB free pages; recovery is out of scope for now
   (documented as a future forensic feature — do not accidentally surface half-parsed
   deleted content as real messages).

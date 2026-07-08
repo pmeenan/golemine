@@ -328,3 +328,45 @@ Rationale: duplicated rows only stay correct if every writer keeps them in sync 
 quick manual SQLite inspection possible. Deep validation of the stored summary is
 unnecessary because any change to the summary shape ships with a `derivedDbVersion`
 bump, which already forces re-ingest.
+
+## D-024 — Reserve headroom in per-backup sqlite-wasm SAH pools (2026-07-08)
+
+Real backup rebuilds can fail during `prepareIngest` with `SQLITE_CANTOPEN` even when
+the M0 sqlite smoke test passes. The smoke test uses one tiny database in its own pool,
+but derived backup databases live in persistent per-backup `opfs-sahpool` directories.
+sqlite-wasm persists the pool's file slots; interrupted rebuilds, rollback journals,
+and temp files can leave a small pool full enough that opening or resetting
+`golemine.sqlite` cannot allocate the next slot. Rebuilds can also briefly contend with
+the overview's read-only summary db-worker if the backup was already marked ingested.
+
+Decision: per-backup derived DB pools now initialize and reserve a 16-slot minimum, and
+derived DB open failures report the OPFS directory, VFS name, capacity, and file count
+through the db-worker error payload. The overview route releases its summary reader
+while ingest is running. Playwright's M2 flow now ingests and then rebuilds the same
+synthetic backup so this path is covered in-browser.
+
+Rationale: increasing the pool is cheap for one derived DB per backup and avoids
+fragility from stale journal/temp slots. The summary-reader lifecycle change keeps the
+same-backup rebuild path from racing another worker for the same SAH pool. Do not shrink
+the pool without testing repeated rebuilds and interrupted-ingest recovery in Chrome.
+
+## D-025 — Force copied source SQLite DBs out of WAL mode before transient opens (2026-07-08)
+
+Real iOS backups can contain SQLite main database files whose header still declares WAL
+journal mode even when the sidecar is absent, stale, or contains no committed frames.
+When backup-worker copies only the reconstructed main bytes into sqlite-wasm's
+transient VFS and opens that copy read-only, sqlite may try to open a sibling `-wal`
+file that does not exist in the transient VFS and fail with `SQLITE_CANTOPEN`.
+
+Decision: `src/workers/backup/source-sqlite.ts` now prepares every source SQLite copy
+through `prepareSourceSqliteBytesForReadOnlyOpen`, which copies the main bytes, applies
+the valid committed WAL prefix when present, and always rewrites SQLite header bytes 18
+and 19 to rollback-journal mode before `sqlite3.oo1.DB(..., "r")`. This includes
+no-sidecar and no-committed-frame cases. Source SQLite open failures are wrapped in
+`SourceSqliteOpenError` with structured, non-content details such as database role,
+transient name, byte counts, and header journal versions.
+
+Rationale: the backup folder remains read-only and provider-specific sidecar handling
+stays deterministic in backup-worker. Forcing rollback mode on the transient copy
+prevents sqlite-wasm from making filesystem assumptions about sidecars we deliberately
+do not create.

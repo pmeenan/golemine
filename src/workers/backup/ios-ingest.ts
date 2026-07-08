@@ -7,13 +7,18 @@ import {
   type IngestWarning,
   type WorkerErrorCode,
   type WorkerProgressCallback,
+  formatWorkerErrorPayload,
   toWorkerError,
   workerFail,
   workerOk,
   type WorkerResult,
   type WorkerStructuredValue,
 } from "../../lib/worker-types";
-import { emitWorkerProgress } from "../shared/progress";
+import {
+  createThrottledWorkerProgress,
+  emitWorkerProgress,
+  type ThrottledWorkerProgress,
+} from "../shared/progress";
 import { asReadonlySourceDirectory, type ReadonlySourceDirectoryHandle } from "./read-only-source";
 import { detectIosBackup } from "./ios-backup";
 import {
@@ -26,6 +31,7 @@ import {
 import { normalizeIosMessages, type IosNormalizedData } from "./ios-normalize";
 import {
   openSourceSqliteDatabase,
+  SourceSqliteOpenError,
   type SourceSqliteDatabase,
 } from "./source-sqlite";
 
@@ -36,6 +42,11 @@ type DatabaseRole = "messages" | "contacts" | "contact-images";
 interface OpenedBackupDatabase {
   source: SourceSqliteDatabase;
   sourceFiles: IngestSourceFile[];
+}
+
+interface BatchWriteProgress {
+  completedUnits: number;
+  ticker: ThrottledWorkerProgress;
 }
 
 export class BackupIngestError extends Error {
@@ -136,17 +147,69 @@ export async function ingestUnencryptedBackupDirectory(
           manifest,
           root,
           initialWarnings: optionalWarnings,
+          progress,
         });
 
         await emitWorkerProgress("backup", progress, "writing", "Writing participants and conversations", 6, 9);
-        await writeBatches(request.backupId, sink, "participants", normalized.participants);
-        await writeBatches(request.backupId, sink, "conversations", normalized.conversations);
+        const identityWriteProgress = createBatchWriteProgress(
+          progress,
+          "Writing participants and conversations",
+          normalized.participants.length + normalized.conversations.length,
+        );
+        await writeBatches(
+          request.backupId,
+          sink,
+          "participants",
+          normalized.participants,
+          identityWriteProgress,
+        );
+        await writeBatches(
+          request.backupId,
+          sink,
+          "conversations",
+          normalized.conversations,
+          identityWriteProgress,
+        );
+        await identityWriteProgress.ticker.finish(identityWriteProgress.completedUnits);
 
         await emitWorkerProgress("backup", progress, "writing", "Writing messages and related records", 7, 9);
-        await writeBatches(request.backupId, sink, "messages", normalized.messages);
-        await writeBatches(request.backupId, sink, "attachments", normalized.attachments);
-        await writeBatches(request.backupId, sink, "reactions", normalized.reactions);
-        await writeBatches(request.backupId, sink, "contact-avatars", normalized.contactAvatars);
+        const relatedWriteProgress = createBatchWriteProgress(
+          progress,
+          "Writing messages and related records",
+          normalized.messages.length +
+            normalized.attachments.length +
+            normalized.reactions.length +
+            normalized.contactAvatars.length,
+        );
+        await writeBatches(
+          request.backupId,
+          sink,
+          "messages",
+          normalized.messages,
+          relatedWriteProgress,
+        );
+        await writeBatches(
+          request.backupId,
+          sink,
+          "attachments",
+          normalized.attachments,
+          relatedWriteProgress,
+        );
+        await writeBatches(
+          request.backupId,
+          sink,
+          "reactions",
+          normalized.reactions,
+          relatedWriteProgress,
+        );
+        await writeBatches(
+          request.backupId,
+          sink,
+          "contact-avatars",
+          normalized.contactAvatars,
+          relatedWriteProgress,
+        );
+        await relatedWriteProgress.ticker.finish(relatedWriteProgress.completedUnits);
 
         await emitWorkerProgress("backup", progress, "writing", "Finalizing ingest metadata", 8, 9);
         const report = buildReport({
@@ -307,11 +370,29 @@ function sourceRole(
       : "contact-images-shm";
 }
 
+function createBatchWriteProgress(
+  progress: WorkerProgressCallback | undefined,
+  label: string,
+  totalUnits: number,
+): BatchWriteProgress {
+  return {
+    completedUnits: 0,
+    ticker: createThrottledWorkerProgress({
+      worker: "backup",
+      progress,
+      phase: "writing",
+      label,
+      totalUnits,
+    }),
+  };
+}
+
 async function writeBatches<TKey extends IngestBatch["kind"]>(
   backupId: string,
   sink: IngestSinkApi,
   kind: TKey,
   items: Extract<IngestBatch, { kind: TKey }>["items"],
+  progress?: BatchWriteProgress,
 ): Promise<void> {
   for (let offset = 0; offset < items.length; offset += batchSize) {
     const batch = {
@@ -321,6 +402,11 @@ async function writeBatches<TKey extends IngestBatch["kind"]>(
     } as Extract<IngestBatch, { kind: TKey }>;
 
     await assertSinkOk(sink.writeIngestBatch(batch), kind);
+
+    if (progress !== undefined) {
+      progress.completedUnits += batch.items.length;
+      await progress.ticker.maybeEmit(progress.completedUnits);
+    }
   }
 }
 
@@ -335,7 +421,7 @@ async function assertSinkOk(
       "db_ingest_failed",
       `db-worker rejected the ${operation} ingest step.`,
       { operation },
-      result.error.message,
+      formatWorkerErrorPayload(result.error),
     );
   }
 }
@@ -413,6 +499,17 @@ function toBackupIngestWorkerError(cause: unknown) {
         "Manifest.db in this backup has an unreadable record, so the file index cannot be trusted. The backup may be damaged or incomplete.",
       recoverable: false,
       cause,
+    });
+  }
+
+  if (cause instanceof SourceSqliteOpenError) {
+    return toWorkerError({
+      worker: "backup",
+      code: "backup_ingest_failed",
+      message: "A source SQLite database from this backup could not be opened.",
+      recoverable: true,
+      cause,
+      details: cause.details,
     });
   }
 

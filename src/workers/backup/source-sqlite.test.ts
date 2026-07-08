@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { applySqliteWal } from "./source-sqlite";
+import {
+  applySqliteWal,
+  prepareSourceSqliteBytesForReadOnlyOpen,
+} from "./source-sqlite";
 
 const pageSize = 512;
 
@@ -24,13 +27,36 @@ describe("applySqliteWal", () => {
     expect(reconstructed[pageSize]).toBe(0x6d);
   });
 
-  it("leaves the main database untouched when no WAL frame is committed", () => {
-    const main = page(0x4d);
+  it("keeps main database content when no WAL frame is committed", () => {
+    const main = sqliteHeaderPage(pageSize);
+    main[18] = 2;
+    main[19] = 2;
     const wal = walFile([
       { pageNumber: 1, commitPageCount: 0, data: page(0x57) },
     ]);
+    const reconstructed = applySqliteWal(main, wal);
 
-    expect(applySqliteWal(main, wal)).toBe(main);
+    expect(reconstructed).not.toBe(main);
+    expect(reconstructed[18]).toBe(1);
+    expect(reconstructed[19]).toBe(1);
+    expect(reconstructed.slice(20)).toEqual(main.slice(20));
+    expect(main[18]).toBe(2);
+    expect(main[19]).toBe(2);
+  });
+
+  it("forces WAL-mode main databases into rollback mode for read-only transient opens", () => {
+    const main = sqliteHeaderPage(pageSize);
+
+    main[18] = 2;
+    main[19] = 2;
+
+    const prepared = prepareSourceSqliteBytesForReadOnlyOpen(main);
+
+    expect(prepared).not.toBe(main);
+    expect(prepared[18]).toBe(1);
+    expect(prepared[19]).toBe(1);
+    expect(main[18]).toBe(2);
+    expect(main[19]).toBe(2);
   });
 
   it("rejects WAL sidecars whose page size does not match the main database", () => {

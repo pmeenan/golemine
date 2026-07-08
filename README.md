@@ -54,11 +54,16 @@ frames to source SQLite copies, normalizes iPhone Messages, contacts, tapbacks,
 attachments, and contact thumbnails, then writes a rebuildable OPFS derived database
 with FTS, avatar paths, counts, warnings, and source-file provenance. The backup
 overview can run and rebuild ingest; M3 adds the thread browser and search UI on top of
-that database.
+that database. Long normalization and write stages now surface throttled item-count
+progress, so large message backups show advancing counts during otherwise long-running
+steps.
 The M2 path is hardened for real-world backup quirks: stale/torn SQLite WAL tails are
 handled like SQLite end-of-log, large attachment media is not eagerly read just to hash
 it, ingest batches flow worker-to-worker without a UI relay, and interrupted rebuilds
-recover as needing re-ingest.
+recover as needing re-ingest. Per-backup sqlite-wasm `opfs-sahpool` storage now
+reserves extra SAH slots and the overview releases its summary reader during rebuilds
+so repeated real-backup ingests do not fail on stale journal/temp pool slots. Source
+SQLite copies are forced out of WAL mode before their transient read-only opens.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

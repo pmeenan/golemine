@@ -19,7 +19,13 @@ Encrypted ingest is next in M4; M3 builds the browser/search UI over the derived
 database. M1 also handles larger real-world iOS `Info.plist` app metadata with
 role-specific root-plist bounds (D-019), and all primary brand and illustration assets
 have been generated under the steampunk Talos golem identity (D-018; character sheet
-in `docs/assets/`); wiring them into the UI is tracked under M6.**
+in `docs/assets/`); wiring them into the UI is tracked under M6. Real-backup OPFS
+hardening now reserves larger per-backup sqlite-wasm SAH pools and releases the
+overview summary reader during rebuilds to avoid `SQLITE_CANTOPEN` from stale
+journal/temp slots or reader contention (D-024). Source SQLite copies are now forced
+to rollback-journal mode before transient read-only opens, covering WAL-mode databases
+without usable sidecars (D-025). Long unbounded normalization and write stages now
+surface throttled item-count progress for large backups.**
 
 ## M0 — Scaffolding
 
@@ -124,6 +130,9 @@ Goal: an opened, unencrypted backup becomes a browsable derived DB.
 - [x] Streaming progress UI; ingest restartable from source; `derivedDbVersion`
       re-ingest trigger is preserved through recents and updated on ingest status
       writes.
+- [x] Long-running ingest progress granularity: unbounded message/attachment
+      normalization and aggregate write loops emit throttled item-count updates, and
+      the overview displays counts for large totals without cluttering phase progress.
 - [x] Golden-file unit tests for typedstream, timestamps, tapbacks, WAL sidecars,
       contacts, avatars, attachments, and db sink behavior against fixtures.
 - [x] Post-review hardening: WAL replay stops at the first invalid/stale/torn frame
@@ -147,6 +156,13 @@ Goal: an opened, unencrypted backup becomes a browsable derived DB.
       removals), `message-body-undecodable` warnings, single-pass contact resolution
       during participant building, and unit tests for shrinking-final-commit WAL
       replay and detection tolerating unparseable Manifest.db content.
+- [x] Real-backup OPFS hardening: per-backup sqlite-wasm `opfs-sahpool` storage now
+      reserves a 16-slot minimum for stale journal/temp-file headroom, derived DB open
+      failures report pool details, the overview route releases its summary reader
+      during rebuilds, and Playwright covers ingest -> rebuild (D-024).
+- [x] Source SQLite open hardening: every copied source DB is forced to rollback mode
+      before sqlite-wasm opens the transient read-only file, including no-sidecar and
+      no-committed-frame WAL cases (D-025).
 
 Deferred (not M2): streaming row normalization — normalize currently materializes
 full row arrays before batching; a streaming rewrite is deferred to M3-scale work.
