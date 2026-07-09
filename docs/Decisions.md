@@ -30,7 +30,7 @@ browsing until reconnected.
 
 Encrypted iTunes backups are common (and contain more data). The file-access layer is
 built around a decryption abstraction from day one; implementation lands right after
-the unencrypted pipeline works (Plan M4). All crypto via WebCrypto in a worker;
+the unencrypted pipeline works (Plan M5). All crypto via WebCrypto in a worker;
 passwords and keys are session-memory only.
 
 ## D-005 — License policy: permissive core, LGPL allowed for wasm codecs only (2026-07-07)
@@ -162,7 +162,7 @@ Design.md §7.1.
 Resolves Plan.md OQ-2: yes. Nearly all required infrastructure exists in v1
 regardless — Manifest.db lookup and read-only access (M1), the db-worker SQLite path
 and ABPerson rowid join from contacts resolution (M2), the content-addressed OPFS
-thumbnail cache (M3), the M4 per-file decrypt path, and the Design.md §7.1 avatar
+thumbnail cache (M3), the M5 per-file decrypt path, and the Design.md §7.1 avatar
 slots with the §1.5 fallback ramp. The marginal cost is one tolerant parser plus
 fixtures.
 
@@ -421,6 +421,14 @@ Note (2026-07-08): D-033 adds the Vite-dev-only fetch-to-Blob module shim needed
 avoid Vite's public-dir transform guard. Production still imports the same public
 vendor ES module directly.
 
+Note (2026-07-09): the full-image guard is a 256 MiB decoded RGBA-surface budget
+(67,108,864 pixels), replacing the original 64 MiB/16,777,216-pixel budget so 48 MP
+phone photos can be previewed. Thumbnail generation is serialized regardless of caller
+concurrency, libheif images/decoders remain explicitly released, and temporary canvas
+backing stores are reset after downsampling. The budget describes one RGBA surface,
+not total worker process memory; libheif, JavaScript `ImageData`, codec working buffers,
+and canvas storage can make the transient process peak several times higher.
+
 ## D-028 — Cache attachment thumbnails as JPEG (2026-07-08)
 
 M3 attachment thumbnails are overwhelmingly phone photos, including HEIC originals
@@ -498,7 +506,7 @@ Decision: user-initiated extraction uses an explicit `extractMaxReadBytes` budge
 file; files above the budget fail with a clear byte-cap error rather than an
 out-of-memory crash. The extract flow checks permission, opens the save picker, reads
 with the budget, and removes the zero-byte picker stub if the read fails. A streaming
-source-to-disk copy (no full in-memory buffer, no practical cap) is deferred; the M4
+source-to-disk copy (no full in-memory buffer, no practical cap) is deferred; the M5
 per-file decrypt path is the natural time to revisit it.
 
 Rationale: 1 GiB covers realistic phone attachments while keeping the read path
@@ -541,3 +549,36 @@ transformed by Vite.
 Rationale: dev and production both load the same LGPL vendor bytes lazily and offline.
 The dev-only Blob URL sidesteps Vite's public-dir module guard without weakening the
 production CSP or moving vendor code into app source.
+
+## D-034 — Search folds into the messages workspace with substring-capable semantics (2026-07-09)
+
+The M3 standalone search page and the messages browser split one exploration task
+across two routes: search results lose thread context, and browsing loses the ability
+to narrow by text. M4 unifies them (Plan.md M4): a search panel above the messages
+workspace, a Threads pane filtered to conversations with hits (ordered by most-recent
+hit, with hit counts), a results column between Threads and the timeline (all results
+when no thread is selected, thread-scoped when one is, with an "All" affordance to
+unselect), jump-to-message on result click, an on-demand collapsible details pane, and
+a reset control that returns to plain browsing. Search always spans all conversations
+— the conversation filter field is dropped; the results column's thread scoping
+replaces it. The standalone search route is removed once parity lands. Encrypted
+backups and later milestones renumber to M5+.
+
+Search text semantics:
+
+- Case-insensitive throughout.
+- Unquoted space-separated words are an implicit AND, matching in any order anywhere
+  in the message, each word as an FTS5 prefix query (`word*`), not whole-word only.
+- Quoted strings are true case-insensitive substring matches: the quoted text's
+  indexable tokens compile to an FTS narrowing query and the db-worker verifies the
+  raw substring against candidate bodies. Quoted strings with no indexable tokens
+  (punctuation/emoji only) fall back to a bounded non-FTS scan with a documented row
+  budget that reports truncation.
+
+Rationale: FTS5 phrase queries match token sequences, so they cannot deliver
+"string match as-is" (no mid-word matches, punctuation ignored); narrowing with FTS
+and verifying the substring in the db-worker keeps the common path index-fast while
+honoring the user's literal quoted text. Prefix matching for words matches user
+expectations for message search better than whole-word matching at negligible FTS5
+cost. All compilation and verification stay in the db-worker so hostile bodies are
+never interpolated and the D-030 snippet-sentinel rules keep applying.

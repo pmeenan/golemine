@@ -203,7 +203,7 @@ export function BackupOverviewRoute() {
     if (record.isEncrypted) {
       setIngestStatus({
         kind: "error",
-        label: "Encrypted backup ingest arrives in M4. Open an unencrypted backup for M2 ingest.",
+        label: "Encrypted backup ingest arrives in M5. Open an unencrypted backup for M2 ingest.",
       });
       return;
     }
@@ -422,7 +422,7 @@ export function BackupOverviewRoute() {
           </Button>
           {record.isEncrypted ? (
             <p className="mt-2 text-caption text-text-secondary">
-              Encrypted backup ingest is scheduled for M4.
+              Encrypted backup ingest is scheduled for M5.
             </p>
           ) : null}
         </Panel>

@@ -3,6 +3,7 @@ import {
   Download,
   FileWarning,
   Image,
+  ImageOff,
   Loader2,
   MessageSquareText,
   Video,
@@ -12,6 +13,7 @@ import { transfer } from "comlink";
 import {
   type ReactNode,
   type Ref,
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -669,8 +671,11 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
           title="Details"
         >
           <DetailPane
+            getBackupClient={getBackupClient}
+            getMediaClient={getMediaClient}
             navigate={navigate}
             record={record}
+            runPreviewTask={runPreviewTask}
             state={detailState}
           />
         </MessagesPane>
@@ -703,7 +708,7 @@ function MessagesPane({
     <section
       aria-label={dialog?.label}
       aria-modal={dialog === undefined ? undefined : true}
-      className={cn("flex h-[var(--layout-workspace-min)] min-w-0 flex-col bg-surface lg:h-auto", className)}
+      className={cn("flex h-[var(--layout-workspace-min)] min-w-0 flex-col bg-surface lg:h-full", className)}
       onKeyDown={
         dialog === undefined
           ? undefined
@@ -892,36 +897,54 @@ function TimelinePane({
 
   return (
     <div className="flex h-full flex-col" data-testid="m3-message-timeline">
-      {state.page.hasMoreBefore ? (
-        <div className="border-b border-border p-3">
-          <Button
-            className="w-full"
-            disabled={state.loadingBefore}
-            onClick={() => {
-              onLoadTimelinePage("before");
-            }}
-            size="sm"
-            type="button"
-            variant="secondary"
-          >
-            {state.loadingBefore ? "Loading..." : "Load earlier messages"}
-          </Button>
-        </div>
-      ) : null}
-      {state.moreErrorBefore === undefined ? null : (
-        <div className="border-b border-border p-3">
-          <InlineNotice kind="danger">{state.moreErrorBefore}</InlineNotice>
-        </div>
-      )}
       <div className="min-h-0 flex-1">
         <Virtuoso
+          alignToBottom
           className="h-full"
+          components={{
+            Header: () => (
+              <>
+                {state.moreErrorBefore !== undefined ? (
+                  <div className="p-3">
+                    <InlineNotice kind="danger">{state.moreErrorBefore}</InlineNotice>
+                  </div>
+                ) : state.loadingBefore ? (
+                  <div className="p-3 text-center text-caption text-text-secondary">
+                    Loading earlier messages...
+                  </div>
+                ) : null}
+              </>
+            ),
+            Footer: () => (
+              <>
+                {state.moreErrorAfter !== undefined ? (
+                  <div className="p-3">
+                    <InlineNotice kind="danger">{state.moreErrorAfter}</InlineNotice>
+                  </div>
+                ) : state.loadingAfter ? (
+                  <div className="p-3 text-center text-caption text-text-secondary">
+                    Loading later messages...
+                  </div>
+                ) : null}
+              </>
+            ),
+          }}
           data={timelineRows}
+          endReached={() => {
+            if (state.page.hasMoreAfter && !state.loadingAfter) {
+              onLoadTimelinePage("after");
+            }
+          }}
           firstItemIndex={state.firstItemIndex}
           initialTopMostItemIndex={findInitialTimelineIndex(
             timelineRows,
             state.page.anchorMessageId,
           )}
+          startReached={() => {
+            if (state.page.hasMoreBefore && !state.loadingBefore) {
+              onLoadTimelinePage("before");
+            }
+          }}
           itemContent={(_, row) =>
             row.kind === "day" ? (
               <DaySeparator label={row.label} />
@@ -943,27 +966,6 @@ function TimelinePane({
           }
         />
       </div>
-      {state.moreErrorAfter === undefined ? null : (
-        <div className="border-t border-border p-3">
-          <InlineNotice kind="danger">{state.moreErrorAfter}</InlineNotice>
-        </div>
-      )}
-      {state.page.hasMoreAfter ? (
-        <div className="border-t border-border p-3">
-          <Button
-            className="w-full"
-            disabled={state.loadingAfter}
-            onClick={() => {
-              onLoadTimelinePage("after");
-            }}
-            size="sm"
-            type="button"
-            variant="secondary"
-          >
-            {state.loadingAfter ? "Loading..." : "Load later messages"}
-          </Button>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1050,9 +1052,9 @@ function MessageRow({
           {runStart ? (
             <span className="mb-1 text-caption text-text-tertiary">{senderName}</span>
           ) : null}
-          <button
+          <div
             className={cn(
-              "relative min-w-[min(100%,calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-24)_+_var(--space-4)))] rounded-bubble px-[calc(var(--space-12)_+_var(--space-2))] py-[calc(var(--space-8)_+_var(--space-2))] text-left text-body shadow-1",
+              "relative min-w-[min(100%,calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-24)_+_var(--space-4)))] rounded-bubble px-[calc(var(--space-12)_+_var(--space-2))] py-[calc(var(--space-8)_+_var(--space-2))] text-left text-body shadow-1 outline-none focus-visible:ring-2 focus-visible:ring-accent",
               // Bubble color follows the normalized serviceKind (Design.md
               // section 7.1): sms-family is green; imessage and unknown share
               // the iMessage blue (Apple-default assumption).
@@ -1067,36 +1069,46 @@ function MessageRow({
               runEnd && (isSent ? "rounded-br-md" : "rounded-bl-md"),
             )}
             onClick={onSelect}
-            type="button"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect();
+              }
+            }}
+            role="button"
+            tabIndex={0}
           >
-            <span className="whitespace-pre-wrap break-words">{message.body}</span>
+            {message.attachments.length > 0 ? (
+              <span className={cn("grid max-w-full gap-2", message.body.replaceAll("\uFFFC", "").trim().length > 0 && "mb-2")}>
+                {message.attachments.map((attachment) => (
+                  <AttachmentPreview
+                    attachment={attachment}
+                    getBackupClient={getBackupClient}
+                    getMediaClient={getMediaClient}
+                    key={attachment.id}
+                    record={record}
+                    runPreviewTask={runPreviewTask}
+                  />
+                ))}
+              </span>
+            ) : null}
+            {message.body.replaceAll("\uFFFC", "").trim().length > 0 ? (
+              <span className="whitespace-pre-wrap break-words">{message.body.replaceAll("\uFFFC", "")}</span>
+            ) : null}
             {message.reactions.length > 0 ? (
-              <span className="absolute -bottom-3 right-2 flex flex-wrap gap-1">
+              <span className="absolute -top-4 right-2 flex flex-wrap gap-1">
                 {message.reactions.map((reaction) => (
                   <span
-                    className="rounded-full border border-border bg-surface-raised px-2 py-0.5 text-micro text-text"
+                    className="flex h-6 min-w-[24px] items-center justify-center rounded-full border border-border bg-surface px-1.5 shadow-sm text-text"
                     key={reaction.id}
+                    title={reactionLabel(reaction.kind)}
                   >
-                    {reactionLabel(reaction.kind)}
+                    <ReactionIcon kind={reaction.kind} />
                   </span>
                 ))}
               </span>
             ) : null}
-          </button>
-          {message.attachments.length > 0 ? (
-            <span className="mt-3 grid max-w-full gap-2">
-              {message.attachments.map((attachment) => (
-                <AttachmentView
-                  attachment={attachment}
-                  getBackupClient={getBackupClient}
-                  getMediaClient={getMediaClient}
-                  key={attachment.id}
-                  record={record}
-                  runPreviewTask={runPreviewTask}
-                />
-              ))}
-            </span>
-          ) : null}
+          </div>
           {message.edited || message.unsent ? (
             <span className="mt-1 text-caption text-warning">
               {[message.edited ? "Edited" : undefined, message.unsent ? "Unsent" : undefined]
@@ -1130,7 +1142,7 @@ function MessageRow({
   );
 }
 
-function AttachmentView({
+function useAttachmentPreview({
   attachment,
   getBackupClient,
   getMediaClient,
@@ -1146,60 +1158,33 @@ function AttachmentView({
   const [previewState, setPreviewState] = useState<AttachmentPreviewState>({
     kind: "idle",
   });
-  const [extractState, setExtractState] = useState<
-    | { kind: "idle" }
-    | { kind: "running" }
-    | { kind: "permission-granted" }
-    | { kind: "success" }
-    | { kind: "error"; message: string }
-  >({ kind: "idle" });
   const mountedRef = useRef(true);
   const previewRequestIdRef = useRef(0);
-  const extractStubCleanupRef = useRef<(() => void) | undefined>(undefined);
+  const canReadSource = attachment.sourceDomain !== undefined && attachment.sourcePath !== undefined;
 
-  const canReadSource =
-    attachment.sourceDomain !== undefined && attachment.sourcePath !== undefined;
   const commitPreviewState = useCallback(
     (requestId: number, nextState: AttachmentPreviewState): boolean => {
       if (!mountedRef.current || previewRequestIdRef.current !== requestId) {
         revokePreviewStateUrl(nextState);
         return false;
       }
-
       setPreviewState(nextState);
       return true;
     },
     [],
   );
-  const setExtractStateIfMounted = useCallback(
-    (nextState: typeof extractState) => {
-      if (mountedRef.current) {
-        setExtractState(nextState);
-      }
-    },
-    [],
-  );
 
   useEffect(() => {
-    // Reset on every mount so a StrictMode unmount/remount cycle does not
-    // leave the component permanently marked unmounted.
     mountedRef.current = true;
-
     return () => {
       mountedRef.current = false;
       previewRequestIdRef.current += 1;
-      // If an extraction is mid-read on unmount the route's backup worker may
-      // already be terminated, leaving the read promise forever pending —
-      // remove the zero-byte picker stub best-effort now.
-      extractStubCleanupRef.current?.();
-      extractStubCleanupRef.current = undefined;
     };
   }, []);
 
   const loadPreview = useCallback(
     async (requestPermission: boolean) => {
       const requestId = previewRequestIdRef.current + 1;
-
       previewRequestIdRef.current = requestId;
 
       if (!isInlinePreviewMediaKind(attachment.mediaKind)) {
@@ -1209,10 +1194,6 @@ function AttachmentView({
       commitPreviewState(requestId, { kind: "loading" });
 
       if (isThumbnailPreviewMediaKind(attachment.mediaKind)) {
-        // Cache probes intentionally bypass the preview concurrency limiter:
-        // they only read small cached thumbnail files from OPFS (never the
-        // source backup), so unbounded probes stay cheap and cached previews
-        // render without queueing behind large source reads.
         let cachedResult:
           | Awaited<
               ReturnType<
@@ -1267,9 +1248,6 @@ function AttachmentView({
 
       try {
         await runPreviewTask(async () => {
-          // Re-check at task start: the request may have been superseded (or
-          // the row unmounted) while queued behind the concurrency limiter,
-          // in which case the full source read must be skipped.
           if (!mountedRef.current || previewRequestIdRef.current !== requestId) {
             return;
           }
@@ -1313,7 +1291,6 @@ function AttachmentView({
           }
 
           const mediaClient = getMediaClient();
-          // Must be created before the transfer() below detaches the buffer.
           const originalPreview = attachment.mediaKind === "image"
             ? createOriginalMediaPreviewState(
                 "image",
@@ -1322,11 +1299,7 @@ function AttachmentView({
               )
             : undefined;
           let originalPreviewHandled = false;
-          // Single owner of the thumbnail-failure decision: fall back to the
-          // original image (with an explanatory caption) when one exists,
-          // otherwise surface the failure state. Marks the original preview
-          // handled so the finally block below does not double-revoke its
-          // blob URL (a stale commit revokes it inside commitPreviewState).
+
           const commitThumbnailFallback = (
             reason: "failed" | "unsupported",
             detail: string,
@@ -1419,12 +1392,10 @@ function AttachmentView({
 
   useEffect(() => {
     previewRequestIdRef.current += 1;
-
     if (attachment.mediaKind === "video") {
       setPreviewState({ kind: "idle" });
       return;
     }
-
     if (!isThumbnailPreviewMediaKind(attachment.mediaKind)) {
       setPreviewState({
         kind: "unsupported",
@@ -1432,7 +1403,6 @@ function AttachmentView({
       });
       return;
     }
-
     void loadPreview(false);
   }, [attachment, attachment.mediaKind, loadPreview]);
 
@@ -1444,6 +1414,144 @@ function AttachmentView({
     },
     [previewState],
   );
+
+  return { previewState, loadPreview };
+}
+
+function AttachmentPreview({
+  attachment,
+  getBackupClient,
+  getMediaClient,
+  record,
+  runPreviewTask,
+}: {
+  attachment: DbAttachmentSummary;
+  getBackupClient: () => BackupWorkerClient;
+  getMediaClient: () => MediaWorkerClient;
+  record: RecentBackupRecord;
+  runPreviewTask: RunPreviewTask;
+}) {
+  const { previewState, loadPreview } = useAttachmentPreview({
+    attachment,
+    getBackupClient,
+    getMediaClient,
+    record,
+    runPreviewTask,
+  });
+
+  return (
+    <span className="block">
+      {previewState.kind === "image" ? (
+        <>
+          <img
+            alt={attachment.filename ?? "Attachment preview"}
+            className="max-h-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] max-w-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] rounded-md border border-border object-contain bg-surface-sunken"
+            height={previewState.height}
+            src={previewState.url}
+            width={previewState.width}
+          />
+          {previewState.caption === undefined ? null : (
+            <span className="mt-2 block text-caption text-text-secondary">
+              {previewState.caption}
+            </span>
+          )}
+        </>
+      ) : previewState.kind === "video" ? (
+        <video
+          className="max-h-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] max-w-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] rounded-md border border-border bg-surface-sunken"
+          controls
+          preload="metadata"
+          src={previewState.url}
+        >
+          Video preview is unavailable in this browser runtime.
+        </video>
+      ) : previewState.kind === "loading" ? (
+        <span className="text-caption text-text-secondary">Loading preview.</span>
+      ) : previewState.kind === "needs-permission" ? (
+        <Button
+          onClick={(e) => {
+            e.stopPropagation();
+            void loadPreview(true);
+          }}
+          size="sm"
+          type="button"
+          variant="secondary"
+        >
+          Load preview
+        </Button>
+      ) : previewState.kind === "unsupported" ? (
+        <span className="text-caption text-text-secondary">{previewState.message}</span>
+      ) : previewState.kind === "error" ? (
+        previewState.message.includes("too large to decode") ? (
+          <div className="flex h-32 w-32 items-center justify-center rounded-md border border-border bg-surface-sunken p-4 text-center">
+            <div className="flex flex-col items-center gap-2 text-text-secondary">
+              <ImageOff aria-hidden="true" className="size-6" />
+              <span className="text-micro font-[var(--font-weight-strong)]">Image too large</span>
+            </div>
+          </div>
+        ) : (
+          <span className="text-caption text-danger">{previewState.message}</span>
+        )
+      ) : attachment.mediaKind === "video" ? (
+        <Button
+          onClick={(e) => {
+            e.stopPropagation();
+            void loadPreview(true);
+          }}
+          size="sm"
+          type="button"
+          variant="secondary"
+        >
+          <Video aria-hidden="true" className="size-4" />
+          Load video preview
+        </Button>
+      ) : null}
+    </span>
+  );
+}
+
+function AttachmentDetailCard({
+  attachment,
+  getBackupClient,
+  getMediaClient,
+  record,
+  runPreviewTask,
+}: {
+  attachment: DbAttachmentSummary;
+  getBackupClient: () => BackupWorkerClient;
+  getMediaClient: () => MediaWorkerClient;
+  record: RecentBackupRecord;
+  runPreviewTask: RunPreviewTask;
+}) {
+  const [extractState, setExtractState] = useState<
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "permission-granted" }
+    | { kind: "success" }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+  
+  const mountedRef = useRef(true);
+  const extractStubCleanupRef = useRef<(() => void) | undefined>(undefined);
+  const canReadSource = attachment.sourceDomain !== undefined && attachment.sourcePath !== undefined;
+
+  const setExtractStateIfMounted = useCallback(
+    (nextState: typeof extractState) => {
+      if (mountedRef.current) {
+        setExtractState(nextState);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      extractStubCleanupRef.current?.();
+      extractStubCleanupRef.current = undefined;
+    };
+  }, []);
 
   const extractOriginal = async () => {
     if (!canReadSource) {
@@ -1457,9 +1565,6 @@ function AttachmentView({
     setExtractStateIfMounted({ kind: "running" });
 
     try {
-      // Check the stored permission first so an already-granted grant goes
-      // straight to the picker; otherwise spend this click's user activation
-      // on the permission prompt before opening the picker.
       let permission = await ensureRecentBackupDirectoryPermission(record, {
         request: false,
       });
@@ -1481,11 +1586,6 @@ function AttachmentView({
       }
 
       if (requestedPermission && !navigator.userActivation.isActive) {
-        // The permission prompt consumed this click's transient user
-        // activation, so showSaveFilePicker would reject with a
-        // SecurityError. Stop here with a non-error notice instead of
-        // surfacing a confusing failure; the next click goes straight to
-        // the picker because permission is now granted.
         setExtractStateIfMounted({ kind: "permission-granted" });
         return;
       }
@@ -1503,11 +1603,6 @@ function AttachmentView({
               ],
       });
 
-      // Chrome creates the destination file as soon as the picker resolves.
-      // Until a write commits, treat it as a zero-byte stub that must be
-      // removed on any failure — including unmount, where the terminated
-      // backup worker leaves the read promise forever pending (the mount
-      // effect's cleanup invokes this ref).
       let stubPending = true;
       const removeStub = async () => {
         if (!stubPending) {
@@ -1520,8 +1615,6 @@ function AttachmentView({
         try {
           await fileHandle.remove();
         } catch {
-          // Best-effort cleanup: a removal failure must not mask the
-          // original extraction error.
         }
       };
 
@@ -1561,13 +1654,10 @@ function AttachmentView({
           await writable.close();
         }
 
-        // The write committed — keep the file.
         stubPending = false;
         extractStubCleanupRef.current = undefined;
         setExtractStateIfMounted({ kind: "success" });
       } finally {
-        // No-op when the write committed; otherwise removes the stub before
-        // the caller sees the failure state.
         await removeStub();
       }
     } catch (cause) {
@@ -1575,15 +1665,14 @@ function AttachmentView({
         setExtractStateIfMounted({ kind: "idle" });
         return;
       }
-
       setExtractStateIfMounted({ kind: "error", message: formatError(cause) });
     }
   };
 
   return (
-    <span className="block max-w-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] rounded-md border border-border bg-surface px-3 py-3 text-left shadow-1">
+    <div className="rounded-md border border-border bg-surface-sunken p-3">
       <span className="flex items-start gap-3">
-        <span className="mt-0.5 inline-flex size-[var(--control-height-md)] shrink-0 items-center justify-center rounded-md bg-surface-sunken text-text-tertiary">
+        <span className="mt-0.5 inline-flex size-[var(--control-height-md)] shrink-0 items-center justify-center rounded-md bg-surface text-text-tertiary shadow-sm border border-border">
           {attachment.mediaKind === "video" ? (
             <Video aria-hidden="true" className="size-4" />
           ) : (
@@ -1601,63 +1690,32 @@ function AttachmentView({
       </span>
 
       <span className="mt-3 block">
-        {previewState.kind === "image" ? (
-          <>
-            <img
-              alt={attachment.filename ?? "Attachment preview"}
-              className="max-h-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] max-w-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] rounded-md border border-border object-contain"
-              height={previewState.height}
-              src={previewState.url}
-              width={previewState.width}
-            />
-            {previewState.caption === undefined ? null : (
-              <span className="mt-2 block text-caption text-text-secondary">
-                {previewState.caption}
-              </span>
-            )}
-          </>
-        ) : previewState.kind === "video" ? (
-          <video
-            className="max-h-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] max-w-[calc(var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64)_+_var(--space-64))] rounded-md border border-border bg-surface-sunken"
-            controls
-            preload="metadata"
-            src={previewState.url}
-          >
-            Video preview is unavailable in this browser runtime.
-          </video>
-        ) : previewState.kind === "loading" ? (
-          <span className="text-caption text-text-secondary">Loading preview.</span>
-        ) : previewState.kind === "needs-permission" ? (
-          <Button
-            onClick={() => {
-              void loadPreview(true);
-            }}
-            size="sm"
-            type="button"
-            variant="secondary"
-          >
-            Load preview
-          </Button>
-        ) : previewState.kind === "unsupported" ? (
-          <span className="text-caption text-text-secondary">{previewState.message}</span>
-        ) : previewState.kind === "error" ? (
-          <span className="text-caption text-danger">{previewState.message}</span>
-        ) : attachment.mediaKind === "video" ? (
-          <Button
-            onClick={() => {
-              void loadPreview(true);
-            }}
-            size="sm"
-            type="button"
-            variant="secondary"
-          >
-            <Video aria-hidden="true" className="size-4" />
-            Load video preview
-          </Button>
-        ) : null}
+        <AttachmentPreview
+          attachment={attachment}
+          getBackupClient={getBackupClient}
+          getMediaClient={getMediaClient}
+          record={record}
+          runPreviewTask={runPreviewTask}
+        />
       </span>
 
-      <span className="mt-3 flex items-center gap-2">
+      <div className="mt-4 rounded-md border border-border bg-surface-sunken p-3 text-caption">
+        <dl
+          className="grid gap-x-3 gap-y-1"
+          style={{ gridTemplateColumns: "max-content minmax(0, 1fr)" }}
+        >
+          <dt className="text-text-tertiary">Domain</dt>
+          <dd className="break-all font-mono text-text-secondary">{attachment.sourceDomain}</dd>
+          <dt className="text-text-tertiary">Path</dt>
+          <dd className="break-all font-mono text-text-secondary">{attachment.sourcePath}</dd>
+          <dt className="text-text-tertiary">GUID</dt>
+          <dd className="break-all font-mono text-text-secondary">{attachment.sourceGuid}</dd>
+          <dt className="text-text-tertiary">SHA-256</dt>
+          <dd className="break-all font-mono text-text-secondary">{attachment.sha256}</dd>
+        </dl>
+      </div>
+
+      <span className="mt-4 flex items-center gap-2 border-t border-border pt-4">
         <Button
           disabled={!canReadSource || extractState.kind === "running"}
           onClick={() => {
@@ -1686,17 +1744,23 @@ function AttachmentView({
       {extractState.kind === "error" ? (
         <span className="mt-2 block text-caption text-danger">{extractState.message}</span>
       ) : null}
-    </span>
+    </div>
   );
 }
 
 function DetailPane({
+  getBackupClient,
+  getMediaClient,
   navigate,
   record,
+  runPreviewTask,
   state,
 }: {
+  getBackupClient: () => BackupWorkerClient;
+  getMediaClient: () => MediaWorkerClient;
   navigate: ReturnType<typeof useNavigate>;
   record: RecentBackupRecord;
+  runPreviewTask: RunPreviewTask;
   state: DetailState;
 }) {
   if (state.kind === "empty") {
@@ -1731,60 +1795,100 @@ function DetailPane({
       <div className="grid gap-3">
         <section>
           <h3 className="text-heading text-text">Message metadata</h3>
-          <dl className="mt-3 grid gap-3">
-            <DataRow label="Message id" value={message.id} />
-            <DataRow label="Conversation" value={conversationTitle(conversation)} />
-            <DataRow label="Sender" value={message.sender === undefined ? undefined : participantLabel(message.sender)} />
-            <DataRow label="Direction" value={message.isFromMe ? "Sent" : "Received"} />
-            <DataRow label="Service" value={message.service} />
-            <DataRow label="Sent at" value={formatDateTime(message.sentAtUtc)} />
-            <DataRow label="Delivered at" value={formatDateTime(message.dateDelivered)} />
-            <DataRow label="Read at" value={formatDateTime(message.dateRead)} />
-            <DataRow label="Raw timestamp" value={message.rawTimestamp} />
-            <DataRow label="Source GUID" value={message.sourceGuid} />
-            <DataRow label="Source row id" value={message.sourceRowId} />
-            <DataRow label="Edited" value={message.edited} />
-            <DataRow label="Unsent" value={message.unsent} />
-            <DataRow label="System event" value={message.isSystemEvent} />
-          </dl>
+          <div className="mt-3 rounded-md border border-border bg-surface-sunken p-3 text-caption">
+            <dl
+              className="grid gap-x-3 gap-y-1"
+              style={{ gridTemplateColumns: "max-content minmax(0, 1fr)" }}
+            >
+              <dt className="text-text-tertiary">ID</dt>
+              <dd className="break-all font-mono text-text-secondary">{message.id}</dd>
+              <dt className="text-text-tertiary">Thread</dt>
+              <dd className="break-all text-text-secondary">{conversationTitle(conversation)}</dd>
+              <dt className="text-text-tertiary">Sender</dt>
+              <dd className="break-all text-text-secondary">
+                {message.sender === undefined ? "Unknown" : participantLabel(message.sender)}
+              </dd>
+              <dt className="text-text-tertiary">Dir</dt>
+              <dd className="text-text-secondary">{message.isFromMe ? "Sent" : "Received"}</dd>
+              <dt className="text-text-tertiary">Service</dt>
+              <dd className="text-text-secondary">{message.service}</dd>
+              <dt className="text-text-tertiary">Sent</dt>
+              <dd className="text-text-secondary">{formatDateTime(message.sentAtUtc)}</dd>
+              {message.dateDelivered ? (
+                <>
+                  <dt className="text-text-tertiary">Delivered</dt>
+                  <dd className="text-text-secondary">{formatDateTime(message.dateDelivered)}</dd>
+                </>
+              ) : null}
+              {message.dateRead ? (
+                <>
+                  <dt className="text-text-tertiary">Read</dt>
+                  <dd className="text-text-secondary">{formatDateTime(message.dateRead)}</dd>
+                </>
+              ) : null}
+              <dt className="text-text-tertiary">Raw TS</dt>
+              <dd className="font-mono text-text-secondary">{message.rawTimestamp}</dd>
+              <dt className="text-text-tertiary">GUID</dt>
+              <dd className="break-all font-mono text-text-secondary">{message.sourceGuid}</dd>
+              <dt className="text-text-tertiary">Row</dt>
+              <dd className="font-mono text-text-secondary">{message.sourceRowId}</dd>
+              {message.edited ? (
+                <>
+                  <dt className="text-text-tertiary">Edited</dt>
+                  <dd className="text-text-secondary">Yes</dd>
+                </>
+              ) : null}
+              {message.unsent ? (
+                <>
+                  <dt className="text-text-tertiary">Unsent</dt>
+                  <dd className="text-text-secondary">Yes</dd>
+                </>
+              ) : null}
+              {message.isSystemEvent ? (
+                <>
+                  <dt className="text-text-tertiary">System</dt>
+                  <dd className="text-text-secondary">Yes</dd>
+                </>
+              ) : null}
+            </dl>
+          </div>
         </section>
 
         <section>
           <h3 className="text-heading text-text">Participants</h3>
-          <dl className="mt-3 grid gap-3">
-            {conversation.participants.map((participant) => (
-              <DataRow
-                key={participant.id}
-                label={participantLabel(participant)}
-                value={`${participant.handle}${participant.isSelf ? " / self" : ""}`}
-              />
-            ))}
-          </dl>
+          <div className="mt-3 rounded-md border border-border bg-surface-sunken p-3 text-caption">
+            <dl
+              className="grid gap-x-3 gap-y-1"
+              style={{ gridTemplateColumns: "max-content minmax(0, 1fr)" }}
+            >
+              {conversation.participants.map((participant) => (
+                <Fragment key={participant.id}>
+                  <dt className="text-text-tertiary text-right">{participantLabel(participant)}</dt>
+                  <dd className="break-all font-mono text-text-secondary">
+                    {participant.handle}
+                    {participant.isSelf ? " (self)" : ""}
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
+          </div>
         </section>
 
         <section>
-          <h3 className="text-heading text-text">Attachments provenance</h3>
+          <h3 className="text-heading text-text">Attachments</h3>
           {message.attachments.length === 0 ? (
             <p className="mt-2 text-caption text-text-secondary">No attachments.</p>
           ) : (
             <div className="mt-3 grid gap-3">
               {message.attachments.map((attachment) => (
-                <div
-                  className="rounded-md border border-border bg-surface-sunken p-3"
+                <AttachmentDetailCard
+                  attachment={attachment}
+                  getBackupClient={getBackupClient}
+                  getMediaClient={getMediaClient}
                   key={attachment.id}
-                >
-                  <p className="truncate text-body font-[var(--font-weight-strong)] text-text">
-                    {attachment.filename ?? attachment.id}
-                  </p>
-                  <dl className="mt-2 grid gap-2">
-                    <DataRow label="Source domain" value={attachment.sourceDomain} />
-                    <DataRow label="Source path" value={attachment.sourcePath} />
-                    <DataRow label="Source GUID" value={attachment.sourceGuid} />
-                    <DataRow label="SHA-256" value={attachment.sha256} />
-                    <DataRow label="Media kind" value={attachment.mediaKind} />
-                    <DataRow label="Byte length" value={attachment.bytes} />
-                  </dl>
-                </div>
+                  record={record}
+                  runPreviewTask={runPreviewTask}
+                />
               ))}
             </div>
           )}
@@ -1921,12 +2025,12 @@ function findInitialTimelineIndex(
   messageId: string | undefined,
 ): number {
   if (messageId === undefined) {
-    return 0;
+    return rows.length > 0 ? rows.length - 1 : 0;
   }
 
   const index = rows.findIndex((row) => row.kind === "message" && row.id === messageId);
 
-  return index < 0 ? 0 : index;
+  return index < 0 ? (rows.length > 0 ? rows.length - 1 : 0) : index;
 }
 
 function reactionLabel(kind: string): string {
@@ -1945,6 +2049,37 @@ function reactionLabel(kind: string): string {
       return "Questioned";
     default:
       return "Reacted";
+  }
+}
+
+function ReactionIcon({ kind }: { kind: string }) {
+  switch (kind) {
+    case "loved":
+      return (
+        <svg viewBox="0 0 24 24" fill="#ff3b30" className="size-4">
+          <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+        </svg>
+      );
+    case "liked":
+      return (
+        <svg viewBox="0 0 24 24" fill="currentColor" className="size-4 text-text-secondary">
+          <path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z" />
+        </svg>
+      );
+    case "disliked":
+      return (
+        <svg viewBox="0 0 24 24" fill="currentColor" className="size-4 text-text-secondary">
+          <path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z" />
+        </svg>
+      );
+    case "laughed":
+      return <span className="font-[var(--font-weight-strong)] text-[10px] leading-tight text-text-secondary">HA<br/>HA</span>;
+    case "emphasized":
+      return <span className="font-[var(--font-weight-strong)] text-[14px] italic leading-none text-text-secondary">!!</span>;
+    case "questioned":
+      return <span className="font-[var(--font-weight-strong)] text-[14px] leading-none text-text-secondary">?</span>;
+    default:
+      return <span className="font-[var(--font-weight-strong)] text-[12px] leading-none text-text-secondary">?</span>;
   }
 }
 

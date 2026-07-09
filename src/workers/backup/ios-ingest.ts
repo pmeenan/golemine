@@ -79,7 +79,7 @@ export async function ingestUnencryptedBackupDirectory(
     if (detection.isEncrypted || request.isEncrypted) {
       throw new BackupIngestError(
         "backup_encrypted_unsupported",
-        "Encrypted backup ingest is scheduled for M4. This M2 path only reads unencrypted backups.",
+        "Encrypted backup ingest is scheduled for M5. This M2 path only reads unencrypted backups.",
         { backupId: request.backupId },
       );
     }

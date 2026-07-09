@@ -79,6 +79,36 @@ describe("attachment thumbnail helpers", () => {
     }
   });
 
+  it("serializes thumbnail generation regardless of caller concurrency", async () => {
+    const firstStarted = deferred();
+    const releaseFirst = deferred();
+    const secondProgress = vi.fn();
+    const first = createAttachmentThumbnail(
+      thumbnailRequest({ mediaKind: "file", mime: "application/pdf" }),
+      async (progress) => {
+        if (progress.phase === "starting") {
+          firstStarted.resolve();
+          await releaseFirst.promise;
+        }
+      },
+    );
+
+    await firstStarted.promise;
+
+    const second = createAttachmentThumbnail(
+      thumbnailRequest({ mediaKind: "file", mime: "application/pdf" }),
+      secondProgress,
+    );
+
+    await Promise.resolve();
+    expect(secondProgress).not.toHaveBeenCalled();
+
+    releaseFirst.resolve();
+    await Promise.all([first, second]);
+
+    expect(secondProgress).toHaveBeenCalled();
+  });
+
   it("loads dev public vendor modules through a temporary blob URL", async () => {
     const importedModule = { default: () => "loaded" };
     const fetchModule = vi.fn((_moduleUrl: string, _init: RequestInit) =>
@@ -128,6 +158,16 @@ describe("attachment thumbnail helpers", () => {
 
     expect(chooseHeicThumbnailCandidateIndex(thumbnails, 512, false)).toBeUndefined();
     expect(chooseHeicThumbnailCandidateIndex(thumbnails, 512, true)).toBe(1);
+  });
+
+  it("keeps a 48 MP HEIC image within the 256 MiB RGBA decode cap", () => {
+    expect(
+      chooseHeicThumbnailCandidateIndex(
+        [{ width: 8064, height: 6048 }],
+        512,
+        false,
+      ),
+    ).toBe(0);
   });
 
   it("ignores embedded HEIC thumbnail candidates that exceed the decode cap", () => {
@@ -205,4 +245,13 @@ function thumbnailRequest(
     bytes: new Uint8Array([1, 2, 3]),
     ...overrides,
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+
+  return { promise, resolve };
 }

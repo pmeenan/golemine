@@ -323,8 +323,11 @@ metal and the ore it surfaces; no clay/terracotta styling).
   matte before JPEG encoding because phone attachments are photo-dominant. HEIC preview
   prefers embedded HEIF thumbnails when they satisfy the display target, uses the
   largest available embedded thumbnail when the primary image is over the memory cap,
-  and otherwise decodes the primary only when it is at or below 16,777,216 pixels
-  before RGBA allocation. Do not import `libheif-js` from app source or let Vite bundle
+  and otherwise decodes the primary only when its RGBA surface is at or below 256 MiB
+  (67,108,864 pixels, enough for 48 MP phone photos). Thumbnail generation is serialized
+  inside `thumbnails.ts` regardless of caller concurrency; keep libheif release calls
+  and the post-downsample canvas resets intact. Do not import `libheif-js` from app
+  source or let Vite bundle
   it; update NOTICE and the package-specific license audit exception for any codec
   version change.
 - The M1 synthetic mini-backup fixture is generated under

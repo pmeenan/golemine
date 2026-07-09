@@ -316,7 +316,7 @@ class DbQueryController {
               : readAnchorOffset(opened.db, request);
           const offset =
             anchorOffset === undefined
-              ? page.offset
+              ? (request.offset ?? Math.max(0, total - page.limit))
               : Math.max(0, anchorOffset - Math.floor(page.limit / 2));
           const messages = readMessagePage(opened.db, request.conversationId, {
             limit: page.limit,
@@ -381,7 +381,7 @@ class DbQueryController {
               : readAnchorOffset(opened.db, request);
           const offset =
             anchorOffset === undefined
-              ? page.offset
+              ? (request.offset ?? Math.max(0, total - page.limit))
               : Math.max(0, anchorOffset - Math.floor(page.limit / 2));
           const messages = readMessagePage(opened.db, request.conversationId, {
             limit: page.limit,

@@ -21,15 +21,17 @@ interrupted `ingesting` recents recovery, larger per-backup sqlite-wasm SAH pool
 lazily by `media-worker` (production direct module import; Vite dev fetch-to-Blob
 module shim so public vendor files are not transformed), prefer embedded HEIF
 thumbnails when available, and fall back to full-image decode only inside the
-media-worker memory cap (D-026/D-027/D-033). The
+media-worker's 256 MiB RGBA-surface cap; thumbnail generation is serialized so only
+one decode can hold full-size working surfaces at a time (D-026/D-027/D-033). The
 messages UI has had its post-review Design.md §7/§8 pass for avatar colors/sizing,
 sent-bubble foreground tokens, timestamp affordances, attachment frame caps, and
 below-floor detail overlay behavior, plus a follow-up M3 fix pass: consolidated
 shared worker helper modules, snippet-sentinel search hardening (D-030), a
 messages-only timeline load-more query, route-scoped browse/search workers with
 SAH-pool install retry (D-029), a 1 GiB user-initiated extraction budget (D-031),
-and normalized `serviceKind` bubble styling (D-032). Encrypted ingest is next in
-M4.**
+and normalized `serviceKind` bubble styling (D-032). Next is M4 — folding search
+into the messages UI as one unified browse/search workspace (D-034); encrypted
+ingest follows in M5.**
 
 ## M0 — Scaffolding
 
@@ -188,6 +190,9 @@ Goal: the core exploration experience.
       everything else.
 - [x] Thumbnail cache in OPFS (JPEG previews, content-addressed for native image and
       HEIC attachments).
+- [x] HEIC decode memory hardening: serialize thumbnail generation, cap each decoded
+      RGBA surface at 256 MiB (enough for 48 MP phone photos), and promptly release
+      canvas backing stores after downsampling.
 - [x] FTS5 full-text search + filters (conversation, participant, date range,
       has-attachment); snippets; jump-to-context in thread; load-more pagination for
       result sets beyond the first window.
@@ -218,7 +223,53 @@ performance benchmark, and a jump-to-date timeline navigation control (part of t
 original timeline scope that was quietly dropped during M3 review — still wanted;
 tracked here so it is not lost).
 
-## M4 — Encrypted backups
+## M4 — Unified messages & search
+
+Goal: search is part of the messages workspace, not a separate page. Browsing and
+searching are one experience with shared thread/timeline context (D-034).
+
+- [ ] Search panel above the Threads/timeline workspace: the standalone search page's
+      fields minus the conversation selector (search always spans all conversations),
+      with explicit run and reset controls. Reset returns the workspace to plain
+      browse mode.
+- [ ] Search semantics rework in db-worker (`compileUserTextToFtsExpression` +
+      `searchMessages`), per D-034:
+      - Case-insensitive throughout (FTS5 unicode61 folding for word terms; explicit
+        case folding for substring verification).
+      - Unquoted space-separated words: implicit AND, any order, anywhere in the
+        message, each word matched as an FTS5 prefix (`word*`).
+      - Quoted strings: true case-insensitive substring match — compile the quoted
+        text's indexable tokens to an FTS narrowing query, then verify the raw
+        substring against candidate bodies in the db-worker. Quoted strings with no
+        indexable tokens (punctuation/emoji only) use a bounded non-FTS scan with a
+        documented row budget; report when the budget truncates results.
+      - Unit tests for the compiler and the verification path: mixed quoted/unquoted
+        input, punctuation-only quotes, case folding, mid-word substring hits,
+        hostile bodies (existing D-030 sentinel rules still hold).
+- [ ] Active-search thread list: Threads pane filters to conversations with hits,
+      ordered by most-recent hit, with per-thread hit-count badges. New/extended
+      db-worker query in `src/workers/db/queries.ts` (no SQL from React, bounded and
+      paginated like existing queries).
+- [ ] Search-results column to the right of Threads: newest → oldest with snippet
+      segments, load-more pagination. No thread selected → all results; thread
+      selected → only that thread's results (reuse the `conversationId` filter), with
+      an "All" affordance in the column header to unselect the thread.
+- [ ] Clicking a result opens that conversation's timeline scrolled to the message
+      (existing jump-to-context path, without leaving the workspace).
+- [ ] Details pane becomes on-demand: collapsed/hidden until a message is selected,
+      dismissible, in both browse and search modes.
+- [ ] Layout/responsive pass: define the four-pane arrangement (Threads | Results |
+      Timeline | Detail-on-demand) with Design.md tokens only; keep the below-floor
+      overlay behavior; extend Design.md §7 with the new patterns rather than
+      improvising (hard rule 11).
+- [ ] Remove the standalone `/backup/:id/search` route once parity lands; update
+      navigation and any deep links.
+- [ ] e2e coverage: run search → filtered threads with counts → results column
+      scoping via thread select/"All" → result click scrolls timeline → details
+      on-demand → reset restores plain browse. Update `e2e/m3.spec.ts` expectations
+      that assume the standalone search page.
+
+## M5 — Encrypted backups
 
 Goal: encrypted backups work end-to-end with password prompt.
 
@@ -228,7 +279,7 @@ Goal: encrypted backups work end-to-end with password prompt.
 - [ ] Session-only key handling verified (nothing persisted); "derived data contains decrypted content" disclosure + wipe-on-remove.
 - [ ] Encrypted fixture backup + tests (unit vectors for keybag/KDF, e2e happy path + wrong password).
 
-## M5 — Reports & export
+## M6 — Reports & export
 
 Goal: court-exhibit-grade report from selected messages.
 
@@ -239,7 +290,7 @@ Goal: court-exhibit-grade report from selected messages.
 - [ ] Timezone selection for the report, labeled on every page.
 - [ ] Export via Chrome print-to-PDF; e2e test asserts print view content.
 
-## M6 — Polish & hardening
+## M7 — Polish & hardening
 
 - [ ] Wire generated illustrations into the UI (landing, capability-gate block screen,
       drag-drop overlay, backup guides) from `src/assets/illustrations/`, with

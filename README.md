@@ -15,7 +15,7 @@ offline after the first load.
 ## What it does (current + goals)
 
 - Open an unencrypted iPhone backup folder today (drag & drop or file picker);
-  encrypted backups are planned for M4 and will be decrypted locally in the browser.
+  encrypted backups are planned for M5 and will be decrypted locally in the browser.
 - Browse message threads with attachments in a fast, responsive UI.
 - Full-text search across all messages with filters (person, thread, date range,
   attachments).
@@ -62,8 +62,9 @@ JPEG thumbnail cache for native image and HEIC attachments. HEIC thumbnails use
 isolated same-origin `libheif-js` vendor files loaded lazily in `media-worker`
 (production imports the public vendor module directly; Vite dev uses a fetch-to-Blob
 module shim so the file is not transformed), prefer embedded HEIF thumbnails when
-available, and fall back to capped full-image decode;
-native video preview uses Chrome's `<video>` support from lazily read source bytes.
+available, and fall back to serialized full-image decode with a 256 MiB RGBA-surface
+cap that accommodates 48 MP phone photos. Native video preview uses Chrome's `<video>`
+support from lazily read source bytes.
 The messages layout follows the Lode message-rendering rules for deterministic
 fallback avatars, sent/received bubble semantics, timestamp affordances, attachment
 preview caps, and a detail overlay below the desktop responsive floor.

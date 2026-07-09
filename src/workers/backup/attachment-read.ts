@@ -305,7 +305,7 @@ function assertBackupCanBeRead(
   if (detection.isEncrypted) {
     throw new SourceFileReadError(
       "backup_encrypted_unsupported",
-      "Encrypted source file reads are scheduled for M4. This path only reads unencrypted backup files.",
+      "Encrypted source file reads are scheduled for M5. This path only reads unencrypted backup files.",
       true,
       { backupId: request.backupId ?? detection.id },
     );

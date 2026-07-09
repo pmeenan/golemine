@@ -100,9 +100,11 @@ more than ~16 ms.
   files never go through Vite transforms (D-033). HEIC preview first tries embedded
   HEIF thumbnails when they are useful for the display target, uses any usable embedded
   thumbnail when the primary image is over the decode memory cap, and otherwise decodes
-  the primary image only inside that cap. Video poster generation currently returns
-  typed unsupported results; future codec packages must be isolated, lazy-loaded only
-  when first needed, and must follow D-026.
+  the primary image only when its RGBA surface is at most 256 MiB. Thumbnail generation
+  is serialized inside the media worker, and its temporary canvas backing stores are
+  reset immediately after the image is downsampled. Video poster generation currently
+  returns typed unsupported results; future codec packages must be isolated, lazy-loaded
+  only when first needed, and must follow D-026.
 
 Ingest (the one long-running pipeline) flows backup-worker → db-worker directly, with
 progress events surfaced to the UI (phase, counts, ETA). Long counted loops use the
@@ -347,7 +349,7 @@ timezone printed on the report. Never display an ambiguous local time.
 
 ## 9. Encrypted backups
 
-Supported from an early milestone (see Plan.md M4). All crypto runs in backup-worker
+Supported from an early milestone (see Plan.md M5). All crypto runs in backup-worker
 using WebCrypto only:
 
 1. Parse the keybag from `Manifest.plist`; derive the password key

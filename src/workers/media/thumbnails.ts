@@ -29,7 +29,9 @@ const thumbnailExtension = "jpg";
 const thumbnailJpegQuality = 0.86;
 const thumbnailJpegBackground = "#fff";
 const maxSafeSegmentLength = 80;
-const maxHeicDecodedPixels = 16_777_216;
+const rgbaBytesPerPixel = 4;
+const maxHeicDecodedRgbaBytes = 256 * 1024 * 1024;
+const maxHeicDecodedPixels = maxHeicDecodedRgbaBytes / rgbaBytesPerPixel;
 const maxHeicThumbnailCandidates = 16;
 const heifErrorStructBytes = 16;
 const pointerBytes = 4;
@@ -94,6 +96,7 @@ interface DevPublicModuleLoader {
 }
 
 let libheifPromise: Promise<LibHeifModule> | undefined;
+let thumbnailGenerationTail: Promise<void> = Promise.resolve();
 
 const defaultDevPublicModuleLoader: DevPublicModuleLoader = {
   createObjectURL: (blob) => URL.createObjectURL(blob),
@@ -115,7 +118,16 @@ class MediaThumbnailError extends Error {
   }
 }
 
-export async function createAttachmentThumbnail(
+export function createAttachmentThumbnail(
+  request: CreateAttachmentThumbnailRequest,
+  progress?: WorkerProgressCallback,
+): Promise<WorkerResult<CreateAttachmentThumbnailResponse>> {
+  return runThumbnailGenerationSerially(() =>
+    createAttachmentThumbnailNow(request, progress),
+  );
+}
+
+async function createAttachmentThumbnailNow(
   request: CreateAttachmentThumbnailRequest,
   progress?: WorkerProgressCallback,
 ): Promise<WorkerResult<CreateAttachmentThumbnailResponse>> {
@@ -551,6 +563,7 @@ async function renderHeicThumbnail(
         "The HEIC image is too large to decode for preview and does not contain a usable embedded thumbnail.",
         {
           height,
+          maxDecodedRgbaBytes: maxHeicDecodedRgbaBytes,
           maxPixels: maxHeicDecodedPixels,
           width,
         },
@@ -577,13 +590,18 @@ async function renderHeifImageToJpegThumbnail(
       "The HEIC image is too large to decode for preview.",
       {
         height,
+        maxDecodedRgbaBytes: maxHeicDecodedRgbaBytes,
         maxPixels: maxHeicDecodedPixels,
         width,
       },
     );
   }
 
-  const imageData = new ImageData(new Uint8ClampedArray(pixels * 4), width, height);
+  const imageData = new ImageData(
+    new Uint8ClampedArray(pixels * rgbaBytesPerPixel),
+    width,
+    height,
+  );
   await displayHeifImage(image, imageData);
 
   const sourceCanvas = new OffscreenCanvas(imageData.width, imageData.height);
@@ -595,31 +613,54 @@ async function renderHeifImageToJpegThumbnail(
     );
   }
 
-  sourceContext.putImageData(imageData, 0, 0);
+  try {
+    sourceContext.putImageData(imageData, 0, 0);
 
-  const dimensions = fitWithin(imageData.width, imageData.height, maxPixelSize);
-  const outputCanvas = new OffscreenCanvas(dimensions.width, dimensions.height);
-  const outputContext = outputCanvas.getContext("2d");
+    const dimensions = fitWithin(imageData.width, imageData.height, maxPixelSize);
+    const outputCanvas = new OffscreenCanvas(dimensions.width, dimensions.height);
+    const outputContext = outputCanvas.getContext("2d");
 
-  if (outputContext === null) {
-    throw new MediaThumbnailError(
-      "Could not create a 2D OffscreenCanvas context for HEIC thumbnail output.",
-    );
+    if (outputContext === null) {
+      throw new MediaThumbnailError(
+        "Could not create a 2D OffscreenCanvas context for HEIC thumbnail output.",
+      );
+    }
+
+    try {
+      outputContext.imageSmoothingEnabled = true;
+      outputContext.imageSmoothingQuality = "high";
+      outputContext.fillStyle = thumbnailJpegBackground;
+      outputContext.fillRect(0, 0, dimensions.width, dimensions.height);
+      outputContext.drawImage(
+        sourceCanvas,
+        0,
+        0,
+        dimensions.width,
+        dimensions.height,
+      );
+
+      return await renderCanvasToJpegThumbnail(outputCanvas, dimensions);
+    } finally {
+      outputCanvas.width = 0;
+      outputCanvas.height = 0;
+    }
+  } finally {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
   }
+}
 
-  outputContext.imageSmoothingEnabled = true;
-  outputContext.imageSmoothingQuality = "high";
-  outputContext.fillStyle = thumbnailJpegBackground;
-  outputContext.fillRect(0, 0, dimensions.width, dimensions.height);
-  outputContext.drawImage(
-    sourceCanvas,
-    0,
-    0,
-    dimensions.width,
-    dimensions.height,
+function runThumbnailGenerationSerially<TResult>(
+  operation: () => Promise<TResult>,
+): Promise<TResult> {
+  const result = thumbnailGenerationTail.then(operation);
+
+  thumbnailGenerationTail = result.then(
+    () => undefined,
+    () => undefined,
   );
 
-  return renderCanvasToJpegThumbnail(outputCanvas, dimensions);
+  return result;
 }
 
 function getBestEmbeddedHeifThumbnail(
