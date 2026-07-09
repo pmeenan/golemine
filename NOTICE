@@ -11,5 +11,12 @@ Fonts:
 
 Runtime libraries:
 - @sqlite.org/sqlite-wasm, licensed under the Apache License, Version 2.0.
+- libheif-js 1.19.8, licensed under the GNU Lesser General Public License,
+  Version 3.0. Golemine uses it as isolated, unmodified, dynamically loaded
+  same-origin vendor files under `public/vendor/libheif-js/1.19.8/` for HEIC
+  thumbnail decoding. Upstream source:
+  https://github.com/catdad-experiments/libheif-js
+  The underlying libheif project is licensed under the GNU Lesser General Public
+  License, Version 3.0. Upstream source: https://github.com/strukturag/libheif
 
 The full dependency license audit is enforced by scripts/license-audit.mjs.

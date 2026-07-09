@@ -17,7 +17,8 @@ The visual design language (tokens, theming, component rules) lives in [Design.m
   opened via drag/drop or a directory picker. Android support comes later via the same
   provider abstraction.
 - **Core features:** browse message threads, full-text search across all messages, view
-  attachments (including HEIC/HEVC), select messages into a report, export a
+  attachments (native images, HEIC thumbnails, and native videos now; HEVC fallback
+  support planned), select messages into a report, export a
   print-optimized report with forensic metadata (hashes, device info, timestamps).
 - **Non-negotiables:** works entirely offline, never sends user data anywhere, never
   modifies the source backup, Chrome-only (free use of Chrome-specific APIs).
@@ -33,7 +34,7 @@ The visual design language (tokens, theming, component rules) lives in [Design.m
 | Offline | Service worker via `vite-plugin-pwa` (Workbox) | Precache the app shell + wasm assets; app must fully work with no network after first load |
 | CI | GitHub Actions for pull requests | Run lint, typecheck, unit tests, Playwright Chromium e2e, and license audit |
 | SQLite | Official `@sqlite.org/sqlite-wasm` | Runs in a dedicated worker; `opfs-sahpool` VFS so COOP/COEP headers are NOT required |
-| Media decode | libheif (wasm) for HEIC; native `<video>`/WebCodecs for HEVC where hardware allows; ffmpeg.wasm (single-threaded) as fallback | LGPL allowed only for unmodified, dynamically-loaded wasm codec modules — see AGENTS.md licensing rules |
+| Media decode | Native browser image/video preview plus isolated `libheif-js` HEIC thumbnails today; future single-threaded video poster fallback if needed | LGPL allowed only as an isolated, dynamically loaded, replaceable package-specific codec exception — see AGENTS.md licensing rules and D-026/D-027 |
 | Worker RPC | Comlink (Apache-2.0) | Typed proxies over `postMessage`; transfer `ArrayBuffer`s, never copy large payloads |
 | State | zustand (MIT) | UI state only; all data lives in the derived SQLite DB |
 | Routing | react-router (MIT) | Client-side only |
@@ -68,9 +69,9 @@ more than ~16 ms.
        │ Comlink                  │ Comlink                  │ Comlink
 ┌──────▼─────────┐        ┌───────▼────────┐        ┌────────▼───────┐
 │ backup-worker  │        │   db-worker    │        │  media-worker  │
-│ FS scanning    │        │ sqlite-wasm    │        │ HEIC decode    │
+│ FS scanning    │        │ sqlite-wasm    │        │ native thumbs   │
 │ Manifest parse │        │ derived DB     │        │ thumbnails     │
-│ decryption     │        │ FTS5 queries   │        │ video fallback │
+│ decryption     │        │ FTS5 queries   │        │ media fallback │
 │ extraction     │        │ ingest writes  │        │ (ffmpeg.wasm)  │
 │ SHA-256 hashing│        │ (opfs-sahpool) │        │                │
 └──────┬─────────┘        └───────┬────────┘        └────────────────┘
@@ -92,9 +93,16 @@ more than ~16 ms.
 - **db-worker** — hosts sqlite-wasm. Owns the per-backup derived database in OPFS
   (normalized messages + FTS5 index + report selections). All queries the UI needs are
   RPC methods here; the UI never sees raw SQL.
-- **media-worker** — decodes HEIC to RGBA/PNG, generates and caches thumbnails in OPFS,
-  transcodes/extracts frames for unsupported video as a fallback. Codec wasm modules are
-  lazy-loaded only when first needed.
+- **media-worker** — generates and caches JPEG image thumbnails in OPFS and lazy-loads
+  isolated same-origin `libheif-js` vendor files for HEIC thumbnails. Production
+  imports the public vendor ES module directly; Vite dev fetches the same unmodified
+  public file and imports it through a temporary Blob module URL so `public/` vendor
+  files never go through Vite transforms (D-033). HEIC preview first tries embedded
+  HEIF thumbnails when they are useful for the display target, uses any usable embedded
+  thumbnail when the primary image is over the decode memory cap, and otherwise decodes
+  the primary image only inside that cap. Video poster generation currently returns
+  typed unsupported results; future codec packages must be isolated, lazy-loaded only
+  when first needed, and must follow D-026.
 
 Ingest (the one long-running pipeline) flows backup-worker → db-worker directly, with
 progress events surfaced to the UI (phase, counts, ETA). Long counted loops use the
@@ -102,6 +110,16 @@ shared throttled progress helper so normalization and aggregate writes can updat
 counts about every 500 ms without spamming Comlink. The UI starts and observes ingest
 but does not relay ingest batches. Ingest is resumable/restartable: if
 interrupted, the derived DB is rebuilt from scratch (source is the source of truth).
+
+Worker lifetimes: one-shot open/detect/ingest UI operations create a fresh worker
+client per operation and release it when the operation finishes. The M3 browse/search
+routes instead own route-scoped db/backup/media workers for the route lifetime, so
+repeated queries, previews, and thumbnails do not churn worker startup or contend for
+the same per-backup SAH pool; the pool hand-off race on route switches is absorbed by
+a brief `installOpfsSAHPoolVfs` retry (D-029). Cross-worker helpers (sqlite init and
+error classification, binary/progress/OPFS/retry/hash utilities, media MIME sets and
+byte budgets, service-kind mapping) live in `src/workers/shared/` and are extended
+rather than re-declared per worker.
 
 ## 4. Storage model
 
@@ -123,7 +141,8 @@ interrupted, the derived DB is rebuilt from scratch (source is the source of tru
   `golemine/backups/`, keyed by backup UDID when known and falling back to the recents
   id before detection has a UDID:
   - `golemine.sqlite` — the normalized message store + FTS5 index (schema below).
-  - `thumbs/` — cached attachment/contact-avatar thumbnails (content-addressed by hash).
+  - `thumbs/` — cached attachment/contact-avatar thumbnails (content-addressed by hash
+    or stable source provenance key when a hash is not yet available).
 - Request `navigator.storage.persist()` on first ingest so Chrome doesn't evict data.
 - Derived data is always disposable: deleting a backup from recents deletes its OPFS
   directory through `src/lib/recents.ts`; the source folder is untouched. A
@@ -188,6 +207,21 @@ transient read-only open, even when no WAL sidecar exists or no frame commits, s
 sqlite-wasm does not try to open transient sidecars that backup-worker intentionally
 does not create (D-025). The source backup directory is never written.
 
+The M3 source-file RPC is
+`BackupWorkerApi.readUnencryptedSourceFile(root, request, progress?)`. It re-validates
+the detected backup, rejects encrypted backups, opens `Manifest.db` with root WAL
+sidecars applied, locates a requested normalized attachment by exact domain/path, reads
+only from the read-only source wrapper, verifies optional expected SHA-256, and enforces
+a caller-provided byte cap. Byte-bearing responses are returned with Comlink
+`transfer()` so large attachments do not clone through the UI thread. The backup-worker
+memoizes the most recent backup's detection result and open `Manifest.db` reader per
+`backupId` (sound because source backups are read-only; a different `backupId` closes
+the old reader). Byte caps come from the named budgets in
+`src/workers/shared/media-limits.ts`; user-initiated extraction uses the explicit
+1 GiB `extractMaxReadBytes` budget (D-031). UI
+preview/extraction and future report hashing should use this API rather than reaching
+into provider internals or holding writable-capable handles.
+
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 
 - **Conversation** — thread; 1:1 or group; participants; display name; service.
@@ -245,9 +279,21 @@ Attachment source hashes may be absent for large, unknown-size, deceptive-size, 
 budget-deferred media; the source path, domain, GUID, and manifest/source-file
 provenance are still kept so report/export code can hash selected originals on demand.
 
-Search = FTS5 `MATCH` with filters (conversation, participant, date range, has-attachment)
-compiled into SQL in the db-worker. Results return message ids + snippets; the UI
-navigates to the message in its thread context.
+The db-worker query API lives in `src/workers/db/queries.ts`. `listConversations`
+(also exposed as `listThreads`) returns a recency-sorted virtualized page with
+participants and last-message preview (a per-conversation correlated LIMIT-1 lookup);
+`getMessageTimelinePage` returns bounded chronological windows with
+attachments/reactions hydrated, and `getMessageTimelineMessagesPage` returns the same
+window without conversation hydration for load-more; `getMessageDetails` returns
+message + conversation provenance; and `searchMessages` compiles FTS5 `MATCH` plus
+conversation, participant, date-range, and has-attachment filters into SQL. Message
+records carry a normalized `serviceKind` (`imessage`/`sms-family`/`unknown`, D-032) so
+the UI never string-matches raw service names. Results
+return message ids and structured snippet segments only; hostile bodies containing the
+snippet highlight sentinels degrade to a single non-highlighted segment (D-030). The
+UI renders all backup text
+as text nodes, exposes load-more controls for additional pages, and navigates to the
+message in its thread context.
 
 ## 7. UI structure
 
@@ -257,9 +303,12 @@ Routes (react-router, all client-side):
   machine"), drag/drop + open-folder entry points, recents list (rename/remove).
 - `/guide/iphone`, `/guide/android` — static how-to-back-up-your-phone pages.
 - `/backup/:id` — backup overview: device info, ingest status/progress, capability tiles.
-- `/backup/:id/messages` — three-pane messages UI: thread list (virtualized, sorted by
-  recency) → message timeline (virtualized, bubble rendering, attachment previews,
-  reactions badged onto their target) → detail/metadata panel for a selected message.
+- `/backup/:id/messages` — three-pane messages UI for ingested backups: thread list
+  (virtualized, sorted by recency) → message timeline (virtualized, bubble rendering,
+  attachment previews, reactions badged onto their target) → detail/metadata panel for
+  a selected message. Conversation/timeline pages can load additional db-worker
+  windows. Attachment previews and extraction read source bytes lazily through
+  backup-worker.
 - `/backup/:id/search` — query + filters, result list with snippets, jump-to-context.
 - `/backup/:id/report/:reportId` — report builder: ordered selected messages, case
   metadata form, print preview.
@@ -324,7 +373,8 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
   `public/_headers` so hosts that support static header files copy it into `dist/`.
   Scripts and `connect` are same-origin only; other asset types stay loose enough for
   generated static assets (`data:`/`blob:`) and workers. Compiling wasm (sqlite-wasm,
-  libheif) in Chrome requires `script-src 'wasm-unsafe-eval'` — include it; it does not
+  and isolated codec packages such as libheif) in Chrome requires
+  `script-src 'wasm-unsafe-eval'` — include it; it does not
   permit JS `eval`. Do not use a meta CSP for this app: it breaks Vite dev, cannot
   enforce `frame-ancestors`, and makes the pre-paint theme script hash-fragile.
 - **Source backups are read-only.** No code path receives a writable handle to the
@@ -342,12 +392,13 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
   src/
     app/              routes, layout, providers
     components/       shared UI components
-    features/         landing/, recents/, messages/, search/, report/, guides/
+    features/         landing/, recents/, m3/ messages/search, report/, guides/
     workers/
       backup/         backup-worker: providers/ios/, crypto/, plist/, typedstream/
       db/             db-worker: schema, queries, ingest sink, FTS
-      media/          media-worker: heic, thumbs, video fallback
-      shared/         helpers shared across workers (sqlite init, binary, progress)
+      media/          media-worker: thumbs, native media helpers, future codec fallbacks
+      shared/         helpers shared across workers (sqlite init/errors, binary, progress,
+                      OPFS, retry, hash, guards, media MIME/limits, service kind)
     lib/              shared utils (time, bytes, comlink helpers, types)
     assets/           bundled images: brand/ (icon master), illustrations/ (light/dark WebP pairs)
   public/             static assets, wasm binaries
@@ -368,7 +419,7 @@ for end-to-end flows including drag/drop ingest, offline/privacy invariants, and
 printing.
 
 The first generated fixture is `e2e/fixtures/generated/ios-mini-backup/`, a synthetic
-unencrypted iPhone backup root used by the M1 open -> detect -> recents Playwright flow
-and the M2 open -> ingest -> derived summary flow. Its source module and generator
+unencrypted iPhone backup root used by the M1 open -> detect -> recents Playwright flow,
+the M2 open -> ingest -> derived summary flow, and the M3 browse/search flow. Its source module and generator
 produce deterministic Manifest/sms/contact SQLite data, real WAL sidecars, tapbacks,
 attachments, contact-avatar happy/error cases, and expected normalized metadata.

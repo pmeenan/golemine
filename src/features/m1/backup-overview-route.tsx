@@ -209,6 +209,14 @@ export function BackupOverviewRoute() {
     }
 
     const didPrepareDerivedDb = { current: false };
+    // Captured before markPrepared writes "ingesting": a pool-unavailable
+    // prepare failure guarantees the derived DB was never touched, so a
+    // previously ingested record must be restored, not downgraded. The
+    // version check matters because updateIngestStatus("ingested") stamps the
+    // current derivedDbVersion; a stale-version record must not be re-stamped.
+    const wasIngestedBeforeRebuild =
+      record.ingestStatus === "ingested" &&
+      record.derivedDbVersion === derivedDbVersion;
 
     const updateStoredIngestStatus = async (
       status: RecentBackupIngestStatus,
@@ -280,7 +288,20 @@ export function BackupOverviewRoute() {
 
         if (!result.ok) {
           if (didPrepareDerivedDb.current) {
-            await updateStoredIngestStatus("failed");
+            // derived_db_pool_unavailable means prepare could not acquire the
+            // per-backup SAH pool (e.g. another tab is browsing this backup)
+            // and the derived DB was never modified, even though the "prepare"
+            // progress phase already flipped the stored status to "ingesting".
+            // Restore the pre-rebuild ingested status instead of downgrading;
+            // all other post-prepare failures still mark the record failed.
+            if (
+              result.error.code === "derived_db_pool_unavailable" &&
+              wasIngestedBeforeRebuild
+            ) {
+              await updateStoredIngestStatus("ingested");
+            } else {
+              await updateStoredIngestStatus("failed");
+            }
           }
 
           setIngestStatus({

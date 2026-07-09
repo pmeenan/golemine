@@ -6,12 +6,12 @@ import { BackupOverviewRoute } from "../features/m1/backup-overview-route";
 import { WorkspaceCapabilityGate } from "../features/m1/capability-gate";
 import { AndroidGuideRoute, IphoneGuideRoute } from "../features/m1/guide-routes";
 import { LandingRoute } from "../features/m1/landing-route";
+import { MessagesRoute } from "../features/m3/messages-route";
+import { SearchRoute } from "../features/m3/search-route";
 import {
-  MessagesRoute,
   NotFoundRoute,
   PrintReportRoute,
   ReportRoute,
-  SearchRoute,
 } from "../features/m0/route-placeholders";
 
 function workspaceRoute(element: ReactNode) {

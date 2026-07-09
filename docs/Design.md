@@ -92,6 +92,7 @@ aids recognition and courtroom presentation:
 |---|---|---|---|
 | `--bubble-imessage` | `oklch(0.58 0.19 258)` | `oklch(0.56 0.17 258)` | Sent iMessage (white text) |
 | `--bubble-sms` | `oklch(0.62 0.17 150)` | `oklch(0.60 0.15 150)` | Sent SMS/MMS (white text) |
+| `--bubble-foreground` | `oklch(0.99 0.006 255)` | `oklch(0.99 0.006 255)` | Text/icons on sent message bubbles |
 | `--bubble-received` | `--surface-sunken` | `--surface-raised` | Received messages (normal text) |
 
 These hues are reserved: nothing else in the app may use saturated blue-258 or
@@ -100,8 +101,9 @@ green-150 fills, so a screenshot of a thread is unambiguous.
 ### 1.5 Data visualization / avatars
 
 Participant avatar fallbacks use a fixed 8-color categorical ramp (defined in
-`tokens.css`, hues evenly spaced, L/C normalized per theme), selected by stable hash of
-the handle — the same person is always the same color.
+`tokens.css`, hues evenly spaced, L/C normalized per theme) plus
+`--avatar-foreground` for initials, selected by stable hash of the handle — the same
+person is always the same color.
 
 ## 2. Typography
 
@@ -239,6 +241,9 @@ hover affordances there are CSS-driven.
 - Bubbles: `--radius-bubble`, max-width 72% of pane (min 220px), padding 10×14,
   `--type-body`. Sent right-aligned (`--bubble-imessage`/`--bubble-sms` per service),
   received left with avatar (28px) shown on first message of a sender run.
+  Service mapping uses the normalized `serviceKind` (never raw provider strings):
+  `sms-family` → `--bubble-sms`; `imessage` **and** `unknown` → `--bubble-imessage`
+  (Apple-default assumption for unrecognized services).
 - Runs: consecutive same-sender messages ≤ 60s apart group with 2px gaps and only the
   last bubble gets a tail-corner (larger radius break); 8px between runs; day separators
   (`--type-micro`, centered) between days.
@@ -249,9 +254,10 @@ hover affordances there are CSS-driven.
   `--warning` text — forensically important, never hidden.
 - Search hits: `--accent-subtle` text highlight (gold) with `--accent-text` underline;
   the active hit gets the full selection treatment.
-- Attachments: images/video in rounded (12px) frames, max 320×320 thumb, click →
-  full-screen viewer (glass chrome); non-previewable files get a file card (icon,
-  name, size, extract button).
+- Attachments: images/video in `--radius-md` (10px) frames (originally specified as
+  12px; reconciled to the token scale in §3, which has no 12px radius), max 320×320
+  thumb, click → full-screen viewer (glass chrome); non-previewable files get a file
+  card (icon, name, size, extract button).
 
 ## 8. Layout
 
@@ -263,7 +269,9 @@ hover affordances there are CSS-driven.
 - Landing/guides: single column, max-width 720px text / 960px content, generous
   (48–64) vertical rhythm.
 - Responsive floor: 1024px width; below that, the detail panel overlays instead of
-  docking. No mobile layout (desktop Chrome tool).
+  docking. Overlaying panels take dialog semantics: `role="dialog"` + `aria-modal`
+  with a label, focus moves into the panel on open and returns on close, and Escape
+  dismisses. No mobile layout (desktop Chrome tool).
 
 ## 9. Print (reports)
 

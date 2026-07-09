@@ -1,11 +1,52 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
 import { describe, expect, it } from "vitest";
 
+import { getSqlite } from "../shared/sqlite-init";
 import {
   applySqliteWal,
+  openSourceSqliteDatabase,
   prepareSourceSqliteBytesForReadOnlyOpen,
+  sqliteValue,
 } from "./source-sqlite";
 
 const pageSize = 512;
+
+describe("openSourceSqliteDatabase", () => {
+  it("unlinks the transient wasm VFS copy when the database is closed", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "golemine-source-"));
+    const dbPath = path.join(tempDirectory, "source.db");
+    const nodeDb = new DatabaseSync(dbPath);
+
+    try {
+      nodeDb.exec(`
+        CREATE TABLE ore (id INTEGER PRIMARY KEY, label TEXT);
+        INSERT INTO ore (id, label) VALUES (1, 'bronze');
+      `);
+      nodeDb.close();
+
+      const main = Uint8Array.from(await readFile(dbPath));
+      const source = await openSourceSqliteDatabase({ label: "unlink-test", main });
+
+      expect(sqliteValue(source.db, "SELECT label FROM ore WHERE id = 1;")).toBe(
+        "bronze",
+      );
+
+      source.close();
+
+      // The transient copy must be removed from the wasm VFS on close;
+      // re-opening the same name read-only must fail because the file is gone.
+      const sqlite3 = await getSqlite();
+
+      expect(() => new sqlite3.oo1.DB(source.databaseName, "r")).toThrow();
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("applySqliteWal", () => {
   it("replays committed frames and ignores frames after the last commit", () => {

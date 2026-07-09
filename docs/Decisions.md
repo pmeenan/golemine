@@ -370,3 +370,174 @@ Rationale: the backup folder remains read-only and provider-specific sidecar han
 stays deterministic in backup-worker. Forcing rollback mode on the transient copy
 prevents sqlite-wasm from making filesystem assumptions about sidecars we deliberately
 do not create.
+
+## D-026 — Isolate LGPL codec packages when no better option exists (2026-07-08)
+
+M3 needs attachment previews, and HEIC support may require LGPL code. D-005 keeps the
+core application permissively licensed, but LGPL can be acceptable when there is no
+good permissive alternative and the dependency can be used without tainting Golemine's
+Apache-2.0 app code. For browser codecs, that means the LGPL pieces must stay as
+separate, unmodified, dynamically loaded same-origin library files rather than being
+bundled into app chunks or copied into project-owned source modules. This may include
+the codec's JavaScript glue/wrapper when that glue is part of the unmodified upstream
+LGPL distribution and is loaded as an isolated library file. This decision clarifies
+the narrower "wasm codec modules" wording in D-005 for browser codec packages.
+
+Decision: an LGPL codec dependency may be added if it is the best available option, is
+same-origin hosted, is loaded lazily/dynamically from isolated vendor files, remains
+unmodified or has any modifications published under the LGPL, is practically
+replaceable by users, and is recorded in NOTICE plus the package-specific license audit
+exceptions. GPL/AGPL remain disallowed.
+
+Rationale: this gives users the browse/search/extract experience without weakening the
+project's license posture or folding copyleft code into app-owned modules. Each LGPL
+codec choice still needs its own package/version decision so replacement, NOTICE, and
+license-audit details stay explicit.
+
+## D-027 — Use isolated libheif-js for HEIC thumbnails (2026-07-08)
+
+M3's attachment surface should preview common iPhone image formats. Chrome does not
+natively decode HEIC everywhere, and no suitable permissively licensed browser HEIC
+decoder was available in the current stack. `libheif-js` 1.19.8 packages libheif for
+browser use under LGPL-3.0 and provides a wasm-backed ES module build.
+
+Decision: Golemine uses `libheif-js` 1.19.8 for HEIC attachment thumbnails only. The
+runtime files are copied unmodified under
+`public/vendor/libheif-js/1.19.8/` and lazy-loaded by `media-worker` with a dynamic
+import from that same-origin vendor path. Golemine does not import `libheif-js` from
+app source or let Vite bundle it into app chunks. The package is recorded in NOTICE and
+has a package-specific `scripts/license-audit.mjs` exception per D-026. The app-owned
+media-worker bridge may call exported libheif thumbnail-handle APIs from that isolated
+module: it prefers embedded HEIF thumbnails when they meet the display target and uses
+the largest available embedded thumbnail when the primary image exceeds the worker
+decode memory cap.
+
+Rationale: this adds the expected iPhone HEIC preview path while keeping LGPL code out
+of project-owned modules and preserving offline/static-host behavior. The worker still
+returns original-file extraction for every attachment and caches decoded thumbnails as
+rebuildable OPFS derived data.
+
+Note (2026-07-08): D-033 adds the Vite-dev-only fetch-to-Blob module shim needed to
+avoid Vite's public-dir transform guard. Production still imports the same public
+vendor ES module directly.
+
+## D-028 — Cache attachment thumbnails as JPEG (2026-07-08)
+
+M3 attachment thumbnails are overwhelmingly phone photos, including HEIC originals
+decoded by `media-worker`. PNG thumbnails were simple but wasteful for photo previews.
+
+Decision: `MediaWorkerApi.createAttachmentThumbnail` returns `image/jpeg` thumbnails
+and stores them as `.jpg` files under the OPFS attachment thumbnail cache. The worker
+resizes before encoding, uses high-quality JPEG compression, and flattens transparent
+sources onto a white matte because JPEG has no alpha channel.
+
+Rationale: JPEG keeps preview bytes and OPFS cache size much smaller for the expected
+photo-heavy workload while still handing the browser a normal image format after HEIC
+decode. The original source attachment remains available through extraction, so the
+thumbnail cache stays disposable derived data.
+
+## D-029 — M3 browse/search routes own route-scoped workers (2026-07-08)
+
+One-shot open/detect/ingest operations create a fresh worker client per operation and
+release it in `finally`, but the M3 messages/search routes issue many small queries,
+previews, and thumbnail requests. Per-operation workers there would churn worker
+startup and repeatedly reinstall the same per-backup `opfs-sahpool` VFS.
+
+Decision: the M3 routes intentionally create db/backup/media worker clients scoped to
+the route lifetime and release them on unmount. The consequence is accepted: the
+per-backup SAH pool is held while the route is mounted, so browsing the same backup in
+multiple tabs concurrently is out of scope for now. The transient hand-off race when
+switching routes (a just-terminated worker's sync access handles still releasing while
+the next worker installs its pool) is mitigated by retrying `installOpfsSAHPoolVfs`
+briefly (`retryAsyncOperation`, 4 attempts with a 150/300/600 ms backoff) in the
+ingest sink, and the backup worker memoizes the most recent backup's detection plus
+open `ManifestDbReader` per `backupId` — sound because source backups are read-only.
+
+Rationale: one worker set per mounted route keeps repeated queries cheap and avoids
+SAH pool contention within a tab. Multi-tab same-backup browsing needs a coordinated
+pool-ownership design (e.g. Web Locks hand-off) and should be its own decision if it
+becomes a real need.
+
+Note (2026-07-08): the retry must pass sqlite-wasm's `forceReinitIfPreviouslyFailed`
+option — `installOpfsSAHPoolVfs` memoizes its install promise per VFS name and
+otherwise replays the first rejection on every retry. The backoff schedule is
+150/300/600 ms (~1.05 s total) because route-switch handle release can exceed 450 ms
+on slow machines. When the pool still cannot be acquired during a rebuild's
+`prepareIngest` (e.g. another tab holds it), the db-worker fails with the distinct
+`derived_db_pool_unavailable` code, which guarantees the derived DB was not modified;
+the overview route uses it to restore a previously `ingested` record instead of
+downgrading it to `failed`. The memoized `ManifestDbReader` cache additionally
+verifies root-directory identity (`isSameEntry`) on hits and retains byte-free
+provenance metadata only.
+
+## D-030 — FTS5 snippet sentinels degrade to unhighlighted snippets (2026-07-08)
+
+Search snippets are produced by FTS5 `snippet()` using U+0001/U+0002 as highlight
+delimiters, then parsed into structured segments so the UI never renders backup text
+as HTML. Backup content is hostile input (hard rule 4): a message body may itself
+contain those control characters and desynchronize delimiter parsing.
+
+Decision: when a snippet's body text contains the sentinel characters, the db-worker
+strips all sentinels and returns the snippet as a single non-highlighted segment
+instead of guessing at highlight boundaries. Sentinel characters are always stripped
+from every emitted segment as a final guard, so they can never reach the UI.
+
+Rationale: losing highlight styling on a deliberately crafted message is harmless;
+mis-parsed highlight boundaries could mislabel which text matched. Degrading to plain
+text is the only failure mode that stays honest.
+
+## D-031 — User-initiated extraction reads up to 1 GiB in memory (2026-07-08)
+
+Attachment reads through `readUnencryptedSourceFile` are byte-capped by the caller
+(`src/workers/shared/media-limits.ts`). Previews use small budgets, but "extract
+original" must handle large videos, and the backup-worker read path currently
+materializes the file bytes in worker memory before transfer.
+
+Decision: user-initiated extraction uses an explicit `extractMaxReadBytes` budget of
+1 GiB. The larger read is acceptable because the user explicitly chose a destination
+file; files above the budget fail with a clear byte-cap error rather than an
+out-of-memory crash. The extract flow checks permission, opens the save picker, reads
+with the budget, and removes the zero-byte picker stub if the read fails. A streaming
+source-to-disk copy (no full in-memory buffer, no practical cap) is deferred; the M4
+per-file decrypt path is the natural time to revisit it.
+
+Rationale: 1 GiB covers realistic phone attachments while keeping the read path
+simple and transferable over Comlink. An unbounded in-memory read would trade a clear
+error for an opaque tab crash on pathological files.
+
+## D-032 — Normalized serviceKind drives message presentation (2026-07-08)
+
+Bubble accent color depends on the message service (iMessage blue vs. SMS green), but
+provider service strings are raw source values and must not be string-matched in the
+UI (hard rule 8).
+
+Decision: `src/workers/shared/service-kind.ts` owns `classifyServiceKind`, mapping the
+trimmed, case-insensitive service token to `imessage`, `sms-family` (SMS/MMS/RCS), or
+`unknown`; unrecognized variants deliberately fall through to `unknown` rather than
+being guessed. The db-worker populates `serviceKind` on message records/previews, and
+the UI styles `sms-family` with `--bubble-sms` and everything else — including
+`unknown` — with `--bubble-imessage`.
+
+Rationale: classification lives once in a shared worker module so db-worker and any
+future provider agree, and the UI stays free of provider-specific string knowledge.
+Rendering `unknown` as iMessage matches the dominant iPhone-backup case and keeps a
+stable default for services added by future iOS versions.
+
+## D-033 — Use a dev-only Blob import for public codec modules (2026-07-08)
+
+Vite dev rejects module imports that resolve to `public/` assets, even when a
+production static host can serve the same file as a same-origin ES module. This broke
+HEIC previews with an internal server error for
+`/vendor/libheif-js/1.19.8/libheif-wasm/libheif-bundle.mjs`.
+
+Decision: production keeps importing the public `libheif-js` ES module directly from
+`media-worker` as an isolated same-origin vendor module under the existing CSP. In
+Vite dev only, `src/workers/media/thumbnails.ts` fetches the unmodified public vendor
+file with same-origin credentials, imports it through a temporary Blob module URL, and
+revokes the Blob URL after import. The vendored files still live under
+`public/vendor/`, remain byte-compared by the license audit, and are not bundled or
+transformed by Vite.
+
+Rationale: dev and production both load the same LGPL vendor bytes lazily and offline.
+The dev-only Blob URL sidesteps Vite's public-dir module guard without weakening the
+production CSP or moving vendor code into app source.

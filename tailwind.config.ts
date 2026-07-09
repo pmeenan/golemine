@@ -26,6 +26,8 @@ const config = {
         success: "var(--success)",
         warning: "var(--warning)",
         info: "var(--info)",
+        "bubble-foreground": "var(--bubble-foreground)",
+        "avatar-foreground": "var(--avatar-foreground)",
       },
       fontFamily: {
         sans: ["Inter Variable", "Inter", "ui-sans-serif", "system-ui", "sans-serif"],
@@ -64,6 +66,15 @@ const config = {
         1: "var(--shadow-1)",
         2: "var(--shadow-2)",
         3: "var(--shadow-3)",
+      },
+      transitionDuration: {
+        fast: "var(--dur-fast)",
+        base: "var(--dur-base)",
+        slow: "var(--dur-slow)",
+      },
+      transitionTimingFunction: {
+        out: "var(--ease-out)",
+        "in-out": "var(--ease-in-out)",
       },
     },
   },

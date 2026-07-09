@@ -25,7 +25,7 @@ import {
   ManifestDbError,
   ManifestDbReader,
   readSourceFileBytes,
-  type RootSourceFileBytes,
+  type RootSourceFileInfo,
   type SourceFileBytes,
 } from "./manifest-db";
 import { normalizeIosMessages, type IosNormalizedData } from "./ios-normalize";
@@ -237,7 +237,7 @@ export async function ingestUnencryptedBackupDirectory(
   }
 }
 
-function manifestSourceFileEntry(source: RootSourceFileBytes): IngestSourceFile {
+function manifestSourceFileEntry(source: RootSourceFileInfo): IngestSourceFile {
   return {
     role:
       source.relativePath === "Manifest.db-wal"
@@ -247,7 +247,7 @@ function manifestSourceFileEntry(source: RootSourceFileBytes): IngestSourceFile 
           : "manifest-db",
     relativePath: source.relativePath,
     sha256: source.sha256,
-    bytes: source.bytes.byteLength,
+    bytes: source.byteLength,
   };
 }
 
@@ -417,8 +417,15 @@ async function assertSinkOk(
   const result = await promise;
 
   if (!result.ok) {
+    // derived_db_pool_unavailable must survive this boundary: it is the
+    // caller's only signal that prepare failed before touching the derived
+    // DB (e.g. another tab holds the backup's SAH pool), so a previously
+    // ingested record must not be downgraded. Everything else stays folded
+    // into db_ingest_failed.
     throw new BackupIngestError(
-      "db_ingest_failed",
+      result.error.code === "derived_db_pool_unavailable"
+        ? result.error.code
+        : "db_ingest_failed",
       `db-worker rejected the ${operation} ingest step.`,
       { operation },
       formatWorkerErrorPayload(result.error),
@@ -482,7 +489,11 @@ function assertRequestMatchesDetection(
 function toBackupIngestWorkerError(cause: unknown) {
   if (cause instanceof BackupIngestError) {
     return toWorkerError({
-      worker: cause.code === "db_ingest_failed" ? "db" : "backup",
+      worker:
+        cause.code === "db_ingest_failed" ||
+        cause.code === "derived_db_pool_unavailable"
+          ? "db"
+          : "backup",
       code: cause.code,
       message: cause.message,
       recoverable: true,

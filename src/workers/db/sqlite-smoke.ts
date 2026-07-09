@@ -8,6 +8,7 @@ import {
   type WorkerProgressCallback,
   type WorkerResult,
 } from "../../lib/worker-types";
+import { hasOpfsStorage } from "../shared/opfs";
 import { emitWorkerProgress } from "../shared/progress";
 import { getSqlite, type Sqlite3Api } from "../shared/sqlite-init";
 
@@ -120,26 +121,6 @@ export async function runSqliteSmoke(
       }),
     );
   }
-}
-
-function hasOpfsStorage(): boolean {
-  const navigatorValue: unknown = Reflect.get(globalThis, "navigator");
-
-  if (!isObjectLike(navigatorValue)) {
-    return false;
-  }
-
-  const storageValue: unknown = Reflect.get(navigatorValue, "storage");
-
-  if (!isObjectLike(storageValue)) {
-    return false;
-  }
-
-  return typeof Reflect.get(storageValue, "getDirectory") === "function";
-}
-
-function isObjectLike(value: unknown): value is object {
-  return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
 async function getSahPool(sqlite3: Sqlite3Api): Promise<SahPool> {

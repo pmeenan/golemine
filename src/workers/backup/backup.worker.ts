@@ -1,4 +1,4 @@
-import { expose, releaseProxy, wrap } from "comlink";
+import { expose, releaseProxy, transfer, wrap } from "comlink";
 import type { Remote } from "comlink";
 import type {
   BackupIngestRequest,
@@ -12,6 +12,7 @@ import type {
 import { nestedDbWorkerName } from "../../lib/worker-names";
 import { detectBackupDirectory } from "./ios-backup";
 import { ingestUnencryptedBackupDirectory } from "./ios-ingest";
+import { readUnencryptedSourceFile } from "./attachment-read";
 import { runDemoRoundTrip } from "../shared/demo";
 
 export const backupWorkerApi: BackupWorkerApi = {
@@ -22,6 +23,13 @@ export const backupWorkerApi: BackupWorkerApi = {
     ingestUnencryptedBackupDirectory(root, request, sink, progress),
   ingestUnencryptedBackupToDb: (root, request, progress) =>
     ingestUnencryptedBackupToDb(root, request, progress),
+  readUnencryptedSourceFile: async (root, request, progress) => {
+    const result = await readUnencryptedSourceFile(root, request, progress);
+
+    return result.ok
+      ? transfer(result, [result.value.bytes.buffer as ArrayBuffer])
+      : result;
+  },
 };
 
 expose(backupWorkerApi);

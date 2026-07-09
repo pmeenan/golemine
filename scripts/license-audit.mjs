@@ -3,6 +3,15 @@ import path from "node:path";
 
 const root = process.cwd();
 const pnpmStorePath = path.join(root, "node_modules", ".pnpm");
+const libheifVendorRoot = path.join(root, "public", "vendor", "libheif-js", "1.19.8");
+const libheifExpectedVersion = "1.19.8";
+const requiredLibheifVendorFiles = new Set([
+  "LICENSE",
+  "README.md",
+  "libheif-wasm/LICENSE",
+  "libheif-wasm/libheif-bundle.mjs",
+  "package.json",
+]);
 
 const allowedLicenseIds = new Set([
   "0BSD",
@@ -69,6 +78,13 @@ const packageAllowlist = new Map([
     {
       licenses: new Set(["BlueOak-1.0.0"]),
       reason: "Transitive build-only dependency of workbox-build for PWA generation; not shipped as app code.",
+    },
+  ],
+  [
+    "libheif-js",
+    {
+      licenses: new Set(["LGPL-3.0"]),
+      reason: "Isolated, dynamically loaded HEIC codec package kept as same-origin vendor files under public/vendor per Decisions.md D-026.",
     },
   ],
   [
@@ -221,6 +237,27 @@ async function readJson(filePath) {
   return JSON.parse(json);
 }
 
+async function collectRelativeFiles(directoryPath, pathParts = []) {
+  const entries = await readdir(directoryPath, { withFileTypes: true });
+  const files = [];
+
+  for (const entry of entries) {
+    const nextParts = [...pathParts, entry.name];
+    const entryPath = path.join(directoryPath, entry.name);
+
+    if (entry.isDirectory()) {
+      files.push(...(await collectRelativeFiles(entryPath, nextParts)));
+      continue;
+    }
+
+    if (entry.isFile()) {
+      files.push(nextParts.join("/"));
+    }
+  }
+
+  return files.sort((left, right) => left.localeCompare(right));
+}
+
 async function readInstalledPackage(packagePath) {
   const packageJsonPath = path.join(packagePath, "package.json");
   const packageJson = await readJson(packageJsonPath);
@@ -305,6 +342,70 @@ async function collectInstalledPackages() {
   });
 }
 
+async function auditVendoredLibheif(installedPackages) {
+  const libheifPackage = installedPackages.find(
+    (installedPackage) =>
+      installedPackage.name === "libheif-js" &&
+      installedPackage.version === libheifExpectedVersion,
+  );
+  const vendorFailures = [];
+
+  if (!libheifPackage) {
+    return [
+      `libheif-js@${libheifExpectedVersion}: installed package is missing; cannot verify vendored LGPL files.`,
+    ];
+  }
+
+  let vendorFiles;
+
+  try {
+    vendorFiles = await collectRelativeFiles(libheifVendorRoot);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return [`${libheifVendorRoot}: vendored libheif-js directory is missing.`];
+    }
+
+    throw error;
+  }
+
+  for (const requiredFile of requiredLibheifVendorFiles) {
+    if (!vendorFiles.includes(requiredFile)) {
+      vendorFailures.push(`libheif-js vendor file ${requiredFile} is missing.`);
+    }
+  }
+
+  for (const relativeFile of vendorFiles) {
+    const vendorFilePath = path.join(libheifVendorRoot, ...relativeFile.split("/"));
+    const packageFilePath = path.join(libheifPackage.path, ...relativeFile.split("/"));
+    let vendorBytes;
+    let packageBytes;
+
+    try {
+      [vendorBytes, packageBytes] = await Promise.all([
+        readFile(vendorFilePath),
+        readFile(packageFilePath),
+      ]);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        vendorFailures.push(
+          `libheif-js vendor file ${relativeFile} does not match a file in the installed package.`,
+        );
+        continue;
+      }
+
+      throw error;
+    }
+
+    if (!vendorBytes.equals(packageBytes)) {
+      vendorFailures.push(
+        `libheif-js vendor file ${relativeFile} differs from node_modules/libheif-js/${relativeFile}.`,
+      );
+    }
+  }
+
+  return vendorFailures;
+}
+
 const packages = await collectInstalledPackages();
 const failures = [];
 const allowlisted = [];
@@ -335,6 +436,8 @@ for (const installedPackage of packages) {
 
   failures.push(`${name}@${version}: ${license}`);
 }
+
+failures.push(...(await auditVendoredLibheif(packages)));
 
 if (failures.length > 0) {
   console.error("Disallowed or missing dependency licenses:");

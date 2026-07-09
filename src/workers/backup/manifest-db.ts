@@ -43,6 +43,19 @@ export interface RootSourceFileBytes {
   sha256: string;
 }
 
+/**
+ * Provenance metadata for a root source file that fed the transient
+ * Manifest.db copy. Deliberately byte-free: once the sqlite copy exists the
+ * reader must not pin the raw Manifest.db/-wal/-shm arrays in memory (the
+ * attachment-read path caches the reader per backup, and real manifests can
+ * be hundreds of megabytes).
+ */
+export interface RootSourceFileInfo {
+  relativePath: string;
+  sha256: string;
+  byteLength: number;
+}
+
 export interface ReadSourceFileBytesOptions {
   maxReadBytes?: number;
 }
@@ -72,7 +85,7 @@ export class SourceFileTooLargeError extends Error {
 export class ManifestDbReader {
   private constructor(
     private readonly source: SourceSqliteDatabase,
-    readonly sourceFiles: readonly RootSourceFileBytes[],
+    readonly sourceFiles: readonly RootSourceFileInfo[],
   ) {}
 
   static async open(root: ReadonlySourceDirectoryHandle): Promise<ManifestDbReader> {
@@ -86,11 +99,19 @@ export class ManifestDbReader {
       ...(manifestShmFile === undefined ? {} : { shm: manifestShmFile.bytes }),
     });
 
+    // Retain provenance metadata only. openSourceSqliteDatabase copied the
+    // reconstructed database into the transient sqlite VFS above, so keeping
+    // the raw byte arrays here would only pin them for the reader's lifetime
+    // (ingest and attachment reads never touch them again).
     return new ManifestDbReader(
       source,
-      [manifestFile, manifestWalFile, manifestShmFile].filter(
-        (file): file is RootSourceFileBytes => file !== undefined,
-      ),
+      [manifestFile, manifestWalFile, manifestShmFile]
+        .filter((file): file is RootSourceFileBytes => file !== undefined)
+        .map((file) => ({
+          relativePath: file.relativePath,
+          sha256: file.sha256,
+          byteLength: file.bytes.byteLength,
+        })),
     );
   }
 

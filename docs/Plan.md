@@ -4,28 +4,32 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M2 complete and post-review hardened — users can open an unencrypted
-synthetic iPhone backup, run ingest from the backup overview, and rebuild a per-backup
-OPFS derived database with normalized conversations, participants, messages,
-attachments, tapbacks, contact avatars, FTS rows, warnings, and source-file
-provenance. The fixture now carries real Manifest/sms/contact SQLite data plus WAL
-sidecars, and Playwright covers open -> ingest -> derived summary. M2 hardening now
-uses SQLite-like WAL end-of-log handling for stale/torn WAL tails including root
-`Manifest.db-wal`, avoids eager hashing of large, unknown-size, deceptive-size, or
-budget-exhausted attachment media, preserves attachment GUIDs and reaction raw
-timestamps, sends production ingest batches backup-worker -> db-worker without a UI
-relay, and recovers interrupted `ingesting` recents as `needs-reingest` (D-022).
-Encrypted ingest is next in M4; M3 builds the browser/search UI over the derived
-database. M1 also handles larger real-world iOS `Info.plist` app metadata with
-role-specific root-plist bounds (D-019), and all primary brand and illustration assets
-have been generated under the steampunk Talos golem identity (D-018; character sheet
-in `docs/assets/`); wiring them into the UI is tracked under M6. Real-backup OPFS
-hardening now reserves larger per-backup sqlite-wasm SAH pools and releases the
-overview summary reader during rebuilds to avoid `SQLITE_CANTOPEN` from stale
-journal/temp slots or reader contention (D-024). Source SQLite copies are now forced
-to rollback-journal mode before transient read-only opens, covering WAL-mode databases
-without usable sidecars (D-025). Long unbounded normalization and write stages now
-surface throttled item-count progress for large backups.**
+**Current status: M3 implemented for unencrypted iPhone backups — users can open and
+ingest a synthetic iPhone backup, then browse conversations, inspect a virtualized
+message timeline, view message provenance, search FTS-backed messages with filters and
+snippets, jump from search results into thread context, preview/extract source-backed
+attachments, load additional conversation/timeline/search pages beyond the first
+window, and cache native image thumbnails in OPFS. The fixture carries real
+Manifest/sms/contact SQLite data plus WAL sidecars, and Playwright covers open ->
+ingest -> messages/search. M2 hardening remains in place: SQLite-like WAL end-of-log
+handling for stale/torn WAL tails including root `Manifest.db-wal`, deferred hashing
+for large/unknown/deceptive/budget-exhausted attachment media, preserved attachment
+GUIDs and reaction raw timestamps, direct backup-worker -> db-worker ingest streaming,
+interrupted `ingesting` recents recovery, larger per-backup sqlite-wasm SAH pools
+(D-024), and rollback-journal header forcing for transient source SQLite opens
+(D-025). M3 HEIC thumbnails use isolated same-origin `libheif-js` vendor files loaded
+lazily by `media-worker` (production direct module import; Vite dev fetch-to-Blob
+module shim so public vendor files are not transformed), prefer embedded HEIF
+thumbnails when available, and fall back to full-image decode only inside the
+media-worker memory cap (D-026/D-027/D-033). The
+messages UI has had its post-review Design.md §7/§8 pass for avatar colors/sizing,
+sent-bubble foreground tokens, timestamp affordances, attachment frame caps, and
+below-floor detail overlay behavior, plus a follow-up M3 fix pass: consolidated
+shared worker helper modules, snippet-sentinel search hardening (D-030), a
+messages-only timeline load-more query, route-scoped browse/search workers with
+SAH-pool install retry (D-029), a 1 GiB user-initiated extraction budget (D-031),
+and normalized `serviceKind` bubble styling (D-032). Encrypted ingest is next in
+M4.**
 
 ## M0 — Scaffolding
 
@@ -164,20 +168,55 @@ Goal: an opened, unencrypted backup becomes a browsable derived DB.
       before sqlite-wasm opens the transient read-only file, including no-sidecar and
       no-committed-frame WAL cases (D-025).
 
-Deferred (not M2): streaming row normalization — normalize currently materializes
-full row arrays before batching; a streaming rewrite is deferred to M3-scale work.
+Deferred after M2: streaming row normalization — normalize currently materializes full
+row arrays before batching; a streaming rewrite remains later scale hardening work.
 
 ## M3 — Browse & search
 
 Goal: the core exploration experience.
 
-- [ ] Thread list pane (virtualized, recency-sorted, unresolved handles shown raw).
-- [ ] Message timeline (virtualized bubbles per Design.md §7.1: sender runs, day separators, system events, reactions badged, edited/unsent indicators, jump-to-date).
-- [ ] Message detail panel: full metadata incl. provenance fields (GUID, rowid, raw timestamp).
-- [ ] Attachment rendering: native images inline; HEIC via libheif in media-worker; video via `<video>` (HEVC where hardware allows) with poster-frame fallback; generic file card + "extract original" (save via File System Access API) for everything else.
-- [ ] Thumbnail cache in OPFS (content-addressed).
-- [ ] FTS5 full-text search + filters (conversation, participant, date range, has-attachment); snippets; jump-to-context in thread.
-- [ ] Performance check: 100k+ message backup stays at 60 fps scrolling, search < 200 ms.
+- [x] Thread list pane (virtualized, recency-sorted, unresolved handles shown raw).
+- [x] Message timeline (virtualized bubbles per Design.md §7.1: sender runs, day
+      separators, system events, reactions badged, edited/unsent indicators,
+      jump-to-context from search results).
+- [x] Message detail panel: full metadata incl. provenance fields (GUID, rowid, raw timestamp).
+- [x] Attachment rendering: native images inline through media-worker thumbnails with
+      source-byte fallback; HEIC thumbnails via isolated lazy-loaded `libheif-js` in
+      `media-worker` with embedded HEIF thumbnail fallback for over-cap originals;
+      native video via `<video>` when Chrome can decode the lazily read original;
+      generic file card + "extract original" (save via File System Access API) for
+      everything else.
+- [x] Thumbnail cache in OPFS (JPEG previews, content-addressed for native image and
+      HEIC attachments).
+- [x] FTS5 full-text search + filters (conversation, participant, date range,
+      has-attachment); snippets; jump-to-context in thread; load-more pagination for
+      result sets beyond the first window.
+- [x] Performance posture: UI lists are virtualized, db-worker queries are bounded and
+      paginated, attachment reads are lazy/bounded and transferred across Comlink, and Playwright exercises the full
+      browse/search path. A dedicated 100k-message frame-rate/search-latency benchmark
+      remains a later hardening task once a large synthetic fixture generator lands.
+- [x] Post-review Design.md §7/§8 alignment: deterministic 8-token avatar fallbacks
+      at 28px, semantic foreground tokens for sent bubbles/avatar initials, visible
+      run-end and hover/focus/selected timestamps, 10x14 bubble padding with a
+      practical 220px minimum, capped attachment frames, and a below-1024px detail
+      overlay instead of stacking all three panes.
+- [x] Post-review M3 fix pass: shared worker modules for sqlite error
+      classification, media MIME sets and byte budgets, service-kind mapping, OPFS
+      helpers, stable hashing, guards, and retry; db-worker snippet-sentinel
+      hardening (D-030), correlated LIMIT-1 last-message previews, and a
+      messages-only `getMessageTimelineMessagesPage` for timeline load-more;
+      per-backup Manifest reader memoization for attachment reads; route-scoped
+      worker ownership with SAH-pool install retry (D-029); StrictMode-safe preview
+      lifecycle with a small concurrency cap and cache-first thumbnail probes;
+      user-initiated extraction with an explicit 1 GiB budget and save-stub cleanup
+      on failure (D-031); normalized `serviceKind` bubble styling (D-032); and LGPL
+      guardrails extended to template-literal dynamic imports plus byte-compared
+      `libheif-js` vendor files in the license audit.
+
+Deferred after M3: video poster-frame generation, a repeatable 100k-message
+performance benchmark, and a jump-to-date timeline navigation control (part of the
+original timeline scope that was quietly dropped during M3 review — still wanted;
+tracked here so it is not lost).
 
 ## M4 — Encrypted backups
 

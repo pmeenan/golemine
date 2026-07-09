@@ -28,7 +28,16 @@ import {
   type WorkerResult,
   type WorkerStructuredValue,
 } from "../../lib/worker-types";
+import { stableHash } from "../shared/hash";
+import {
+  getOpfsBackupDirectoryHandle,
+  hasOpfsStorage,
+  isSafeOpfsPathSegment,
+} from "../shared/opfs";
+import { isObjectRecord } from "../shared/guards";
 import { emitWorkerProgress } from "../shared/progress";
+import { retryAsyncOperation } from "../shared/retry";
+import { classifySqliteWasmError } from "../shared/sqlite-errors";
 import { getSqlite, type Sqlite3Api } from "../shared/sqlite-init";
 import {
   contactAvatarRelativeDirectory,
@@ -39,6 +48,17 @@ import {
 } from "./schema";
 
 type SahPool = Awaited<ReturnType<Sqlite3Api["installOpfsSAHPoolVfs"]>>;
+/**
+ * The installed @sqlite.org/sqlite-wasm index.d.ts omits the runtime-supported
+ * `forceReinitIfPreviouslyFailed` option (present in the shipped
+ * sqlite3-bundler-friendly.mjs option defaults), so extend the declared
+ * options type here instead of casting at the call site.
+ */
+type InstallOpfsSahPoolVfsOptions = Parameters<
+  Sqlite3Api["installOpfsSAHPoolVfs"]
+>[0] & {
+  forceReinitIfPreviouslyFailed?: boolean;
+};
 type SqliteBindValue = string | number | null | Uint8Array;
 type IngestApi = Pick<
   DbWorkerApi,
@@ -147,9 +167,14 @@ export function createOpfsDerivedDatabaseFactory(): DerivedDatabaseFactory {
       pool = await getSahPool(sqlite3, backupDirectoryName);
       db = new pool.OpfsSAHPoolDb(derivedDatabaseFilename);
     } catch (cause) {
+      // Pool installation/open failures happen before anything destructive
+      // runs (prepareIngest opens the DB before dropping schema or wiping the
+      // avatar cache), so this distinct code tells callers the derived data
+      // was NOT modified — e.g. another tab holds this backup's SAH pool.
       throw new DbIngestError({
-        code: "db_ingest_failed",
-        message: "Derived SQLite database could not be opened.",
+        code: "derived_db_pool_unavailable",
+        message:
+          "The derived SQLite database could not be opened (its OPFS pool may be held by another tab). Existing derived data was not modified.",
         recoverable: true,
         details: {
           databaseName: derivedDatabaseFilename,
@@ -467,7 +492,7 @@ class DbIngestController {
   }
 }
 
-class DbIngestError extends Error {
+export class DbIngestError extends Error {
   readonly code: WorkerErrorCode;
   readonly recoverable: boolean;
   readonly details?: Record<string, WorkerStructuredValue>;
@@ -970,12 +995,30 @@ async function getSahPool(
     return existing;
   }
 
-  const promise = sqlite3
-    .installOpfsSAHPoolVfs({
-      initialCapacity: sqliteSahPoolMinimumCapacity,
-      name: vfsName,
-      directory: opfsDirectory,
-    })
+  // installOpfsSAHPoolVfs can transiently reject (e.g. with
+  // NoModificationAllowedError) when a just-terminated worker's sync access
+  // handles are still releasing during a route switch, so retry with a
+  // growing backoff (total budget ~1.05 s; slow machines can take >450 ms to
+  // release handles) before surfacing the failure.
+  //
+  // sqlite-wasm memoizes the install promise per VFS name and replays a
+  // memoized REJECTION on re-call unless forceReinitIfPreviouslyFailed is set
+  // (verified in sqlite-wasm 3.x sqlite3-bundler-friendly.mjs: option
+  // defaults to false; on a memoized rejection it deletes the failed memo
+  // and reinstalls). Without it every retry — and every later getSahPool
+  // call after this worker's memo was deleted on failure — would just replay
+  // the first failure. The option is a no-op when the memoized install
+  // succeeded, so passing it on every attempt is safe.
+  const installOptions: InstallOpfsSahPoolVfsOptions = {
+    initialCapacity: sqliteSahPoolMinimumCapacity,
+    name: vfsName,
+    directory: opfsDirectory,
+    forceReinitIfPreviouslyFailed: true,
+  };
+  const promise = retryAsyncOperation(
+    () => sqlite3.installOpfsSAHPoolVfs(installOptions),
+    { attempts: 4, delayMs: [150, 300, 600] },
+  )
     .then(async (pool) => {
       await pool.reserveMinimumCapacity(sqliteSahPoolMinimumCapacity);
 
@@ -1053,18 +1096,10 @@ async function getOpfsBackupDirectory(
     });
   }
 
-  const safeDirectoryName = assertSafeOpfsPathSegment(backupDirectoryName);
-  const root = await navigator.storage.getDirectory();
-  const appDirectory = await root.getDirectoryHandle(
-    derivedDataOpfsAppDirectoryName,
-    { create },
+  return getOpfsBackupDirectoryHandle(
+    assertSafeOpfsPathSegment(backupDirectoryName),
+    create,
   );
-  const backupsDirectory = await appDirectory.getDirectoryHandle(
-    derivedDataOpfsBackupsDirectoryName,
-    { create },
-  );
-
-  return backupsDirectory.getDirectoryHandle(safeDirectoryName, { create });
 }
 
 function getContactAvatarFileName(avatar: NormalizedContactAvatar): string {
@@ -1085,14 +1120,7 @@ function getContactAvatarFileName(avatar: NormalizedContactAvatar): string {
 }
 
 function assertSafeOpfsPathSegment(value: string): string {
-  const trimmed = value.trim();
-
-  if (
-    trimmed.length === 0 ||
-    trimmed.includes("/") ||
-    trimmed.includes("\\") ||
-    trimmed.includes("\0")
-  ) {
+  if (!isSafeOpfsPathSegment(value)) {
     throw new DbIngestError({
       code: "db_ingest_failed",
       message: "Derived data directory name is not a safe OPFS path segment.",
@@ -1100,40 +1128,13 @@ function assertSafeOpfsPathSegment(value: string): string {
     });
   }
 
-  return trimmed;
+  return value.trim();
 }
 
 async function requestStoragePersistence(): Promise<void> {
   if (hasOpfsStorage() && typeof navigator.storage.persist === "function") {
     await navigator.storage.persist();
   }
-}
-
-function hasOpfsStorage(): boolean {
-  const navigatorValue: unknown = Reflect.get(globalThis, "navigator");
-
-  if (!isObjectRecord(navigatorValue)) {
-    return false;
-  }
-
-  const storageValue: unknown = Reflect.get(navigatorValue, "storage");
-
-  if (!isObjectRecord(storageValue)) {
-    return false;
-  }
-
-  return typeof Reflect.get(storageValue, "getDirectory") === "function";
-}
-
-function stableHash(value: string): string {
-  let hash = 0x811c9dc5;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-
-  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function toDbWorkerError(
@@ -1157,32 +1158,12 @@ function toDbWorkerError(
 
   return toWorkerError({
     worker: "db",
-    code: classifyDbIngestError(cause),
+    code: classifySqliteWasmError(cause, "db_ingest_failed"),
     message: fallbackMessage,
     cause,
     recoverable: true,
     details: fallbackDetails,
   });
-}
-
-function classifyDbIngestError(cause: unknown): WorkerErrorCode {
-  if (!hasOpfsStorage() && cause instanceof WebAssembly.RuntimeError) {
-    return "sqlite_opfs_unavailable";
-  }
-
-  if (cause instanceof WebAssembly.CompileError) {
-    return "sqlite_unavailable";
-  }
-
-  if (cause instanceof WebAssembly.LinkError) {
-    return "sqlite_unavailable";
-  }
-
-  if (cause instanceof WebAssembly.RuntimeError) {
-    return "sqlite_init_failed";
-  }
-
-  return "db_ingest_failed";
 }
 
 function isMissingIngestMetaTableError(cause: unknown): boolean {
@@ -1213,8 +1194,4 @@ function isDbIngestSummary(value: unknown): value is DbIngestSummary {
     Array.isArray(value.sourceFiles) &&
     Array.isArray(value.warnings)
   );
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }

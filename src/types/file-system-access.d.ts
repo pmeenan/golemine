@@ -16,6 +16,13 @@ interface FileSystemHandle {
   ): Promise<PermissionState>;
 }
 
+interface FileSystemFileHandle {
+  // Chrome-only removal of the file backing this handle. Used to clean up the
+  // zero-byte stub showSaveFilePicker creates when an extraction fails before
+  // any bytes are committed.
+  remove(): Promise<void>;
+}
+
 interface DataTransferItem {
   getAsFileSystemHandle(): Promise<FileSystemHandle | null>;
 }
@@ -26,8 +33,22 @@ interface DirectoryPickerOptions {
   startIn?: FileSystemHandle | string;
 }
 
+interface FilePickerAcceptType {
+  accept: Record<string, string[]>;
+  description?: string;
+}
+
+interface SaveFilePickerOptions {
+  excludeAcceptAllOption?: boolean;
+  id?: string;
+  startIn?: FileSystemHandle | string;
+  suggestedName?: string;
+  types?: FilePickerAcceptType[];
+}
+
 interface Window {
   showDirectoryPicker(
     options?: DirectoryPickerOptions,
   ): Promise<FileSystemDirectoryHandle>;
+  showSaveFilePicker(options?: SaveFilePickerOptions): Promise<FileSystemFileHandle>;
 }

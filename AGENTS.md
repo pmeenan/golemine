@@ -44,9 +44,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
    HTML/SQL. Parsers (plist, typedstream, keybag) must tolerate malformed input:
    skip and report, never crash ingest.
 5. **Licensing:** project is Apache-2.0. Dependencies must be MIT/BSD/Apache/ISC/zlib.
-   Sole exception: LGPL is permitted only for unmodified, dynamically-loaded wasm
-   codec modules (libheif, ffmpeg core), recorded in NOTICE. No GPL/AGPL, no
-   copyleft in app code. Check the license of every new dependency before adding it.
+   LGPL is permitted only as a package-specific exception when there is no better
+   permissive option and the dependency can be used without tainting app code: keep it
+   in separate, unmodified, dynamically loaded same-origin vendor files (including
+   upstream JS glue/wrappers when they are part of the isolated distribution), make it
+   practically replaceable, and record it in NOTICE plus the license audit exceptions
+   (D-026). No GPL/AGPL, no copyleft copied into app source. Check the license of every
+   new dependency before adding it.
 6. **No real personal data in the repo.** Test fixtures are synthetic backups only.
 7. **Chrome-only is a feature.** Use Chrome APIs (File System Access, OPFS,
    `getAsFileSystemHandle`, WebCodecs) freely; do not add cross-browser fallbacks.
@@ -123,10 +127,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
   window checks already failed, and boot detection starts lazily via
   `getBootBrowserCapabilities()` — never at module evaluation (a module-eval
   probe caused a TDZ crash in production bundles). Worker construction
-  (including the probe worker) is centralized in `src/lib/worker-client.ts`. UI
-  actions create a fresh backup worker client per operation and release it in a
-  `finally` — a shared cached client was tried and reverted because a dead
-  worker would poison every later open and per-call progress proxies leaked.
+  (including the probe worker) is centralized in `src/lib/worker-client.ts`.
+  One-shot open/detect/ingest UI operations create fresh worker clients per
+  operation and release them in `finally`; M3 browse/search routes intentionally
+  own route-scoped db/backup/media workers where repeated queries or previews would
+  otherwise churn workers or contend for the same OPFS SAH pool (D-029 — the
+  per-backup SAH pool is held while the route is mounted; same-backup multi-tab
+  browsing is out of scope for now).
 - Chrome-only File System Access typings are declared once in
   `src/types/file-system-access.d.ts` (included by both tsconfig projects); do not
   re-declare `showDirectoryPicker`/`queryPermission`/`getAsFileSystemHandle` shapes
@@ -142,9 +149,14 @@ metal and the ore it surfaces; no clay/terracotta styling).
   Chrome may not be allowed to read directly from `~/Library`.
 - License audit is fail-closed in `scripts/license-audit.mjs`. Non-standard licenses
   are package-specific exceptions only (see Decisions.md D-012); do not broaden the
-  global allowlist without a recorded decision.
+  global allowlist without a recorded decision. The audit also byte-compares every
+  file under `public/vendor/libheif-js/<version>/` against the installed package so
+  vendored LGPL files cannot drift from upstream, and `eslint.config.js` blocks
+  `libheif-js` from app source across `.ts/.tsx/.js/.mjs/.cjs` files, including
+  dynamic imports with template-literal specifiers.
 - Workers: `backup-worker` (source FS, manifest, crypto), `db-worker` (derived
-  SQLite + FTS5 in OPFS), `media-worker` (HEIC/thumbnails/video fallback).
+  SQLite + FTS5 in OPFS), `media-worker` (native + HEIC thumbnails now; video-poster
+  codec fallback later).
 - Storage: recents + directory handles in IndexedDB; per-backup derived data in
   OPFS keyed by UDID; `derivedDbVersion` bump forces re-ingest. M1 recents storage
   lives in `src/lib/recents.ts`: IndexedDB database `golemine-recents`, store
@@ -187,7 +199,22 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `src/lib/worker-names.ts` (worker name constants; the db-worker nested inside
   backup.worker is named `golemine-db-worker-nested`). Worker options objects must
   stay literal at each construction site because Vite statically parses
-  `new Worker(new URL(...), { type: "module" })`.
+  `new Worker(new URL(...), { type: "module" })`. Additional shared modules:
+  `src/workers/shared/guards.ts` (`isObjectRecord`; `src/lib/recents.ts`
+  deliberately keeps its own UI-thread copy), `src/workers/shared/hash.ts`
+  (`stableHash` FNV-1a), `src/workers/shared/opfs.ts` (`hasOpfsStorage`,
+  `isSafeOpfsPathSegment`, `getOpfsBackupDirectoryHandle` — the single
+  `golemine/backups/<id>` walk with safe-segment assertion),
+  `src/workers/shared/sqlite-errors.ts` (`classifySqliteWasmError(cause,
+  fallback)` used by both db-worker ingest and query error paths),
+  `src/workers/shared/media-mime.ts` (native-image + HEIC MIME sets),
+  `src/workers/shared/media-limits.ts` (named read/preview/extract/thumbnail
+  budget constants, import-safe from UI code),
+  `src/workers/shared/service-kind.ts` (`classifyServiceKind` populating the
+  optional `serviceKind` field on message records/previews so UI never
+  string-matches raw service names), and `src/workers/shared/retry.ts`
+  (`retryAsyncOperation`, used to retry transient `installOpfsSAHPoolVfs`
+  failures during route switches).
 - M2 unencrypted iOS ingest is exposed for production as
   `BackupWorkerApi.ingestUnencryptedBackupToDb(root, request, progress?)` and
   implemented in `src/workers/backup/ios-ingest.ts` plus the backup-worker db-worker
@@ -197,7 +224,14 @@ metal and the ore it surfaces; no clay/terracotta styling).
   phase before the destructive db-worker `prepareIngest` call; the route treats the
   first non-`starting` phase as "the derived DB is about to be (or has been)
   modified", so pre-prepare failures never downgrade a previously `ingested` record
-  while prepare/later failures do. `WorkerErrorCode` `backup_manifest_unreadable`
+  while prepare/later failures do — with one exception: `WorkerErrorCode`
+  `derived_db_pool_unavailable` (prepare could not acquire/open the per-backup SAH
+  pool, e.g. another tab is browsing the same backup) guarantees the derived DB was
+  never modified, so the route restores a previously `ingested` record instead of
+  marking it failed. `prepareIngest` opens the pool and derived DB before any
+  destructive schema drop, and the backup-worker ingest bridge passes that code
+  through instead of folding it into `db_ingest_failed`.
+  `WorkerErrorCode` `backup_manifest_unreadable`
   means a required database's MBFile record could not be read; it is distinct from
   `backup_file_missing` (entry absent from Manifest.db). Ingest validates
   detection/encryption, opens `Manifest.db` with root `Manifest.db-wal`/`-shm`
@@ -229,6 +263,70 @@ metal and the ore it surfaces; no clay/terracotta styling).
   by actual `File.size`, and capped by a per-ingest eager hash budget; larger,
   unknown-size, deceptive-size, or budget-exhausted media keeps path/domain/GUID
   provenance and is hashed later on demand by extraction/report code.
+- M3 browse/search is implemented in `src/features/m3/` and covered by
+  `e2e/m3.spec.ts`. It requires an `ingested` recent, uses `react-virtuoso` for the
+  conversation list and timeline, renders all backup strings as text nodes, supports
+  load-more pagination for conversations/timelines/search results, and opens search
+  results in thread context via `/backup/:id/messages?conversation=...&message=...`.
+  Keep the UI token-only and Design.md-compliant; sent-bubble background follows the
+  normalized `serviceKind` (`sms-family` → `--bubble-sms`; `imessage` and `unknown` →
+  `--bubble-imessage`, D-032 — never string-match raw service names in UI), message
+  sent-bubble text uses
+  `--bubble-foreground`, avatar initials use `--avatar-foreground`, and fallback
+  avatars are chosen from the eight `--avatar-*` tokens by stable participant
+  handle/label hash. Do not add hardcoded colors/sizes or custom focus styles in these
+  panes.
+- M3 db-worker reads live in `src/workers/db/queries.ts`: `listConversations`
+  (`listThreads` alias), `getMessageTimelinePage`,
+  `getMessageTimelineMessagesPage` (same request shape, messages-only response
+  without conversation hydration — use it for load-more), `getMessageDetails`,
+  and `searchMessages`. Extend this query API rather than issuing SQL from
+  React. Search compiles user terms to quoted FTS5 expressions, applies filters
+  in db-worker, and returns structured snippet segments for safe text
+  rendering; hostile bodies containing the U+0001/U+0002 snippet delimiters
+  degrade to a single non-highlighted segment and sentinel chars are always
+  stripped from output (D-030). Last-message previews use a per-conversation correlated
+  LIMIT-1 lookup (not ROW_NUMBER over all messages) — preserve its ordering
+  `COALESCE(sent_at_utc, '') DESC, source_rowid DESC, id DESC` when touching it.
+- M3 attachment source reads use
+  `BackupWorkerApi.readUnencryptedSourceFile(root, request, progress?)` in
+  `src/workers/backup/attachment-read.ts`. It revalidates the unencrypted backup,
+  applies root Manifest WAL sidecars, performs exact source domain/path lookup, reads
+  through read-only source wrappers, enforces caller byte caps, and verifies optional
+  expected hashes. Byte-bearing backup/media worker responses and media-worker image
+  requests use Comlink `transfer()` for their `Uint8Array` buffers. Preview,
+  extraction, and future report hashing should use this worker API; do not pass raw
+  writable-capable handles into provider code. The backup worker memoizes the
+  most recent backupId's detection result and opened `ManifestDbReader` across
+  calls (sound because source backups are read-only while open); requests
+  without a backupId bypass the cache, a different backupId closes the old
+  reader, and cache hits verify root identity with `isSameEntry` (same backupId
+  from a different root directory evicts and rebuilds instead of trusting a
+  stale manifest index). `ManifestDbReader` retains only byte-free provenance
+  metadata for its root source files, and `source-sqlite` unlinks its transient
+  wasm VFS copy on close so cached readers do not pin manifest bytes in worker
+  memory. Read-size budgets come from `src/workers/shared/media-limits.ts`; an
+  explicit `maxReadBytes` above the default is honored (no hidden cap), and
+  user-initiated extraction reads with the explicit 1 GiB `extractMaxReadBytes`
+  budget — streaming extraction is deferred (D-031).
+- M3 media thumbnails use `MediaWorkerApi.createAttachmentThumbnail` in
+  `src/workers/media/thumbnails.ts`. Native PNG/JPEG/GIF/WebP images are rendered in
+  the worker with `createImageBitmap`/`OffscreenCanvas`; HEIC thumbnails use
+  unmodified `libheif-js` 1.19.8 vendor files under
+  `public/vendor/libheif-js/1.19.8/`, lazy-loaded by `media-worker` so LGPL code stays
+  isolated from app chunks (D-026, D-027). Production imports the public vendor ES
+  module directly; Vite dev must use the worker's same-origin fetch-to-Blob module
+  shim (`importPublicModuleThroughBlobUrlForDev`) because Vite rejects direct module
+  imports from `public/` during source transforms (D-033). Thumbnails are
+  cached as JPEG files under `golemine/backups/<backup>/thumbs/attachments/` using a
+  sanitized hash/provenance cache key; transparent sources are flattened onto a white
+  matte before JPEG encoding because phone attachments are photo-dominant. HEIC preview
+  prefers embedded HEIF thumbnails when they satisfy the display target, uses the
+  largest available embedded thumbnail when the primary image is over the memory cap,
+  and otherwise decodes the primary only when it is at or below 16,777,216 pixels
+  before RGBA allocation. Do not import `libheif-js` from app source or let Vite bundle
+  it; update NOTICE and the package-specific license audit exception for any codec
+  version change.
 - The M1 synthetic mini-backup fixture is generated under
   `e2e/fixtures/generated/ios-mini-backup/` and covers open -> detect -> recents in
   `e2e/m1.spec.ts`. The synthetic device values and plist builder live once in

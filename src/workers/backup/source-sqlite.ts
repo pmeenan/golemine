@@ -11,6 +11,8 @@ let databaseCounter = 0;
 
 export interface SourceSqliteDatabase {
   db: SqliteDatabase;
+  /** Transient in-worker VFS filename backing this database (test seam). */
+  databaseName: string;
   close(): void;
 }
 
@@ -89,10 +91,52 @@ export async function openSourceSqliteDatabase(input: {
 
   return {
     db,
+    databaseName,
     close: () => {
       db.close();
+      // sqlite3_js_posix_create_file writes a full copy of the source bytes
+      // into the wasm VFS; closing the handle does not remove it. Without an
+      // explicit unlink every open leaks that copy in wasm memory for the
+      // worker's lifetime.
+      deleteTransientDatabaseFile(sqlite3, databaseName);
     },
   };
+}
+
+function deleteTransientDatabaseFile(
+  sqlite3: Sqlite3Api,
+  databaseName: string,
+): void {
+  // The installed @sqlite.org/sqlite-wasm build exposes no public JS helper
+  // for deleting a file created with sqlite3_js_posix_create_file
+  // (sqlite3.util, which wraps sqlite3__wasm_vfs_unlink, is deleted after
+  // bootstrap), so call the exported C helper directly. Passing a null VFS
+  // pointer makes it unlink through the default (unix) VFS — the one
+  // sqlite3_js_posix_create_file writes into. Best-effort: a failed unlink
+  // must never mask the read result, so errors are swallowed.
+  try {
+    const wasm = sqlite3.wasm;
+    // wasm.exports is typed `any` by the package; narrow it explicitly.
+    const exports = wasm.exports as Record<string, unknown>;
+    const unlink = exports.sqlite3__wasm_vfs_unlink;
+
+    if (typeof unlink !== "function") {
+      return;
+    }
+
+    const namePointer = wasm.allocCString(databaseName, false);
+
+    try {
+      (unlink as (vfsPointer: number, namePointer: number) => number)(
+        0,
+        namePointer,
+      );
+    } finally {
+      wasm.dealloc(namePointer);
+    }
+  } catch {
+    // Cleanup only; the database is already closed.
+  }
 }
 
 export function prepareSourceSqliteBytesForReadOnlyOpen(

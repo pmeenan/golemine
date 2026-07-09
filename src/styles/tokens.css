@@ -30,7 +30,9 @@
   --info-foreground: oklch(0.23 0.04 250);
   --bubble-imessage: oklch(0.58 0.19 258);
   --bubble-sms: oklch(0.62 0.17 150);
+  --bubble-foreground: oklch(0.99 0.006 255);
   --bubble-received: var(--surface-sunken);
+  --avatar-foreground: oklch(0.18 0.012 255);
   --avatar-1: oklch(0.68 0.11 25);
   --avatar-2: oklch(0.70 0.12 72);
   --avatar-3: oklch(0.66 0.12 130);
@@ -132,7 +134,9 @@
     --info-foreground: oklch(0.92 0.03 250);
     --bubble-imessage: oklch(0.56 0.17 258);
     --bubble-sms: oklch(0.60 0.15 150);
+    --bubble-foreground: oklch(0.99 0.006 255);
     --bubble-received: var(--surface-raised);
+    --avatar-foreground: oklch(0.18 0.012 255);
     --surface-glass: oklch(0.20 0.012 255 / 0.78);
     --avatar-1: oklch(0.72 0.10 25);
     --avatar-2: oklch(0.74 0.11 72);
@@ -177,8 +181,18 @@
   --info-foreground: oklch(0.92 0.03 250);
   --bubble-imessage: oklch(0.56 0.17 258);
   --bubble-sms: oklch(0.60 0.15 150);
+  --bubble-foreground: oklch(0.99 0.006 255);
   --bubble-received: var(--surface-raised);
+  --avatar-foreground: oklch(0.18 0.012 255);
   --surface-glass: oklch(0.20 0.012 255 / 0.78);
+  --avatar-1: oklch(0.72 0.10 25);
+  --avatar-2: oklch(0.74 0.11 72);
+  --avatar-3: oklch(0.70 0.11 130);
+  --avatar-4: oklch(0.69 0.10 185);
+  --avatar-5: oklch(0.70 0.10 235);
+  --avatar-6: oklch(0.71 0.10 285);
+  --avatar-7: oklch(0.72 0.10 325);
+  --avatar-8: oklch(0.72 0.09 345);
   --shadow-1: inset 0 1px 0 oklch(1 0 0 / 0.06);
   --shadow-2: inset 0 1px 0 oklch(1 0 0 / 0.07), 0 12px 32px oklch(0 0 0 / 0.24);
   --shadow-3: inset 0 1px 0 oklch(1 0 0 / 0.08), 0 24px 56px oklch(0 0 0 / 0.34);
