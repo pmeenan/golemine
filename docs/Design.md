@@ -219,13 +219,28 @@ hover affordances there are CSS-driven.
 - **Inputs:** `--surface-sunken` background, `--border-strong`, focus = ring token (no
   border-color change alone). Labels above, `--type-caption` secondary; errors in
   `--danger` text + icon, never color alone.
+- **Backup passwords:** use a labelled password input beside/before one verb-first
+  action. Keep the control uncontrolled, clear it immediately after RPC dispatch, and
+  never offer persistence/reveal/autofill beyond `current-password`. PBKDF2/keybag
+  work reports calm stage text in the existing inline status region; wrong passwords
+  remain retryable in place and return focus to the cleared input. Encrypted ingest
+  must disclose beside the form that secrets are session-only, the derived database
+  and generated media previews can contain decrypted content, and removing the recent
+  backup wipes that local derived data. In the
+  messages workspace, a compact inline unlock panel spans above the panes; success
+  collapses to a status strip with a compact **Lock attachments** action that restores
+  and focuses the shared password form. Attachment-level locked affordances focus that
+  one shared input rather than rendering password fields inside virtualized rows. If the
+  affordance is activated from modal Details, close the overlay first so its inert/
+  focus containment remains valid, then move focus to the shared field.
 - **Cards/panes:** `--surface`, hairline border, `--radius-lg`, internal padding 16
   or 20. Pane headers: 48px tall, `--type-heading`, actions right.
 - **Selection:** selected list rows/messages get `--accent-subtle` background + 2px
   accent left bar (not just a tint — must survive screenshots/printing in grayscale).
 - **Badges:** `--type-micro`, `--radius-full`, subtle backgrounds (`*-subtle` +
   `*-text`); filled badges reserved for counts on accent elements.
-- **Dialogs:** max-width 480 (confirm) / 720 (forms); scrim `--overlay-scrim`;
+- **Dialogs:** max-width `--layout-dialog-confirm` (30rem / 480px) for confirms and
+  `--layout-content-text` (45rem / 720px) for forms; scrim `--overlay-scrim`;
   destructive confirms restate the object name and use a destructive primary.
 - **Toasts:** bottom-right, auto-dismiss 5s, max 3 stacked; never for errors that
   require action (those get inline or dialog treatment).

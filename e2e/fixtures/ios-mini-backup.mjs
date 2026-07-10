@@ -4,6 +4,7 @@
 // drift between suites. Everything here is synthetic: no real personal data.
 
 export const iosMiniBackupUdid = "00008030-001C195E0A88802E";
+export const iosMiniEncryptedBackupUdid = "00008030-001C195E0A88805E";
 
 const smsDbFileId = "3d0d7e5fb2ce288813306e4d4636395e047a3d28";
 const smsDbWalFileId = "cd47480f213dba9bc38ee792775d17e3f5a73a59";
@@ -23,6 +24,14 @@ export const iosMiniBackupDevice = {
   serialNumber: "C39SYNTH0001",
   phoneNumber: "+15555550123",
   lastBackupDate: "2026-07-01T12:34:56Z",
+};
+
+export const iosMiniEncryptedBackupDevice = {
+  ...iosMiniBackupDevice,
+  udid: iosMiniEncryptedBackupUdid,
+  displayName: "Mina's encrypted iPhone backup",
+  deviceName: "Mina's encrypted iPhone",
+  serialNumber: "C39SYNTHM5001",
 };
 
 export const iosMiniBackupExpectedMetadata = {
@@ -76,6 +85,124 @@ export const iosMiniBackupExpectedMetadata = {
     avatarThumbnails: 1,
     avatarWarnings: 1,
     walSidecars: 2,
+  },
+};
+
+export const iosMiniEncryptedBackupPassword = "G0lemine-M5!";
+
+// Independent, static vectors for M5 crypto tests. The fixture generator derives
+// and wraps the keys with Node's crypto implementation, then refuses to write the
+// fixture if any result differs from these values. Production tests can import the
+// expected values without sharing generator code with the worker implementation.
+export const iosMiniEncryptedBackupCryptoVectors = {
+  protectionClass: 4,
+  password: iosMiniEncryptedBackupPassword,
+  keybag: {
+    version: 3,
+    type: 1,
+    wrap: 2,
+    uuidHex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    hmckHex:
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    saltHex: "f0e1d2c3b4a5968778695a4b3c2d1e0f00112233",
+    iterations: 10_000,
+    doubleProtectionWrapType: 1,
+    // Production backups are commonly around 10,000,000. The generated fixture
+    // deliberately uses 100,000 so default unit + browser runs remain quick; the
+    // realistic slow vector below covers the production-sized count on demand.
+    doubleProtectionIterations: 100_000,
+    doubleProtectionSaltHex:
+      "00112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f",
+  },
+  intermediateKeyHex:
+    "099724effa8b71f6092d13af988f4ad652d8b7488d07ba36af659e0544daa603",
+  passcodeKeyHex:
+    "cf7d508ce0144ade4326c81f248e0ff07935168b19be13c338478eae39c1ca03",
+  realisticKdf: {
+    iterations: 10_000,
+    doubleProtectionIterations: 10_000_000,
+    intermediateKeyHex:
+      "007597fc7488babff95073d9dff0695d23a654659644fe6f6673cbebe1e8cf51",
+    passcodeKeyHex:
+      "256bedd030ac871d7910bfd3550a4096e3845276e30f2daaebd3b93260a8e208",
+  },
+  secondaryClassKey: {
+    uuidHex: "22222222222222222222222222222222",
+    class: 2,
+    wrap: 2,
+    keyType: 0,
+    keyHex:
+      "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+    wrappedKeyHex:
+      "33a6e22a045de0414c76d06f5a13da1210db54657d15b9d126a6e555768223f79b7e33d0ae0dff2a",
+  },
+  classKey: {
+    uuidHex: "44444444444444444444444444444444",
+    class: 4,
+    wrap: 2,
+    keyType: 0,
+    keyHex:
+      "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    wrappedKeyHex:
+      "ee282eb54ad2d894cc35a9d9757b6bc9979431d075a642b6ab55e661829a6be566656f241c746f35",
+  },
+  manifestKey: {
+    keyHex:
+      "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+    wrappedKeyHex:
+      "8aacfb98579bd07c79487bb2b5d36a48b250bf6bab553ec166cdb65226a4de91fb3b147cb98728f4",
+  },
+  fileKeys: {
+    smsDb: {
+      keyHex:
+        "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+      wrappedKeyHex:
+        "70625b4fa8313bf4902bb9dbd00b8766e4a58300c89bce51bff676047b8fd926d4244d096647e524",
+    },
+    smsDbWal: {
+      keyHex:
+        "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      wrappedKeyHex:
+        "d261dc1c019b031eda2eb9450d99d8c698d51563d45cb43b2ac44d695494fe24f5f85b67cbf4edc1",
+    },
+    addressBookDb: {
+      keyHex:
+        "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+      wrappedKeyHex:
+        "c0ab8495fc443f61436ca658a56a9c44c6b7acb79a92c161a1db3eef79d70453ad54b1d19f960d8e",
+    },
+    addressBookDbWal: {
+      keyHex:
+        "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      wrappedKeyHex:
+        "24d935d89bbffe44787a6a59f0a65e93a2f162c09a261c869912418aff809d1da3374d2f5b522062",
+    },
+    addressBookImagesDb: {
+      keyHex:
+        "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
+      wrappedKeyHex:
+        "96e2a424d959265e11be65c372ca6220a1f430d866c895cd94aeb83497f30a6574f148281885322b",
+    },
+    attachment: {
+      keyHex:
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      wrappedKeyHex:
+        "709bc225679cee93365a915d3039c5ff9bded877b8b231a6f9022a42360475ef9aee03a761ee0e5f",
+    },
+  },
+};
+
+export const iosMiniEncryptedBackupExpectedMetadata = {
+  ...iosMiniBackupExpectedMetadata,
+  id: "ios-mini-encrypted-backup",
+  isEncrypted: true,
+  crypto: {
+    protectionClass: iosMiniEncryptedBackupCryptoVectors.protectionClass,
+    password: iosMiniEncryptedBackupPassword,
+    manifestCipher: "AES-256-CBC with a zero IV and PKCS#7 padding",
+    perFileCipher:
+      "AES-256-CBC with a zero IV and PKCS#7 padding, truncated via MBFile.Size",
+    keyWrap: "RFC 3394 AES-256-KW",
   },
 };
 
@@ -289,6 +416,24 @@ export function iosMiniBackupManifestPlist() {
   `);
 }
 
+export function iosMiniEncryptedBackupManifestPlist({
+  backupKeyBagBase64,
+  manifestKeyBase64,
+}) {
+  return plistDict(`
+          <key>IsEncrypted</key>
+          <true/>
+          <key>Version</key>
+          <string>10.0</string>
+          <key>Date</key>
+          <date>${escapeXml(iosMiniEncryptedBackupExpectedMetadata.backupDate)}</date>
+          <key>BackupKeyBag</key>
+          <data>${escapeXml(backupKeyBagBase64)}</data>
+          <key>ManifestKey</key>
+          <data>${escapeXml(manifestKeyBase64)}</data>
+  `);
+}
+
 export function iosMiniBackupStatusPlist() {
   return plistDict(`
           <key>SnapshotState</key>
@@ -297,23 +442,31 @@ export function iosMiniBackupStatusPlist() {
 }
 
 export function iosMiniBackupInfoPlist() {
+  return iosBackupInfoPlist(iosMiniBackupDevice);
+}
+
+export function iosMiniEncryptedBackupInfoPlist() {
+  return iosBackupInfoPlist(iosMiniEncryptedBackupDevice);
+}
+
+function iosBackupInfoPlist(device) {
   return plistDict(`
           <key>Unique Identifier</key>
-          <string>${escapeXml(iosMiniBackupDevice.udid)}</string>
+          <string>${escapeXml(device.udid)}</string>
           <key>Display Name</key>
-          <string>${escapeXml(iosMiniBackupDevice.displayName)}</string>
+          <string>${escapeXml(device.displayName)}</string>
           <key>Device Name</key>
-          <string>${escapeXml(iosMiniBackupDevice.deviceName)}</string>
+          <string>${escapeXml(device.deviceName)}</string>
           <key>Product Type</key>
-          <string>${escapeXml(iosMiniBackupDevice.productType)}</string>
+          <string>${escapeXml(device.productType)}</string>
           <key>Product Version</key>
-          <string>${escapeXml(iosMiniBackupDevice.productVersion)}</string>
+          <string>${escapeXml(device.productVersion)}</string>
           <key>Serial Number</key>
-          <string>${escapeXml(iosMiniBackupDevice.serialNumber)}</string>
+          <string>${escapeXml(device.serialNumber)}</string>
           <key>Phone Number</key>
-          <string>${escapeXml(iosMiniBackupDevice.phoneNumber)}</string>
+          <string>${escapeXml(device.phoneNumber)}</string>
           <key>Last Backup Date</key>
-          <date>${escapeXml(iosMiniBackupDevice.lastBackupDate)}</date>
+          <date>${escapeXml(device.lastBackupDate)}</date>
   `);
 }
 

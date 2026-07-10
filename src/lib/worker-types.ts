@@ -2,6 +2,8 @@ export type WorkerKind = "backup" | "db" | "media";
 
 export type WorkerProgressPhase =
   | "starting"
+  | "unlocking"
+  | "decrypting"
   | "prepare"
   | "scanning"
   | "manifest"
@@ -19,6 +21,8 @@ export type WorkerStructuredValue = string | number | boolean | null;
 
 export type WorkerErrorCode =
   | "backup_access_failed"
+  | "backup_crypto_malformed"
+  | "backup_crypto_unsupported"
   | "backup_encrypted_unsupported"
   | "backup_file_missing"
   | "backup_ingest_failed"
@@ -26,6 +30,8 @@ export type WorkerErrorCode =
   | "backup_manifest_unreadable"
   | "backup_not_found"
   | "backup_parse_failed"
+  | "backup_password_incorrect"
+  | "backup_password_required"
   | "db_ingest_failed"
   /**
    * The per-backup derived SQLite database (opfs-sahpool VFS) could not be
@@ -220,6 +226,11 @@ export interface IngestSourceFile {
   relativePath: string;
   sha256: string;
   bytes: number;
+  /** SHA-256 of the bytes as stored in the source backup (ciphertext when encrypted). */
+  sourceSha256?: string;
+  /** Actual byte length of the source backup file (ciphertext when encrypted). */
+  sourceBytes?: number;
+  isEncrypted?: boolean;
 }
 
 export interface IngestWarning {
@@ -509,7 +520,24 @@ export interface ListSearchConversationsResponse {
   coverage: SearchCoverage;
 }
 
-export interface ReadUnencryptedSourceFileRequest {
+/**
+ * Credentials exist only on the unlock/ingest RPC call. Implementations must
+ * never retain this object or include it in persisted state, logs, or errors.
+ */
+export interface BackupCredentials {
+  password: string;
+}
+
+export interface UnlockBackupSessionRequest extends BackupCredentials {
+  backupId: string;
+}
+
+export interface UnlockBackupSessionResponse {
+  backupId: string;
+  isEncrypted: boolean;
+}
+
+export interface ReadSourceFileRequest {
   backupId?: string;
   sourceDomain: string;
   sourcePath: string;
@@ -520,7 +548,7 @@ export interface ReadUnencryptedSourceFileRequest {
   maxReadBytes?: number;
 }
 
-export interface ReadUnencryptedSourceFileResponse {
+export interface ReadSourceFileResponse {
   backupId?: string;
   sourceDomain: string;
   sourcePath: string;
@@ -534,9 +562,17 @@ export interface ReadUnencryptedSourceFileResponse {
   bytes: Uint8Array;
   byteLength: number;
   sourceByteLength: number;
+  /** True when `bytes` were decrypted from ciphertext in the source backup. */
+  isEncrypted: boolean;
+  /** Hash of bytes as stored in the backup (ciphertext for encrypted backups). */
+  sourceSha256: string;
+  /** Hash of the returned plaintext bytes. */
   sha256: string;
   hashMatchesExpectedSha256?: boolean;
 }
+
+export type ReadUnencryptedSourceFileRequest = ReadSourceFileRequest;
+export type ReadUnencryptedSourceFileResponse = ReadSourceFileResponse;
 
 export interface CreateAttachmentThumbnailRequest {
   backupId: string;
@@ -647,17 +683,37 @@ export interface BackupWorkerApi {
     root: FileSystemDirectoryHandle,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<BackupDetectionResult>>;
+  ingestBackupToDb(
+    root: FileSystemDirectoryHandle,
+    request: BackupIngestRequest,
+    credentials?: BackupCredentials,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<BackupIngestReport>>;
+  unlockBackupSession(
+    root: FileSystemDirectoryHandle,
+    request: UnlockBackupSessionRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<UnlockBackupSessionResponse>>;
+  lockBackupSession(): Promise<void>;
+  readSourceFile(
+    root: FileSystemDirectoryHandle,
+    request: ReadSourceFileRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<ReadSourceFileResponse>>;
+  /** @deprecated Compatibility/test seam. Use ingestBackupToDb. */
   ingestUnencryptedBackup(
     root: FileSystemDirectoryHandle,
     request: BackupIngestRequest,
     sink: IngestSinkApi,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<BackupIngestReport>>;
+  /** @deprecated Compatibility seam. Use ingestBackupToDb. */
   ingestUnencryptedBackupToDb(
     root: FileSystemDirectoryHandle,
     request: BackupIngestRequest,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<BackupIngestReport>>;
+  /** @deprecated Compatibility seam. Use readSourceFile. */
   readUnencryptedSourceFile(
     root: FileSystemDirectoryHandle,
     request: ReadUnencryptedSourceFileRequest,

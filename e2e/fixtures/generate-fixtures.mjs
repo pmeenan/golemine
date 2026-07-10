@@ -1,6 +1,12 @@
 /// <reference lib="webworker" />
 
-import { createHash } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  pbkdf2Sync,
+  timingSafeEqual,
+} from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +18,13 @@ import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 
 import {
   iosMiniBackupDevice,
+  iosMiniEncryptedBackupCryptoVectors,
+  iosMiniEncryptedBackupDevice,
+  iosMiniEncryptedBackupExpectedMetadata,
+  iosMiniEncryptedBackupInfoPlist,
+  iosMiniEncryptedBackupManifestPlist,
+  iosMiniEncryptedBackupPassword,
+  iosMiniEncryptedBackupUdid,
   iosMiniBackupExpectedAvatarWarnings,
   iosMiniBackupExpectedContacts,
   iosMiniBackupExpectedConversations,
@@ -34,14 +47,18 @@ if (!metadata.policy?.syntheticOnly || !metadata.policy?.noRealPersonalData) {
 }
 
 const iosMiniBackupId = "ios-mini-backup";
+const iosMiniEncryptedBackupId = "ios-mini-encrypted-backup";
 const textEncoder = new TextEncoder();
 const manifestFileFlag = 1;
 const fileModeRegular0644 = 0o100644;
+const aesKeyWrapIv = hexBytes("a6a6a6a6a6a6a6a6");
+const aesCbcZeroIv = new Uint8Array(16);
 const sqlite3 = await sqlite3InitModule({
   print: () => undefined,
   printErr: () => undefined,
 });
 
+const iosMiniBackupPlaintext = buildIosMiniBackupPlaintext();
 const generatedFixtures = [
   {
     id: iosMiniBackupId,
@@ -57,7 +74,25 @@ const generatedFixtures = [
       udid: iosMiniBackupDevice.udid,
       phoneNumber: iosMiniBackupDevice.phoneNumber,
     },
-    files: buildIosMiniBackupFiles(),
+    files: buildIosMiniBackupFiles(iosMiniBackupPlaintext),
+  },
+  {
+    id: iosMiniEncryptedBackupId,
+    root: path.join(
+      generatedDir,
+      iosMiniEncryptedBackupId,
+      iosMiniEncryptedBackupUdid,
+    ),
+    device: {
+      displayName: iosMiniEncryptedBackupDevice.displayName,
+      deviceName: iosMiniEncryptedBackupDevice.deviceName,
+      productType: iosMiniEncryptedBackupDevice.productType,
+      productVersion: iosMiniEncryptedBackupDevice.productVersion,
+      serialNumber: iosMiniEncryptedBackupDevice.serialNumber,
+      udid: iosMiniEncryptedBackupDevice.udid,
+      phoneNumber: iosMiniEncryptedBackupDevice.phoneNumber,
+    },
+    files: buildIosMiniEncryptedBackupFiles(iosMiniBackupPlaintext),
   },
 ];
 
@@ -108,7 +143,7 @@ for (const fixture of generatedFixtures) {
   console.log(`Generated ${fixture.id} at ${path.relative(fixturesDir, fixture.root)}.`);
 }
 
-function buildIosMiniBackupFiles() {
+function buildIosMiniBackupPlaintext() {
   const attachmentBytes = smallPngBytes();
   const contactThumbnailBytes = concatBytes([
     textEncoder.encode("GMIIMG!"),
@@ -162,7 +197,13 @@ function buildIosMiniBackupFiles() {
     }
   }
 
-  const manifestDb = createSqliteDatabase((db) => buildManifestDatabase(db, sourceFiles));
+  return { sourceFiles };
+}
+
+function buildIosMiniBackupFiles({ sourceFiles }) {
+  const manifestDb = createSqliteDatabase((db) =>
+    buildManifestDatabase(db, sourceFiles, undefined),
+  );
 
   return [
     {
@@ -188,7 +229,156 @@ function buildIosMiniBackupFiles() {
   ];
 }
 
-function buildManifestDatabase(db, sourceFiles) {
+function buildIosMiniEncryptedBackupFiles({ sourceFiles }) {
+  const vectors = iosMiniEncryptedBackupCryptoVectors;
+  const classKey = hexBytes(vectors.classKey.keyHex);
+  const secondaryClassKey = hexBytes(vectors.secondaryClassKey.keyHex);
+  const passcodeKeys = deriveFixturePasscodeKeys();
+
+  assertBytesEqual(
+    "PBKDF2-SHA256 intermediate key",
+    passcodeKeys.intermediate,
+    hexBytes(vectors.intermediateKeyHex),
+  );
+  assertBytesEqual(
+    "PBKDF2-SHA1 passcode key",
+    passcodeKeys.passcode,
+    hexBytes(vectors.passcodeKeyHex),
+  );
+  assertWrappedVector(
+    "class key",
+    passcodeKeys.passcode,
+    classKey,
+    vectors.classKey.wrappedKeyHex,
+  );
+  assertBytesEqual(
+    "class key unwrap",
+    aesKeyUnwrap(
+      passcodeKeys.passcode,
+      hexBytes(vectors.classKey.wrappedKeyHex),
+    ),
+    classKey,
+  );
+  assertWrappedVector(
+    "secondary class key",
+    passcodeKeys.passcode,
+    secondaryClassKey,
+    vectors.secondaryClassKey.wrappedKeyHex,
+  );
+  assertBytesEqual(
+    "secondary class key unwrap",
+    aesKeyUnwrap(
+      passcodeKeys.passcode,
+      hexBytes(vectors.secondaryClassKey.wrappedKeyHex),
+    ),
+    secondaryClassKey,
+  );
+  assertWrongPasswordFailsClassKeyUnwrap();
+
+  const encryptedSourceFiles = sourceFiles.map((sourceFile) => {
+    const keyName = sourceFileKeyName(sourceFile.fileID);
+    const vector = vectors.fileKeys[keyName];
+    const fileKey = hexBytes(vector.keyHex);
+    const wrappedKey = aesKeyWrap(classKey, fileKey);
+
+    assertBytesEqual(
+      `${keyName} wrapped key`,
+      wrappedKey,
+      hexBytes(vector.wrappedKeyHex),
+    );
+    assertBytesEqual(
+      `${keyName} key unwrap`,
+      aesKeyUnwrap(classKey, wrappedKey),
+      fileKey,
+    );
+
+    const ciphertext = aesCbcEncryptPkcs7(fileKey, sourceFile.content);
+    assertBytesEqual(
+      `${keyName} decrypt self-check`,
+      aesCbcDecryptPkcs7(fileKey, ciphertext),
+      sourceFile.content,
+    );
+
+    return {
+      ...sourceFile,
+      content: ciphertext,
+      plaintextSize: sourceFile.content.byteLength,
+      encryptionKey: buildClassKeyBlob(vectors.protectionClass, wrappedKey),
+    };
+  });
+
+  const manifestDbPlaintext = createSqliteDatabase((db) =>
+    buildManifestDatabase(db, encryptedSourceFiles, {
+      encrypted: true,
+    }),
+  );
+  const manifestKey = hexBytes(vectors.manifestKey.keyHex);
+  const wrappedManifestKey = aesKeyWrap(classKey, manifestKey);
+
+  assertBytesEqual(
+    "Manifest.db wrapped key",
+    wrappedManifestKey,
+    hexBytes(vectors.manifestKey.wrappedKeyHex),
+  );
+  assertBytesEqual(
+    "Manifest.db key unwrap",
+    aesKeyUnwrap(classKey, wrappedManifestKey),
+    manifestKey,
+  );
+
+  const encryptedManifestDb = aesCbcEncryptPkcs7(
+    manifestKey,
+    manifestDbPlaintext,
+  );
+  assertBytesEqual(
+    "Manifest.db decrypt self-check",
+    aesCbcDecryptPkcs7(manifestKey, encryptedManifestDb),
+    manifestDbPlaintext,
+  );
+
+  const keybag = buildBackupKeybag();
+  const manifestKeyBlob = buildClassKeyBlob(
+    vectors.protectionClass,
+    wrappedManifestKey,
+  );
+
+  validateBackupKeybag(keybag);
+  validateEncryptedFixtureLayout({
+    encryptedManifestDb,
+    encryptedSourceFiles,
+    keybag,
+    manifestDbPlaintext,
+    manifestKeyBlob,
+  });
+
+  return [
+    {
+      relativePath: "Info.plist",
+      content: iosMiniEncryptedBackupInfoPlist(),
+    },
+    {
+      relativePath: "Manifest.plist",
+      content: iosMiniEncryptedBackupManifestPlist({
+        backupKeyBagBase64: Buffer.from(keybag).toString("base64"),
+        manifestKeyBase64: Buffer.from(manifestKeyBlob).toString("base64"),
+      }),
+    },
+    {
+      relativePath: "Manifest.db",
+      content: encryptedManifestDb,
+    },
+    {
+      relativePath: "Status.plist",
+      content: iosMiniBackupStatusPlist(),
+    },
+    ...encryptedSourceFiles.map((sourceFile) => ({
+      relativePath: backupStoragePath(sourceFile.fileID),
+      content: sourceFile.content,
+    })),
+  ];
+}
+
+function buildManifestDatabase(db, sourceFiles, options) {
   db.exec(`
     CREATE TABLE Files (
       fileID TEXT PRIMARY KEY,
@@ -210,7 +400,15 @@ function buildManifestDatabase(db, sourceFiles) {
         sourceFile.domain,
         sourceFile.relativePath,
         manifestFileFlag,
-        buildManifestFileBlob(sourceFile.content.byteLength),
+        buildManifestFileBlob(
+          sourceFile.plaintextSize ?? sourceFile.content.byteLength,
+          options?.encrypted
+            ? {
+                encryptionKey: sourceFile.encryptionKey,
+                protectionClass: iosMiniEncryptedBackupCryptoVectors.protectionClass,
+              }
+            : undefined,
+        ),
       ],
     });
   }
@@ -776,15 +974,118 @@ function backupStoragePath(fileID) {
   return path.join(fileID.slice(0, 2), fileID);
 }
 
-function buildManifestFileBlob(size) {
+function buildManifestFileBlob(size, encryption) {
   const lastModified = Math.floor(Date.parse(iosMiniBackupExpectedMetadata.backupDate) / 1000);
-
-  return buildBinaryPlistDictionary([
+  const entries = [
     ["Size", size],
     ["Mode", fileModeRegular0644],
-    ["ProtectionClass", 0],
+    ["ProtectionClass", encryption?.protectionClass ?? 0],
     ["LastModified", lastModified],
-  ]);
+  ];
+
+  if (encryption === undefined) {
+    return buildBinaryPlistDictionary(entries);
+  }
+
+  return buildArchivedManifestFileBlob(entries, encryption.encryptionKey);
+}
+
+function buildArchivedManifestFileBlob(entries, encryptionKey) {
+  const objects = [new Uint8Array()];
+  const add = (object) => {
+    objects.push(object);
+    return objects.length - 1;
+  };
+  const addString = (value) => add(binaryPlistStringObject(value));
+  const addInteger = (value) => add(binaryPlistIntegerObject(BigInt(value)));
+  const addUid = (value) => add(binaryPlistUidObject(value));
+
+  // NSKeyedArchiver UIDs index this $objects array rather than the binary
+  // plist object table. This matches real MBFile archives: root -> MBFile,
+  // EncryptionKey -> NSMutableData -> NS.data.
+  const archivedNullRef = addString("$null");
+  const archivedMbFileRef = add(new Uint8Array());
+  const archivedEncryptionDataRef = add(new Uint8Array());
+  const archivedMbFileClassRef = add(new Uint8Array());
+  const archivedDataClassRef = add(new Uint8Array());
+  const archivedObjectsRef = add(
+    binaryPlistArrayObject([
+      archivedNullRef,
+      archivedMbFileRef,
+      archivedEncryptionDataRef,
+      archivedMbFileClassRef,
+      archivedDataClassRef,
+    ]),
+  );
+
+  const mbFileKeyRefs = [];
+  const mbFileValueRefs = [];
+  for (const [key, value] of entries) {
+    mbFileKeyRefs.push(addString(key));
+    mbFileValueRefs.push(addInteger(value));
+  }
+  mbFileKeyRefs.push(addString("EncryptionKey"));
+  mbFileValueRefs.push(addUid(2));
+  mbFileKeyRefs.push(addString("$class"));
+  mbFileValueRefs.push(addUid(3));
+  objects[archivedMbFileRef] = binaryPlistDictionaryObject(
+    mbFileKeyRefs,
+    mbFileValueRefs,
+  );
+
+  const classKeyRef = addString("$class");
+  objects[archivedEncryptionDataRef] = binaryPlistDictionaryObject(
+    [addString("NS.data"), classKeyRef],
+    [add(binaryPlistDataObject(encryptionKey)), addUid(4)],
+  );
+
+  const classesKeyRef = addString("$classes");
+  const classNameKeyRef = addString("$classname");
+  const nsObjectStringRef = addString("NSObject");
+  const mbFileStringRef = addString("MBFile");
+  objects[archivedMbFileClassRef] = binaryPlistDictionaryObject(
+    [classesKeyRef, classNameKeyRef],
+    [
+      add(binaryPlistArrayObject([mbFileStringRef, nsObjectStringRef])),
+      mbFileStringRef,
+    ],
+  );
+
+  const mutableDataStringRef = addString("NSMutableData");
+  const dataStringRef = addString("NSData");
+  objects[archivedDataClassRef] = binaryPlistDictionaryObject(
+    [classesKeyRef, classNameKeyRef],
+    [
+      add(
+        binaryPlistArrayObject([
+          mutableDataStringRef,
+          dataStringRef,
+          nsObjectStringRef,
+        ]),
+      ),
+      mutableDataStringRef,
+    ],
+  );
+
+  const topRootRef = add(
+    binaryPlistDictionaryObject([addString("root")], [addUid(1)]),
+  );
+  objects[0] = binaryPlistDictionaryObject(
+    [
+      addString("$version"),
+      addString("$archiver"),
+      addString("$top"),
+      addString("$objects"),
+    ],
+    [
+      addInteger(100_000),
+      addString("NSKeyedArchiver"),
+      topRootRef,
+      archivedObjectsRef,
+    ],
+  );
+
+  return buildBinaryPlist(objects);
 }
 
 function buildBinaryPlistDictionary(entries) {
@@ -857,7 +1158,33 @@ function binaryPlistDictionaryObject(keyRefs, valueRefs) {
   ]);
 }
 
+function binaryPlistArrayObject(refs) {
+  return concatBytes([
+    binaryPlistLengthHeader(0xa0, refs.length),
+    new Uint8Array(refs),
+  ]);
+}
+
+function binaryPlistDataObject(value) {
+  return concatBytes([
+    binaryPlistLengthHeader(0x40, value.byteLength),
+    value,
+  ]);
+}
+
+function binaryPlistUidObject(value) {
+  if (!Number.isInteger(value) || value < 0 || value > 0xff) {
+    throw new Error("Fixture binary plist UID must fit in one byte.");
+  }
+
+  return new Uint8Array([0x80, value]);
+}
+
 function binaryPlistValueObject(value) {
+  if (value instanceof Uint8Array) {
+    return binaryPlistDataObject(value);
+  }
+
   if (typeof value === "number") {
     return binaryPlistIntegerObject(BigInt(value));
   }
@@ -871,6 +1198,348 @@ function binaryPlistValueObject(value) {
   }
 
   throw new Error(`Unsupported binary plist fixture value: ${String(value)}`);
+}
+
+function deriveFixturePasscodeKeys() {
+  const vectors = iosMiniEncryptedBackupCryptoVectors;
+  const intermediate = Uint8Array.from(
+    pbkdf2Sync(
+      Buffer.from(iosMiniEncryptedBackupPassword, "utf8"),
+      hexBytes(vectors.keybag.doubleProtectionSaltHex),
+      vectors.keybag.doubleProtectionIterations,
+      32,
+      "sha256",
+    ),
+  );
+  const passcode = Uint8Array.from(
+    pbkdf2Sync(
+      intermediate,
+      hexBytes(vectors.keybag.saltHex),
+      vectors.keybag.iterations,
+      32,
+      "sha1",
+    ),
+  );
+
+  return { intermediate, passcode };
+}
+
+function buildBackupKeybag() {
+  const vectors = iosMiniEncryptedBackupCryptoVectors;
+
+  return concatBytes([
+    keybagTlv("VERS", uint32BeBytes(vectors.keybag.version)),
+    keybagTlv("TYPE", uint32BeBytes(vectors.keybag.type)),
+    keybagTlv("UUID", hexBytes(vectors.keybag.uuidHex)),
+    keybagTlv("HMCK", hexBytes(vectors.keybag.hmckHex)),
+    keybagTlv("WRAP", uint32BeBytes(vectors.keybag.wrap)),
+    keybagTlv("SALT", hexBytes(vectors.keybag.saltHex)),
+    keybagTlv("ITER", uint32BeBytes(vectors.keybag.iterations)),
+    keybagTlv("DPWT", uint32BeBytes(vectors.keybag.doubleProtectionWrapType)),
+    keybagTlv("DPIC", uint32BeBytes(vectors.keybag.doubleProtectionIterations)),
+    keybagTlv("DPSL", hexBytes(vectors.keybag.doubleProtectionSaltHex)),
+    keybagTlv("UUID", hexBytes(vectors.secondaryClassKey.uuidHex)),
+    keybagTlv("CLAS", uint32BeBytes(vectors.secondaryClassKey.class)),
+    keybagTlv("WRAP", uint32BeBytes(vectors.secondaryClassKey.wrap)),
+    keybagTlv("KTYP", uint32BeBytes(vectors.secondaryClassKey.keyType)),
+    keybagTlv("WPKY", hexBytes(vectors.secondaryClassKey.wrappedKeyHex)),
+    keybagTlv("UUID", hexBytes(vectors.classKey.uuidHex)),
+    keybagTlv("CLAS", uint32BeBytes(vectors.classKey.class)),
+    keybagTlv("WRAP", uint32BeBytes(vectors.classKey.wrap)),
+    keybagTlv("KTYP", uint32BeBytes(vectors.classKey.keyType)),
+    keybagTlv("WPKY", hexBytes(vectors.classKey.wrappedKeyHex)),
+  ]);
+}
+
+function validateBackupKeybag(keybag) {
+  const vectors = iosMiniEncryptedBackupCryptoVectors;
+  const entries = parseKeybagTlvsForSelfCheck(keybag);
+  const expectedTags = [
+    "VERS",
+    "TYPE",
+    "UUID",
+    "HMCK",
+    "WRAP",
+    "SALT",
+    "ITER",
+    "DPWT",
+    "DPIC",
+    "DPSL",
+    "UUID",
+    "CLAS",
+    "WRAP",
+    "KTYP",
+    "WPKY",
+    "UUID",
+    "CLAS",
+    "WRAP",
+    "KTYP",
+    "WPKY",
+  ];
+
+  if (entries.map((entry) => entry.tag).join(",") !== expectedTags.join(",")) {
+    throw new Error("Encrypted fixture keybag TLV ordering failed its self-check.");
+  }
+
+  const secondaryClassStart = entries.findIndex(
+    (entry, index) => entry.tag === "UUID" && index > 2,
+  );
+  const classStart = entries.findIndex(
+    (entry, index) => entry.tag === "UUID" && index > secondaryClassStart,
+  );
+  if (secondaryClassStart < 0 || classStart < 0) {
+    throw new Error("Encrypted fixture keybag must contain two class-key blocks.");
+  }
+
+  assertKeybagClassBlock(
+    entries,
+    secondaryClassStart,
+    vectors.secondaryClassKey,
+  );
+  assertKeybagClassBlock(entries, classStart, vectors.classKey);
+}
+
+function assertKeybagClassBlock(entries, start, vector) {
+  assertBytesEqual(
+    "keybag class UUID",
+    entries[start].value,
+    hexBytes(vector.uuidHex),
+  );
+  assertBytesEqual(
+    "keybag class number",
+    entries[start + 1].value,
+    uint32BeBytes(vector.class),
+  );
+  assertBytesEqual(
+    "keybag wrapped class key",
+    entries[start + 4].value,
+    hexBytes(vector.wrappedKeyHex),
+  );
+}
+
+function validateEncryptedFixtureLayout({
+  encryptedManifestDb,
+  encryptedSourceFiles,
+  keybag,
+  manifestDbPlaintext,
+  manifestKeyBlob,
+}) {
+  const expectedSourceFileCount = Object.keys(
+    iosMiniEncryptedBackupExpectedMetadata.sourceFiles,
+  ).length;
+
+  if (encryptedSourceFiles.length !== expectedSourceFileCount) {
+    throw new Error(
+      `Encrypted fixture has ${String(encryptedSourceFiles.length)} MBFiles; expected ${String(expectedSourceFileCount)}.`,
+    );
+  }
+
+  if (!bytesStartWith(manifestDbPlaintext, textEncoder.encode("SQLite format 3\0"))) {
+    throw new Error("Encrypted fixture Manifest.db plaintext lacks a SQLite header.");
+  }
+
+  if (bytesStartWith(encryptedManifestDb, textEncoder.encode("SQLite format 3\0"))) {
+    throw new Error("Encrypted fixture Manifest.db was accidentally stored as plaintext.");
+  }
+
+  if (encryptedManifestDb.byteLength !== manifestDbPlaintext.byteLength + 16) {
+    throw new Error(
+      "Encrypted fixture Manifest.db must carry one full PKCS#7 padding block.",
+    );
+  }
+
+  if (manifestKeyBlob.byteLength !== 44 || keybag.byteLength === 0) {
+    throw new Error("Encrypted fixture root key metadata has an invalid byte length.");
+  }
+
+  let fullPaddingBlocks = 0;
+  for (const sourceFile of encryptedSourceFiles) {
+    const paddingBytes = sourceFile.content.byteLength - sourceFile.plaintextSize;
+    if (
+      sourceFile.encryptionKey.byteLength !== 44 ||
+      sourceFile.content.byteLength === 0 ||
+      sourceFile.content.byteLength % 16 !== 0 ||
+      paddingBytes < 1 ||
+      paddingBytes > 16
+    ) {
+      throw new Error(
+        `Encrypted fixture MBFile ${sourceFile.fileID} has an invalid encrypted layout.`,
+      );
+    }
+
+    if (sourceFile.plaintextSize % 16 === 0 && paddingBytes === 16) {
+      fullPaddingBlocks += 1;
+    }
+  }
+
+  if (fullPaddingBlocks === 0) {
+    throw new Error(
+      "Encrypted fixture must cover a block-aligned MBFile with a full PKCS#7 padding block.",
+    );
+  }
+}
+
+function parseKeybagTlvsForSelfCheck(bytes) {
+  const entries = [];
+  let offset = 0;
+
+  while (offset < bytes.byteLength) {
+    if (bytes.byteLength - offset < 8) {
+      throw new Error("Encrypted fixture keybag ends in a partial TLV header.");
+    }
+
+    const tag = new TextDecoder("ascii", { fatal: true }).decode(
+      bytes.subarray(offset, offset + 4),
+    );
+    const length = readUInt32(bytes, offset + 4);
+    const valueStart = offset + 8;
+    const valueEnd = valueStart + length;
+
+    if (valueEnd > bytes.byteLength) {
+      throw new Error(`Encrypted fixture keybag ${tag} TLV is truncated.`);
+    }
+
+    entries.push({ tag, value: bytes.slice(valueStart, valueEnd) });
+    offset = valueEnd;
+  }
+
+  return entries;
+}
+
+function sourceFileKeyName(fileID) {
+  for (const [key, sourceFile] of Object.entries(
+    iosMiniEncryptedBackupExpectedMetadata.sourceFiles,
+  )) {
+    if (sourceFile.fileID === fileID) {
+      return key;
+    }
+  }
+
+  throw new Error(`Encrypted fixture source file ${fileID} has no key vector.`);
+}
+
+function keybagTlv(tag, value) {
+  if (!/^[A-Z]{4}$/u.test(tag)) {
+    throw new Error(`Invalid fixture keybag tag: ${tag}.`);
+  }
+
+  return concatBytes([
+    textEncoder.encode(tag),
+    uint32BeBytes(value.byteLength),
+    value,
+  ]);
+}
+
+function buildClassKeyBlob(protectionClass, wrappedKey) {
+  if (wrappedKey.byteLength !== 40) {
+    throw new Error("Fixture wrapped keys must be 40-byte RFC 3394 values.");
+  }
+
+  return concatBytes([uint32LeBytes(protectionClass), wrappedKey]);
+}
+
+function assertWrappedVector(label, wrappingKey, key, expectedHex) {
+  assertBytesEqual(label, aesKeyWrap(wrappingKey, key), hexBytes(expectedHex));
+}
+
+function aesKeyWrap(wrappingKey, key) {
+  const cipher = createCipheriv("id-aes256-wrap", wrappingKey, aesKeyWrapIv);
+  return Uint8Array.from(Buffer.concat([cipher.update(key), cipher.final()]));
+}
+
+function aesKeyUnwrap(wrappingKey, wrappedKey) {
+  const decipher = createDecipheriv(
+    "id-aes256-wrap",
+    wrappingKey,
+    aesKeyWrapIv,
+  );
+  return Uint8Array.from(
+    Buffer.concat([decipher.update(wrappedKey), decipher.final()]),
+  );
+}
+
+function assertWrongPasswordFailsClassKeyUnwrap() {
+  const vectors = iosMiniEncryptedBackupCryptoVectors;
+  const wrongIntermediate = pbkdf2Sync(
+    Buffer.from("wrong-synthetic-password", "utf8"),
+    hexBytes(vectors.keybag.doubleProtectionSaltHex),
+    vectors.keybag.doubleProtectionIterations,
+    32,
+    "sha256",
+  );
+  const wrongPasscode = pbkdf2Sync(
+    wrongIntermediate,
+    hexBytes(vectors.keybag.saltHex),
+    vectors.keybag.iterations,
+    32,
+    "sha1",
+  );
+
+  try {
+    aesKeyUnwrap(wrongPasscode, hexBytes(vectors.classKey.wrappedKeyHex));
+  } catch {
+    wrongIntermediate.fill(0);
+    wrongPasscode.fill(0);
+    return;
+  }
+
+  wrongIntermediate.fill(0);
+  wrongPasscode.fill(0);
+  throw new Error("Encrypted fixture wrong-password AES-KW self-check unexpectedly passed.");
+}
+
+function aesCbcEncryptPkcs7(key, plaintext) {
+  const cipher = createCipheriv("aes-256-cbc", key, aesCbcZeroIv);
+  return Uint8Array.from(Buffer.concat([cipher.update(plaintext), cipher.final()]));
+}
+
+function aesCbcDecryptPkcs7(key, ciphertext) {
+  const decipher = createDecipheriv("aes-256-cbc", key, aesCbcZeroIv);
+  return Uint8Array.from(
+    Buffer.concat([decipher.update(ciphertext), decipher.final()]),
+  );
+}
+
+function assertBytesEqual(label, actual, expected) {
+  if (
+    actual.byteLength !== expected.byteLength ||
+    !timingSafeEqual(Buffer.from(actual), Buffer.from(expected))
+  ) {
+    throw new Error(
+      `${label} differs from the independent fixture vector: got ${Buffer.from(actual).toString("hex")}, expected ${Buffer.from(expected).toString("hex")}.`,
+    );
+  }
+}
+
+function hexBytes(value) {
+  if (!/^(?:[\da-f]{2})+$/iu.test(value)) {
+    throw new Error(`Invalid fixture hex value: ${value}.`);
+  }
+
+  return Uint8Array.from(Buffer.from(value, "hex"));
+}
+
+function uint32BeBytes(value) {
+  const bytes = new Uint8Array(4);
+  writeUInt32(bytes, 0, value);
+  return bytes;
+}
+
+function uint32LeBytes(value) {
+  const bytes = new Uint8Array(4);
+  bytes[0] = value & 0xff;
+  bytes[1] = (value >>> 8) & 0xff;
+  bytes[2] = (value >>> 16) & 0xff;
+  bytes[3] = (value >>> 24) & 0xff;
+  return bytes;
+}
+
+function bytesStartWith(bytes, prefix) {
+  if (bytes.byteLength < prefix.byteLength) {
+    return false;
+  }
+
+  return prefix.every((byte, index) => bytes[index] === byte);
 }
 
 function binaryPlistStringObject(value) {

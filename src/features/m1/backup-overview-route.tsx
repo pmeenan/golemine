@@ -1,7 +1,11 @@
-import { Database, FileText, MessageSquareText } from "lucide-react";
+import { CircleAlert, Database, FileText, MessageSquareText } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
+import {
+  BackupPasswordForm,
+  useBackupPasswordForm,
+} from "../../components/backup/backup-password-form";
 import {
   CapabilityLink,
   MetadataRow,
@@ -54,6 +58,7 @@ export function BackupOverviewRoute() {
   // D-024). release() is idempotent, so the effect cleanup staying in place
   // is safe.
   const summaryReaderRelease = useRef<(() => void) | null>(null);
+  const passwordForm = useBackupPasswordForm();
 
   useEffect(() => {
     let active = true;
@@ -186,28 +191,24 @@ export function BackupOverviewRoute() {
           await runIngest();
         },
         () => {
+          passwordForm.clear();
           setIngestStatus({
             kind: "error",
             label: "Another tab is already rebuilding this backup.",
           });
+          passwordForm.focusAfterFrame();
         },
       );
     } catch (cause) {
+      passwordForm.clear();
       setIngestStatus({
         kind: "error",
         label: cause instanceof Error ? cause.message : String(cause),
       });
+      passwordForm.focusAfterFrame();
     }
   };
   const runIngest = async () => {
-    if (record.isEncrypted) {
-      setIngestStatus({
-        kind: "error",
-        label: "Encrypted backup ingest arrives in M5. Open an unencrypted backup for M2 ingest.",
-      });
-      return;
-    }
-
     const didPrepareDerivedDb = { current: false };
     // Captured before markPrepared writes "ingesting": a pool-unavailable
     // prepare failure guarantees the derived DB was never touched, so a
@@ -256,10 +257,12 @@ export function BackupOverviewRoute() {
       });
 
       if (permission !== "granted") {
+        passwordForm.clear();
         setIngestStatus({
           kind: "error",
           label: `Chrome did not grant read access to ${record.friendlyName}.`,
         });
+        passwordForm.focusAfterFrame();
         return;
       }
 
@@ -268,14 +271,13 @@ export function BackupOverviewRoute() {
 
       try {
         const request = buildIngestRequest(record);
-        const result = await backupClient.api.ingestUnencryptedBackupToDb(
-          record.directoryHandle,
-          request,
-          proxiedWorkerProgress(async (progress: WorkerProgressEvent) => {
-            // Any phase past "starting" (beginning with "prepare", which the
-            // worker awaits before the destructive prepareIngest call) means
-            // the derived database is about to be, or has been, rebuilt.
-            if (progress.phase !== "starting") {
+        const progressCallback = proxiedWorkerProgress(
+          async (progress: WorkerProgressEvent) => {
+            // The worker may emit password-derivation and manifest progress
+            // before this point. Only "prepare" is the ordered boundary it
+            // awaits immediately before destructive prepareIngest work, so a
+            // wrong password must never downgrade valid derived data.
+            if (progress.phase === "prepare") {
               await markPrepared();
             }
 
@@ -283,8 +285,36 @@ export function BackupOverviewRoute() {
               kind: "running",
               label: formatIngestProgressLabel(progress),
             });
-          }),
+          },
         );
+        // The shared controller reads the uncontrolled field only after the
+        // lock/permission/storage work above, clears it before any await, and
+        // hands the credential to the RPC in the same synchronous call
+        // (Comlink clones it). A backup_password_incorrect result refocuses
+        // the cleared field for an in-place retry.
+        // (async dispatch so the union-of-promises Comlink return type
+        // collapses to a promise of the WorkerResult union; the RPC call
+        // itself still runs synchronously when the controller invokes it.)
+        const result = record.isEncrypted
+          ? await passwordForm.submitWithPassword(
+              async (password) =>
+                backupClient.api.ingestBackupToDb(
+                  record.directoryHandle,
+                  request,
+                  { password },
+                  progressCallback,
+                ),
+              {
+                emptyPasswordMessage:
+                  "Enter the backup password before starting ingest.",
+              },
+            )
+          : await backupClient.api.ingestBackupToDb(
+              record.directoryHandle,
+              request,
+              undefined,
+              progressCallback,
+            );
 
         if (!result.ok) {
           if (didPrepareDerivedDb.current) {
@@ -337,6 +367,7 @@ export function BackupOverviewRoute() {
         backupClient.release();
       }
     } catch (cause) {
+      passwordForm.clear();
       if (didPrepareDerivedDb.current) {
         await updateStoredIngestStatus("failed");
       }
@@ -345,6 +376,9 @@ export function BackupOverviewRoute() {
         kind: "error",
         label: cause instanceof Error ? cause.message : String(cause),
       });
+      if (record.isEncrypted) {
+        passwordForm.focusAfterFrame();
+      }
     }
   };
   const isIngestRunning =
@@ -382,8 +416,12 @@ export function BackupOverviewRoute() {
 
         <Panel>
           <PanelHeader
-            badge={<Badge variant={record.ingestStatus === "ingested" ? "success" : "info"}>M2</Badge>}
-            description="Unencrypted message extraction rebuilds the derived OPFS database from source."
+            badge={<Badge variant={record.ingestStatus === "ingested" ? "success" : "info"}>M5</Badge>}
+            description={
+              record.isEncrypted
+                ? "Enter the backup password to decrypt and rebuild the derived OPFS database."
+                : "Message extraction rebuilds the derived OPFS database from source."
+            }
             title="Ingest"
           />
           <div className="mt-4 rounded-md border border-border bg-surface-sunken p-3">
@@ -408,23 +446,53 @@ export function BackupOverviewRoute() {
             </dl>
           ) : null}
           <IngestStatusMessage status={ingestStatus} />
-          <Button
-            className="mt-4 w-full"
-            disabled={record.isEncrypted || isIngestRunning}
-            onClick={() => {
-              void startIngest();
-            }}
-            size="lg"
-            type="button"
-            variant="primary"
-          >
-            {record.ingestStatus === "ingested" ? "Rebuild messages" : "Ingest messages"}
-          </Button>
           {record.isEncrypted ? (
-            <p className="mt-2 text-caption text-text-secondary">
-              Encrypted backup ingest is scheduled for M5.
-            </p>
-          ) : null}
+            <BackupPasswordForm
+              actions={
+                <Button
+                  className="mt-3 w-full"
+                  disabled={isIngestRunning}
+                  size="lg"
+                  type="submit"
+                  variant="primary"
+                >
+                  {record.ingestStatus === "ingested" ? "Rebuild messages" : "Ingest messages"}
+                </Button>
+              }
+              className="mt-4"
+              controller={passwordForm}
+              disabled={isIngestRunning}
+              inputId="backup-password"
+              inputSize="lg"
+              invalid={ingestStatus.kind === "error"}
+              layout="stacked"
+              onEmptySubmit={() => {
+                setIngestStatus({
+                  kind: "error",
+                  label: "Enter the backup password before starting ingest.",
+                });
+              }}
+              onSubmit={() => {
+                // Permission/lock work runs first. runIngest reads the
+                // uncontrolled field through the controller only for the
+                // synchronous Comlink dispatch, clearing it before any await.
+                void startIngest();
+              }}
+            />
+          ) : (
+            <Button
+              className="mt-4 w-full"
+              disabled={isIngestRunning}
+              onClick={() => {
+                void startIngest();
+              }}
+              size="lg"
+              type="button"
+              variant="primary"
+            >
+              {record.ingestStatus === "ingested" ? "Rebuild messages" : "Ingest messages"}
+            </Button>
+          )}
         </Panel>
       </div>
 
@@ -507,14 +575,17 @@ function IngestStatusMessage({ status }: { status: IngestUiStatus }) {
     <p
       className={
         status.kind === "error"
-          ? "mt-3 rounded-md border border-danger bg-danger-subtle px-3 py-2 text-caption text-danger"
+          ? "mt-3 flex items-start gap-2 rounded-md border border-danger bg-danger-subtle px-3 py-2 text-caption text-danger"
           : status.kind === "success"
             ? "mt-3 rounded-md bg-[var(--success-subtle)] px-3 py-2 text-caption text-[var(--success-foreground)]"
             : "mt-3 rounded-md bg-[var(--info-subtle)] px-3 py-2 text-caption text-[var(--info-foreground)]"
       }
       role={status.kind === "error" ? "alert" : "status"}
     >
-      {status.label}
+      {status.kind === "error" ? (
+        <CircleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+      ) : null}
+      <span>{status.label}</span>
     </p>
   );
 }

@@ -14,8 +14,9 @@ offline after the first load.
 
 ## What it does (current + goals)
 
-- Open an unencrypted iPhone backup folder today (drag & drop or file picker);
-  encrypted backups are planned for M5 and will be decrypted locally in the browser.
+- Open encrypted or unencrypted iPhone backup folders (drag & drop or file picker);
+  encrypted content is decrypted locally in a web worker after a session-only
+  password prompt.
 - Browse message threads with attachments in a fast, responsive UI.
 - Search inside the same messages workspace with participant/attachment filters and
   an optional two-month calendar date-range picker, plus hit-counted threads,
@@ -38,7 +39,7 @@ offline after the first load.
 
 ## Status
 
-M4 is implemented for unencrypted iPhone backups. The repo contains the strict
+M5 is implemented for encrypted and unencrypted iPhone backups. The repo contains the strict
 Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
@@ -48,7 +49,11 @@ The app now gates unsupported browsers, opens iPhone Finder/iTunes backup folder
 Chrome folder APIs, detects backup metadata in `backup-worker` (including larger
 real-world `Info.plist` app metadata), stores recent backups in IndexedDB, re-requests
 directory permission on reopen, and wipes OPFS derived data when a recent backup is
-removed. The db-worker sqlite-wasm OPFS smoke path runs in dev and production builds
+removed. Recents and derived storage currently keep one active snapshot per detected
+device ID. Selecting a different folder or backup date for an ID already on this
+computer asks whether to keep the existing snapshot or replace it; replacement wipes
+the old local ingest and opens the selected source as not ingested, while cancellation
+does not change local state. The db-worker sqlite-wasm OPFS smoke path runs in dev and production builds
 with sqlite-wasm excluded from Vite dependency optimization so its wasm asset resolves
 correctly. A generated synthetic mini-backup fixture covers the open -> detect ->
 recents flow in Playwright and now carries real unencrypted Manifest/sms/contact
@@ -92,6 +97,32 @@ recover as needing re-ingest. Per-backup sqlite-wasm `opfs-sahpool` storage now
 reserves extra SAH slots and the overview releases its summary reader during rebuilds
 so repeated real-backup ingests do not fail on stale journal/temp pool slots. Source
 SQLite copies are forced out of WAL mode before their transient read-only opens.
+The current copy-based source-SQLite pipeline rejects a logical message/contact
+database whose combined main/WAL/SHM source set exceeds 1 GiB, and the check runs
+against Manifest metadata before the derived database is touched, so an over-limit
+backup can never wipe a previously ingested workspace (D-039). This bounds hostile
+worker-memory growth under sqlite-wasm's 2 GiB heap ceiling; streaming source-SQLite
+import is a tracked follow-up for unusually large long-lived backups.
+
+Encrypted backups now use a defensive keybag TLV parser, the modern two-stage or
+legacy PBKDF2 password derivation, AES-KW class/file key unwrapping, and zero-IV
+AES-CBC decryption entirely in `backup-worker`. Wrong passwords fail before the
+derived database is prepared, so a retry cannot invalidate a previously ingested
+workspace. Source database files and WAL sidecars are decrypted before the same
+normalization pipeline runs; attachment reads decrypt in bounded chunks while
+preserving both plaintext and encrypted-source SHA-256 provenance. The password is
+cleared from the UI immediately after dispatch; only unwrapped class keys and the
+transient decrypted Manifest reader remain in the worker session. A new messages-route
+worker asks once more before it can read original encrypted attachments, and its
+unlock strip can explicitly lock that worker session without leaving the route.
+Neither passwords nor keys are written to IndexedDB,
+OPFS, logs, or error payloads. The overview discloses that the rebuildable OPFS
+database and generated media previews can contain decrypted content, and that removing
+the recent backup wipes that local derived data.
+Per-file reads treat Manifest `MBFile.Size` as the authoritative plaintext length and
+resize decrypted storage to match it: longer block-aligned stored tails are truncated,
+and shorter sparse prefixes are zero-extended. Both stored and logical sizes remain
+subject to the existing read and in-memory byte caps.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

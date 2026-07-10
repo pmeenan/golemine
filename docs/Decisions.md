@@ -689,3 +689,135 @@ hardcoded release value. DayPicker omits outside-month cells beyond those naviga
 edges, and an explicit disabled matcher provides a second selection guard. Browser
 coverage asserts that both year dropdowns contain exactly the descending inclusive
 2007–current-year range and that no out-of-bounds spillover day is rendered.
+
+## D-038 — Encrypted backup keys belong to a route-scoped worker session (2026-07-10)
+
+M5 needs one password-derived keybag session to serve two different lifetimes: a
+one-shot destructive ingest and repeated source-attachment reads while browsing. A
+password cannot be persisted to bridge those lifetimes, and moving raw class/file keys
+through React would violate the worker boundary and expand the secret surface.
+
+Decision: production uses provider-neutral `ingestBackupToDb` and `readSourceFile`
+RPCs. An encrypted ingest receives credentials on that one call, verifies/decrypts and
+opens Manifest.db before emitting the sole `prepare` mutation boundary, runs the
+existing normalized pipeline, and loses its keys when the one-shot worker terminates.
+The messages route owns a separate backup worker and calls `unlockBackupSession` once;
+that worker retains only mutable unwrapped class keys plus a transient decrypted
+Manifest reader until explicit lock, backup-id/root-identity eviction, route unmount,
+or worker termination. Navigation therefore deliberately asks for the password again
+before original encrypted attachments can be read. Password inputs are uncontrolled
+and cleared immediately after RPC dispatch; the worker clears the cloned credential
+field and drops local immutable-string references after open/KDF, while zeroing mutable
+byte encodings. No password/key field enters IndexedDB, OPFS, logs, errors, or the
+normalized model; JavaScript string zeroization is not claimed.
+
+Wrong password is a distinct recoverable error produced by AES-KW integrity failure.
+Malformed/unsupported keybags and ciphertext use separate typed errors. TLV sizes and
+KDF counts are bounded. Manifest.db supports raw page-aligned CBC and producers that
+append a valid PKCS suffix; per-file decryption reads `File` slices in bounded chunks
+and truncates to the authoritative MBFile `Size`. A stored per-file ciphertext may
+retain more than one aligned block beyond that logical size; this is accepted and
+truncated rather than treated as malformed. A sparse file may also declare a logical
+`Size` larger than its materialized encrypted prefix; the decrypted destination is
+zero-extended to that size, matching filesystem resize semantics. Ciphertext block
+alignment and the caller's independent stored/logical read caps remain enforced before
+decryption. The current RPC still materializes
+its final plaintext `Uint8Array`. Because WebCrypto exposes no incremental digest,
+exact ciphertext SHA-256 is computed in a separate scoped one-shot read before the
+plaintext buffer is filled. Source-read responses and the ingest summary's Manifest/
+database-input provenance carry the plaintext hash/size plus stored ciphertext hash/
+size and encryption flag. Normalized attachment rows keep their optional plaintext
+hash for preview integrity; report export obtains both labeled attachment hashes from
+an exact-path source read instead of duplicating ciphertext provenance in that row.
+
+Rationale: the worker lifetime becomes the auditable security boundary, wrong-password
+retries cannot invalidate good derived data, and encrypted/unencrypted backups share
+all parsing/normalization above the provider read layer. Retaining both source and
+content provenance supports later reports without weakening the WebCrypto-only rule.
+The extra attachment password prompt after navigation is accepted as the clear cost of
+never persisting or transferring reusable secrets through application state.
+Session-only describes password/key lifetime, not decrypted derivatives. The unlock
+and ingest UI explicitly states that decrypted messages and generated media previews
+can remain in local derived storage until Remove backup wipes the backup directory.
+The messages success strip also exposes **Lock attachments**: the worker invalidates
+and drains or aborts old-session reads before the RPC resolves, then the UI restores
+and focuses the shared password field. Worker termination is the secure UI fallback if
+the explicit lock RPC itself fails.
+Messages-route cleanup marks its generation inactive before releasing clients. The
+unlock continuation checks that flag immediately after the potentially deferred Chrome
+permission prompt and after worker RPC awaits, so an unmounted route cannot lazily
+create or strand a new key-holding worker.
+
+The copy-based Manifest/source-SQLite open creates ciphertext, plaintext or
+reconstructed, and wasm-VFS copies. M5 initially capped encrypted Manifest.db and each
+logical source database's combined main/WAL/SHM source set at 256 MiB. Applying the
+aggregate source-database cap to unencrypted ingest is an intentional hostile-input
+safety tradeoff from the previously unbounded M2 path; unusually large real stores can
+fail with a clear limit error. A later streaming import into a transient worker-owned
+VFS/OPFS file is the chosen path to lift the caps entirely without restoring
+multi-gigabyte allocation risk. See D-039 for the current cap values and their
+enforcement points.
+
+## D-039: In-memory source caps sized to the sqlite-wasm 2 GiB heap, enforced pre-prepare (2026-07-10)
+
+Context: the M5 256 MiB caps were self-imposed placeholders (D-038), and their
+enforcement ran after the destructive `prepareIngest` schema drop, so a previously
+`ingested` large backup could be wiped and permanently marked failed on rebuild. The
+review also found a ±16-byte asymmetry: the encrypted per-read guard admits ciphertext
+up to `maxReadBytes + 16` (PKCS#7), but the budget charged full ciphertext size, so a
+plaintext that fit the documented budget could fully decrypt and only then abort.
+
+Decision: the binding physical ceiling is sqlite-wasm's imported wasm memory, hard
+capped at 2 GiB (32,768 pages, verified from the shipped `sqlite3.wasm` import
+section). That heap hosts the transient decrypted Manifest copy for the whole ingest
+plus every concurrently open source-set copy (`sqlite3_js_posix_create_file`), while
+the JS side transiently holds roughly two more copies of the largest single set
+(plaintext + WAL-reconstructed bytes). Within that budget the caps are now:
+encrypted Manifest.db **512 MiB**; each logical main/WAL/SHM source set **1 GiB**
+aggregate (unencrypted ingest included). Worst realistic residency (512 MiB manifest +
+1 GiB messages set + small contact sets) stays inside the 2 GiB heap with slack for
+sqlite's own allocations; a pathological backup whose optional contact sets also
+approach the cap degrades to the existing skip-with-warning path when sqlite cannot
+allocate, never a wipe. Manifest decryption was switched to the shared chunked CBC
+generator and the PKCS#7 trim to a borrowed subarray so the unlock path holds at most
+one extra Manifest-sized buffer.
+
+Enforcement moved ahead of destruction: `ingestBackupDirectory` validates the REQUIRED
+messages set against the budget from Manifest metadata and stored file sizes
+(`assertRequiredSourceDatabaseSetWithinBudget`) before emitting the `prepare` phase,
+so over-budget backups fail recoverably without touching the derived DB. Read-time
+charging now uses plaintext byte lengths (the per-read `maxReadBytes` guard already
+rejects oversized files before allocation), which removes the PKCS#7 slop asymmetry.
+
+Rationale: raises real-backup coverage roughly 4x without gambling on unbounded
+allocations, keys the numbers to a verifiable hard ceiling instead of a guess, and
+makes the budget a pre-flight check rather than a post-destruction landmine. The
+streaming transient-VFS/OPFS import (D-038) remains the path to lift the caps
+entirely; do not raise these numbers again without re-deriving the 2 GiB budget.
+
+## D-040 — Keep one active backup snapshot per detected device ID (2026-07-10)
+
+iPhone backup detection normally uses the device UDID as both the recent-record key
+and the OPFS derived-data directory. Two Finder/iTunes snapshots from the same device
+therefore resolve to the same local workspace. Silently preserving the first
+snapshot's `ingested` status when a second folder is selected makes stale derived data
+look current.
+
+Decision: the current storage model continues to keep one active snapshot per detected
+device ID rather than adding multi-snapshot keys. Before `recordDetection`, the landing
+flow compares both Chrome directory identity (`isSameEntry`) and `lastBackupDate` with
+the existing recent. The same directory and date reopen normally. A different folder
+or changed date opens a Radix confirmation dialog with explicit **Keep existing** and
+**Replace backup** actions. Keep performs no recents or OPFS mutation. Replace wipes
+all derived directories for the existing record before publishing the new directory
+handle and metadata, preserves any user-assigned friendly name, and resets status to
+`not-ingested` at the current derived DB version. Source backup folders remain read-only
+and are never deleted or modified.
+
+Rationale: users get an explicit destructive boundary and cannot accidentally browse
+an older local ingest as though it came from the newly selected backup. Wiping before
+the recent update means a failed wipe cannot publish the replacement as ready; the old
+record is first marked `needs-reingest`, so a partial wipe cannot leave it browsable
+either. True
+side-by-side historical snapshots remain a future schema/product feature; they will
+need a snapshot identity distinct from the device UDID.

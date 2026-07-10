@@ -3,9 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { ManifestDbReader } from "./manifest-db";
+import {
+  ManifestDbReader,
+  maxEncryptedManifestDatabaseBytes,
+  SourceFileDecryptionError,
+  SourceFileTooLargeError,
+  readEncryptedSourceFileBytes,
+  readSourceFileBytes,
+} from "./manifest-db";
 import type {
   ReadonlySourceDirectoryHandle,
   ReadonlySourceHandle,
@@ -62,12 +69,286 @@ describe("ManifestDbReader", () => {
       } finally {
         manifest.close();
       }
+
+      let ciphertext: Uint8Array | undefined;
+      let plaintext: Uint8Array | undefined;
+      const encryptedRoot = new MemoryReadonlyDirectory(
+        new Map([["Manifest.db", Uint8Array.from(await readFile(dbPath))]]),
+      );
+      const decryptedManifest = await ManifestDbReader.open(encryptedRoot, {
+        decryptMain: (bytes) => {
+          ciphertext = bytes;
+          plaintext = bytes.slice();
+          return Promise.resolve(plaintext);
+        },
+      });
+
+      try {
+        expect(ciphertext).toBeDefined();
+        expect(plaintext).toBeDefined();
+        expect(Array.from(ciphertext ?? []).every((byte) => byte === 0)).toBe(
+          true,
+        );
+        expect(Array.from(plaintext ?? []).every((byte) => byte === 0)).toBe(
+          true,
+        );
+      } finally {
+        decryptedManifest.close();
+      }
     } finally {
       db.close();
       await rm(tempDirectory, { recursive: true, force: true });
     }
   });
+
+  it("rejects malformed encrypted source shape before invoking the decryptor", async () => {
+    const decryptChunks = vi.fn(() => emptyChunks());
+    const malformedFile = new File([new ArrayBuffer(15)], "ciphertext");
+    const shard = {
+      kind: "directory" as const,
+      name: "aa",
+      entries: emptyEntries,
+      getDirectory: () => Promise.reject(createNotFoundError()),
+      getFile: () => Promise.resolve(malformedFile),
+    } satisfies ReadonlySourceDirectoryHandle;
+    const root = {
+      kind: "directory" as const,
+      name: "root",
+      entries: emptyEntries,
+      getDirectory: () => Promise.resolve(shard),
+      getFile: () => Promise.reject(createNotFoundError()),
+    } satisfies ReadonlySourceDirectoryHandle;
+
+    await expect(
+      readEncryptedSourceFileBytes(
+        root,
+        {
+          fileId: "aa00000000000000000000000000000000000000",
+          domain: "MediaDomain",
+          relativePath: "Library/SMS/Attachments/malformed.bin",
+          flags: 1,
+          metadata: { size: 14 },
+        },
+        {
+          plaintextSize: 14,
+          maxReadBytes: 1024,
+          decryptChunks,
+        },
+      ),
+    ).rejects.toBeInstanceOf(SourceFileDecryptionError);
+    expect(decryptChunks).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized encrypted Manifest.db before reading or decrypting it", async () => {
+    const arrayBuffer = vi.fn(() => Promise.resolve(new ArrayBuffer(0)));
+    const decryptMain = vi.fn((bytes: Uint8Array) => Promise.resolve(bytes));
+    const oversizedManifest = {
+      size: maxEncryptedManifestDatabaseBytes + 1,
+      arrayBuffer,
+    } as unknown as File;
+    const root = {
+      kind: "directory" as const,
+      name: "root",
+      entries: emptyEntries,
+      getDirectory: () => Promise.reject(createNotFoundError()),
+      getFile: (name: string) =>
+        name === "Manifest.db"
+          ? Promise.resolve(oversizedManifest)
+          : Promise.reject(createNotFoundError()),
+    } satisfies ReadonlySourceDirectoryHandle;
+
+    await expect(
+      ManifestDbReader.open(root, { decryptMain }),
+    ).rejects.toBeInstanceOf(SourceFileTooLargeError);
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(decryptMain).not.toHaveBeenCalled();
+  });
+
+  it("accepts a block-aligned encrypted source tail beyond its declared size", async () => {
+    const ciphertext = new Uint8Array(64);
+    const plaintext = new Uint8Array(16).fill(0x4a);
+    const shard = {
+      kind: "directory" as const,
+      name: "aa",
+      entries: emptyEntries,
+      getDirectory: () => Promise.reject(createNotFoundError()),
+      getFile: () => Promise.resolve(fileFromBytes(ciphertext, "ciphertext")),
+    } satisfies ReadonlySourceDirectoryHandle;
+    const root = {
+      kind: "directory" as const,
+      name: "root",
+      entries: emptyEntries,
+      getDirectory: () => Promise.resolve(shard),
+      getFile: () => Promise.reject(createNotFoundError()),
+    } satisfies ReadonlySourceDirectoryHandle;
+
+    const source = await readEncryptedSourceFileBytes(
+      root,
+      {
+        fileId: "aa00000000000000000000000000000000000000",
+        domain: "HomeDomain",
+        relativePath: "Library/SMS/sms.db",
+        flags: 1,
+        metadata: { size: plaintext.byteLength },
+      },
+      {
+        plaintextSize: plaintext.byteLength,
+        maxReadBytes: 1024,
+        decryptChunks: () => oneChunk(plaintext),
+      },
+    );
+
+    expect(source.bytes).toEqual(plaintext);
+    expect(source.sourceByteLength).toBe(ciphertext.byteLength);
+  });
+
+  it("zero-extends an encrypted sparse prefix to its declared logical size", async () => {
+    const ciphertext = new Uint8Array(16);
+    const materialized = new Uint8Array(16).fill(0x4a);
+    const plaintextSize = 48;
+    const shard = {
+      kind: "directory" as const,
+      name: "aa",
+      entries: emptyEntries,
+      getDirectory: () => Promise.reject(createNotFoundError()),
+      getFile: () => Promise.resolve(fileFromBytes(ciphertext, "ciphertext")),
+    } satisfies ReadonlySourceDirectoryHandle;
+    const root = {
+      kind: "directory" as const,
+      name: "root",
+      entries: emptyEntries,
+      getDirectory: () => Promise.resolve(shard),
+      getFile: () => Promise.reject(createNotFoundError()),
+    } satisfies ReadonlySourceDirectoryHandle;
+
+    const source = await readEncryptedSourceFileBytes(
+      root,
+      {
+        fileId: "aa00000000000000000000000000000000000000",
+        domain: "HomeDomain",
+        relativePath: "Library/SMS/sms.db",
+        flags: 1,
+        metadata: { size: plaintextSize },
+      },
+      {
+        plaintextSize,
+        maxReadBytes: 1024,
+        decryptChunks: () => oneChunk(materialized),
+      },
+    );
+
+    expect(source.bytes.subarray(0, materialized.byteLength)).toEqual(
+      materialized,
+    );
+    expect(source.bytes.subarray(materialized.byteLength)).toEqual(
+      new Uint8Array(plaintextSize - materialized.byteLength),
+    );
+    expect(source.sourceByteLength).toBe(ciphertext.byteLength);
+  });
+
+  it("rejects encrypted MBFile ciphertext over its caller cap before reading", async () => {
+    const arrayBuffer = vi.fn(() => Promise.resolve(new ArrayBuffer(0)));
+    const decryptChunks = vi.fn(() => emptyChunks());
+    const oversizedFile = {
+      size: 1024 + 17,
+      arrayBuffer,
+      slice: vi.fn(),
+    } as unknown as File;
+    const shard = {
+      kind: "directory" as const,
+      name: "aa",
+      entries: emptyEntries,
+      getDirectory: () => Promise.reject(createNotFoundError()),
+      getFile: () => Promise.resolve(oversizedFile),
+    } satisfies ReadonlySourceDirectoryHandle;
+    const root = {
+      kind: "directory" as const,
+      name: "root",
+      entries: emptyEntries,
+      getDirectory: () => Promise.resolve(shard),
+      getFile: () => Promise.reject(createNotFoundError()),
+    } satisfies ReadonlySourceDirectoryHandle;
+
+    await expect(
+      readEncryptedSourceFileBytes(
+        root,
+        {
+          fileId: "aa00000000000000000000000000000000000000",
+          domain: "HomeDomain",
+          relativePath: "Library/SMS/sms.db",
+          flags: 1,
+          metadata: { size: 1024 },
+        },
+        {
+          plaintextSize: 1024,
+          maxReadBytes: 1024,
+          decryptChunks,
+        },
+      ),
+    ).rejects.toBeInstanceOf(SourceFileTooLargeError);
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(decryptChunks).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["oversized", Number.MAX_SAFE_INTEGER],
+    ["negative", -1],
+    ["fractional", 1.5],
+  ])(
+    "uses actual unencrypted File.size and ignores %s metadata Size",
+    async (_label, metadataSize) => {
+      const bytes = new Uint8Array([1, 2, 3, 4]);
+      const shard = {
+        kind: "directory" as const,
+        name: "aa",
+        entries: emptyEntries,
+        getDirectory: () => Promise.reject(createNotFoundError()),
+        getFile: () => Promise.resolve(fileFromBytes(bytes, "small.bin")),
+      } satisfies ReadonlySourceDirectoryHandle;
+      const root = {
+        kind: "directory" as const,
+        name: "root",
+        entries: emptyEntries,
+        getDirectory: () => Promise.resolve(shard),
+        getFile: () => Promise.reject(createNotFoundError()),
+      } satisfies ReadonlySourceDirectoryHandle;
+
+      const source = await readSourceFileBytes(
+        root,
+        {
+          fileId: "aa00000000000000000000000000000000000000",
+          domain: "HomeDomain",
+          relativePath: "Library/small.bin",
+          flags: 1,
+          metadata: { size: metadataSize },
+        },
+        { maxReadBytes: 8 },
+      );
+
+      expect(source.bytes).toEqual(bytes);
+      expect(source.sourceByteLength).toBe(4);
+    },
+  );
 });
+
+async function* emptyChunks(): AsyncGenerator<Uint8Array, void, void> {
+  await Promise.resolve();
+  yield new Uint8Array();
+}
+
+async function* oneChunk(
+  bytes: Uint8Array,
+): AsyncGenerator<Uint8Array, void, void> {
+  await Promise.resolve();
+  yield bytes.slice();
+}
+
+async function* emptyEntries(): AsyncIterableIterator<
+  [string, ReadonlySourceHandle]
+> {
+  await Promise.resolve();
+  yield* [];
+}
 
 class MemoryReadonlyDirectory implements ReadonlySourceDirectoryHandle {
   readonly kind = "directory";

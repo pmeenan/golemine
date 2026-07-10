@@ -233,6 +233,154 @@ describe("recordDetection", () => {
     expect(record.ingestStatus).toBe("ingested");
   });
 
+  it("does not request replacement for the same directory and backup date", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: new RecordingDerivedDataStorage(),
+    });
+    const handle = fakeDirectoryHandle("source");
+
+    await persistence.put(createRecentBackupRecord({
+      id: "udid-1",
+      friendlyName: "Evidence iPhone",
+      directoryHandle: handle,
+      deviceInfo: {
+        udid: "udid-1",
+        lastBackupDate: "2026-07-01T12:34:56.000Z",
+      },
+      isEncrypted: false,
+      ingestStatus: "ingested",
+    }));
+
+    await expect(
+      store.findReplacementCandidate(detection(), handle),
+    ).resolves.toBeUndefined();
+  });
+
+  it("requests replacement for a different folder with the same device id", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: new RecordingDerivedDataStorage(),
+    });
+    const existing = createRecentBackupRecord({
+      id: "udid-1",
+      friendlyName: "Evidence iPhone",
+      directoryHandle: fakeDirectoryHandle("older-source"),
+      deviceInfo: {
+        udid: "udid-1",
+        lastBackupDate: "2026-07-01T12:34:56.000Z",
+      },
+      isEncrypted: false,
+      ingestStatus: "ingested",
+    });
+
+    await persistence.put(existing);
+
+    await expect(
+      store.findReplacementCandidate(
+        detection(),
+        fakeDirectoryHandle("newer-source"),
+      ),
+    ).resolves.toEqual(existing);
+  });
+
+  it("requests replacement when a backup changes in the same directory", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: new RecordingDerivedDataStorage(),
+    });
+    const handle = fakeDirectoryHandle("source");
+    const existing = createRecentBackupRecord({
+      id: "udid-1",
+      friendlyName: "Evidence iPhone",
+      directoryHandle: handle,
+      deviceInfo: {
+        udid: "udid-1",
+        lastBackupDate: "2026-06-01T12:34:56.000Z",
+      },
+      isEncrypted: false,
+      ingestStatus: "ingested",
+    });
+
+    await persistence.put(existing);
+
+    await expect(
+      store.findReplacementCandidate(detection(), handle),
+    ).resolves.toEqual(existing);
+  });
+
+  it("wipes derived data and resets ingest state after confirmed replacement", async () => {
+    const events: string[] = [];
+    const persistence = new MemoryRecentBackupPersistence(events);
+    const derivedDataStorage = new RecordingDerivedDataStorage(events);
+    const store = createBackupRecentsStore({ persistence, derivedDataStorage });
+    const replacementHandle = fakeDirectoryHandle("newer-source");
+
+    await persistence.put(createRecentBackupRecord({
+      id: "udid-1",
+      friendlyName: "Evidence iPhone",
+      directoryHandle: fakeDirectoryHandle("older-source"),
+      deviceInfo: { udid: "udid-1" },
+      isEncrypted: false,
+      ingestStatus: "ingested",
+      derivedDbVersion: derivedDbVersion - 1,
+    }));
+
+    const record = await store.recordDetection(
+      detection(),
+      replacementHandle,
+      { replaceExisting: true },
+    );
+
+    expect(record).toMatchObject({
+      friendlyName: "Evidence iPhone",
+      directoryHandle: replacementHandle,
+      ingestStatus: "not-ingested",
+      derivedDbVersion,
+    });
+    expect(events).toEqual([
+      "put:udid-1",
+      "put:udid-1",
+      "wipe:udid-1",
+      "put:udid-1",
+    ]);
+  });
+
+  it("makes the old snapshot non-browsable when a replacement wipe fails", async () => {
+    const persistence = new MemoryRecentBackupPersistence();
+    const store = createBackupRecentsStore({
+      persistence,
+      derivedDataStorage: {
+        wipeDirectories: () => Promise.reject(new Error("OPFS unavailable")),
+      },
+    });
+    const existingHandle = fakeDirectoryHandle("older-source");
+
+    await persistence.put(createRecentBackupRecord({
+      id: "udid-1",
+      friendlyName: "Evidence iPhone",
+      directoryHandle: existingHandle,
+      deviceInfo: { udid: "udid-1" },
+      isEncrypted: false,
+      ingestStatus: "ingested",
+    }));
+
+    await expect(
+      store.recordDetection(
+        detection(),
+        fakeDirectoryHandle("newer-source"),
+        { replaceExisting: true },
+      ),
+    ).rejects.toThrow("OPFS unavailable");
+    expect(await store.get("udid-1")).toMatchObject({
+      directoryHandle: existingHandle,
+      ingestStatus: "needs-reingest",
+    });
+  });
+
   it("forces re-ingest when the stored derived DB version is stale", async () => {
     const persistence = new MemoryRecentBackupPersistence();
     const store = createBackupRecentsStore({
@@ -519,6 +667,9 @@ function fakeDirectoryHandle(
       ? (descriptor?: { mode?: string }) =>
           requestPermission(descriptor?.mode ?? "read")
       : undefined,
+    isSameEntry(other: FileSystemHandle): Promise<boolean> {
+      return Promise.resolve(other === handle);
+    },
   };
 
   return handle as unknown as FileSystemDirectoryHandle;

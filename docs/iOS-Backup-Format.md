@@ -193,10 +193,28 @@ password is detected when class-key unwrap fails (AES-KW has integrity built in)
   **AES-256-CBC, zero IV**; result is a normal SQLite file.
 - Per-file: from the file's `EncryptionKey` blob (class + wrapped key), unwrap with the
   matching class key, decrypt `<shard>/<fileID>` with AES-256-CBC zero IV, truncate to
-  `Size` from the MBFile record (CBC padding).
+  `Size` from the MBFile record. Treat that value as the authoritative logical
+  plaintext length: real stored ciphertext can retain more than one aligned tail block,
+  so it is not valid to require the ciphertext/`Size` difference to be at most one CBC
+  padding block. Sparse files can also have a logical `Size` larger than the
+  materialized encrypted prefix; decrypt that prefix and zero-extend the logical file
+  to `Size`. Still require block-aligned ciphertext and apply caller caps independently
+  to stored and logical sizes before reading, allocating, or decrypting.
 
 Keep unwrapped class keys in worker memory for the session; never persist them or the
 password.
+
+Golemine's M5 implementation lives under `src/workers/backup/crypto/` with session
+integration in `src/workers/backup/encrypted-session.ts` (D-038). Manifest.db is
+decrypted as raw page-aligned CBC and also accepts a valid producer-appended PKCS
+suffix at a SQLite page boundary. MBFiles are decrypted from bounded `File` slices and
+truncated to the authoritative `Size`; source-read responses keep source ciphertext and
+returned plaintext hashes distinct. Normalized attachment hashes refer to plaintext,
+and report export re-reads the exact Manifest path to capture both labeled hashes.
+Encrypted root Manifest WAL/SHM files are not applied because the
+backup provides no independent root-sidecar key metadata. Wrong-password is determined
+by AES-KW integrity before the ingest `prepare` boundary, while malformed and
+unsupported keybags/ciphertext remain separate errors.
 
 ## 6. Gotchas checklist
 

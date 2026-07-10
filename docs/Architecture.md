@@ -119,7 +119,15 @@ messages workspace instead owns route-scoped db/backup/media workers for the rou
 lifetime, so
 repeated queries, previews, and thumbnails do not churn worker startup or contend for
 the same per-backup SAH pool; the pool hand-off race on route switches is absorbed by
-a brief `installOpfsSAHPoolVfs` retry (D-029). Cross-worker helpers (sqlite init and
+a brief `installOpfsSAHPoolVfs` retry (D-029). For an encrypted backup that route-
+scoped backup worker is also the security-session boundary: an explicit unlock RPC
+derives and retains class keys in worker memory, source reads reuse them, and route
+unmount/worker termination destroys the session. The overview's one-shot ingest worker
+is intentionally separate, so navigation requires a fresh attachment unlock instead
+of moving keys or passwords through UI storage. Route cleanup marks the messages
+workspace inactive before releasing workers; an unlock continuation re-checks that
+generation after directory permission and never creates a key-holding worker after
+unmount (D-038). Cross-worker helpers (sqlite init and
 error classification, binary/progress/OPFS/retry/hash utilities, media MIME sets and
 byte budgets, service-kind mapping) live in `src/workers/shared/` and are extended
 rather than re-declared per worker.
@@ -139,7 +147,13 @@ rather than re-declared per worker.
   entry point, applies the `derivedDbVersion` staleness rule, and retires stale
   records (including their orphaned derived-data directories) when a folder detects
   under a new identity. Malformed stored records are skipped and reported rather
-  than failing the whole list.
+  than failing the whole list. Because iOS detection IDs are normally device UDIDs,
+  the current model intentionally keeps one active backup snapshot per device. Before
+  writing a detection, the landing flow compares the persisted directory entry and
+  source backup date. A changed folder or date requires explicit replacement
+  confirmation (D-040): cancel performs no write; confirm wipes the existing derived
+  directories before updating the source handle and resets ingest status to
+  `not-ingested`.
 - **OPFS** (bulk derived data): one directory per backup under
   `golemine/backups/`, keyed by backup UDID when known and falling back to the recents
   id before detection has a UDID:
@@ -189,41 +203,60 @@ provider modules. Detection results carry the normalized `BackupDeviceInfo`
 translates Apple plist keys into that shape internally, so UI routes and the recents
 store never see provider-specific field names.
 
-The production unencrypted iOS ingest RPC is
-`BackupWorkerApi.ingestUnencryptedBackupToDb(root, request, progress?)`. The
-backup-worker re-wraps the source handle as read-only, validates that the backup is
-unencrypted, creates a dedicated db-worker ingest sink, opens `Manifest.db` with any
-root `Manifest.db-wal`/`Manifest.db-shm` sidecars applied, locates
-the sms/contact SQLite files plus `-wal`/`-shm` sidecars by domain and relative path,
-hashes source database files used for provenance, and copies only needed source bytes
-into transient worker memory. The sink-taking
-`BackupWorkerApi.ingestUnencryptedBackup(root, request, sink, progress?)` remains as a
-test seam. Ingest progress emits a `prepare` phase before the destructive db-worker
-`prepareIngest` call so the UI can distinguish pre-prepare failures (derived DB
-untouched — an existing `ingested` record stays valid) from failures during or after
-prepare. Source SQLite WAL files are validated (magic/version/page size/header
-checksum and source-derived size bounds) and reconstructed by applying committed WAL
-frames from the valid WAL prefix to a copy of the main database bytes before opening
-the copy read-only with sqlite-wasm (D-021, superseded by D-022 for stale/torn frame
-handling). Every copied source DB is forced to rollback-journal header bytes before the
-transient read-only open, even when no WAL sidecar exists or no frame commits, so
-sqlite-wasm does not try to open transient sidecars that backup-worker intentionally
-does not create (D-025). The source backup directory is never written.
+The production ingest RPC is provider-neutral:
+`BackupWorkerApi.ingestBackupToDb(root, request, credentials?, progress?)`. It creates
+a dedicated nested db-worker sink and keeps all normalized batches off the UI thread.
+For unencrypted backups it opens `Manifest.db` with root WAL/SHM sidecars applied. For
+encrypted backups it parses the keybag from `Manifest.plist`, verifies the password,
+decrypts and opens `Manifest.db`, then uses each MBFile `EncryptionKey`/`Size` to feed
+plaintext sms/contact/contact-image databases and their sidecars into the same ingest
+pipeline. Root Manifest sidecars are not mixed into the encrypted path because Apple
+does not provide independent root-sidecar key metadata. The older
+`ingestUnencryptedBackup*` methods remain compatibility/test seams (D-038).
 
-The M3 source-file RPC is
-`BackupWorkerApi.readUnencryptedSourceFile(root, request, progress?)`. It re-validates
-the detected backup, rejects encrypted backups, opens `Manifest.db` with root WAL
-sidecars applied, locates a requested normalized attachment by exact domain/path, reads
-only from the read-only source wrapper, verifies optional expected SHA-256, and enforces
-a caller-provided byte cap. Byte-bearing responses are returned with Comlink
-`transfer()` so large attachments do not clone through the UI thread. The backup-worker
-memoizes the most recent backup's detection result and open `Manifest.db` reader per
-`backupId` (sound because source backups are read-only; a different `backupId` closes
-the old reader). Byte caps come from the named budgets in
-`src/workers/shared/media-limits.ts`; user-initiated extraction uses the explicit
-1 GiB `extractMaxReadBytes` budget (D-031). UI
-preview/extraction and future report hashing should use this API rather than reaching
-into provider internals or holding writable-capable handles.
+`prepare` is the one mutation boundary: detection, password KDF/AES-KW verification,
+Manifest decryption, and the transient Manifest SQLite open all complete before the
+worker emits and awaits that progress event immediately ahead of destructive
+`prepareIngest`. A wrong password or malformed keybag therefore leaves an existing
+derived DB/status untouched. After prepare, sms/contact source SQLite WAL files are
+validated and reconstructed by applying the committed valid prefix (D-021/D-022), and
+every copied database is forced to rollback-journal mode before its transient read-
+only sqlite-wasm open (D-025). Each logical database's combined main/WAL/SHM source
+set carries a 1 GiB in-memory budget in the current copy-based pipeline (sized against
+sqlite-wasm's 2 GiB heap ceiling, D-039). The REQUIRED messages set is validated
+against that budget from Manifest metadata before the `prepare` boundary, so an
+over-budget backup fails recoverably without touching the derived DB; read-time
+charging uses plaintext byte lengths.
+The unencrypted root Manifest.db/WAL/SHM open still has the legacy 1 GiB per-file
+bounds rather than one aggregate budget; aggregate/streaming Manifest import is tracked
+as hostile-input hardening because those files are retained together during recovery.
+Plaintext SHA-256/size remain the primary normalized fields. The ingest summary retains
+both plaintext and exact stored ciphertext hash/size plus the encryption flag for its
+Manifest and database inputs. Attachment rows retain the plaintext hash when eager
+hashing is within budget; report export re-reads each selected attachment through
+`readSourceFile` to obtain both labeled hashes/sizes from the exact Manifest path. The
+source backup directory is never written.
+
+The production source-file RPC is `BackupWorkerApi.readSourceFile`. For unencrypted
+backups it uses the existing most-recent `Manifest.db` cache. For encrypted backups the
+route first calls `unlockBackupSession`; the worker retains mutable unwrapped class keys
+and a decrypted transient Manifest reader, both keyed by backup id and verified root
+identity with `isSameEntry`. A different id/root or explicit `lockBackupSession`
+invalidates that session and aborts/drains its active source reads before resolving.
+Per-file CBC decryption reads `File` slices in bounded chunks
+and resizes the result to authoritative MBFile `Size`: a longer stored tail is
+truncated and a shorter sparse materialized prefix is zero-extended. Declared logical
+size and actual stored size are both capped before allocation/decryption. The final plaintext is materialized because the current
+RPC returns `Uint8Array`. Exact ciphertext SHA-256 is computed separately with one-shot
+WebCrypto because the platform has no incremental digest API, and only for callers
+that opt in via `includeSourceSha256` (this RPC and ingest database provenance do;
+eager attachment hashing skips the second full read). Responses expose both
+plaintext `sha256` and stored-source `sourceSha256`, enforce caller byte caps, verify
+the optional expected plaintext hash, and transfer the result buffer through Comlink.
+Preview/extraction and future report hashing use this API. The normalized attachment's
+optional `sha256` is therefore a decrypted-content hash for encrypted backups and stays
+the expected-hash input; it must not be compared with ciphertext `sourceSha256`. User
+extraction retains the explicit 1 GiB cap from D-031.
 
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 
@@ -369,8 +402,7 @@ timezone printed on the report. Never display an ambiguous local time.
 
 ## 9. Encrypted backups
 
-Supported from an early milestone (see Plan.md M5). All crypto runs in backup-worker
-using WebCrypto only:
+Implemented in M5. All crypto runs in backup-worker using WebCrypto only:
 
 1. Parse the keybag from `Manifest.plist`; derive the password key
    (PBKDF2-SHA256 with ~10M iterations, then PBKDF2-SHA1 — details in
@@ -379,9 +411,24 @@ using WebCrypto only:
    (AES-256-CBC), then decrypt individual files on demand using their per-file wrapped
    keys from `Manifest.db`.
 
-Password handling: prompted per session, held only in worker memory, wrong-password
-detected via keybag unwrap failure. Derived class keys may be kept for the session so
-attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
+Pre-iOS-10.2 keybags omit the SHA-256 stage and feed UTF-8 password bytes directly to
+the PBKDF2-SHA1 stage. Keybag/TLV lengths, iteration counts, wrapped-key shapes, CBC
+block lengths, declared plaintext sizes, and SQLite Manifest page boundaries are
+bounded and validated before large work; malformed inputs return typed worker errors.
+
+Password handling: each password crosses only the explicit unlock/ingest RPC. Worker
+DTO/local references are discarded as soon as key derivation/open completes, mutable
+UTF-8 encodings are cleared, and credentials are never logged or persisted. JavaScript
+strings are immutable, so the design does not claim literal string zeroization. Wrong-password is
+detected by AES-KW integrity and reported separately from unsupported/malformed crypto.
+The worker retains only mutable class keys and the transient decrypted Manifest reader;
+`destroy`, explicit lock, root/id eviction, or worker termination clears/closes them.
+The UI password fields are uncontrolled and clear immediately after dispatch. M5's
+browser test additionally inspects local/session storage and the recent-backup record
+to prevent the fixture password or credential-shaped fields from being persisted.
+The session-only claim applies to credentials and keys, not derived content: decrypted
+messages and generated contact/attachment previews may remain in OPFS until Remove
+backup wipes the backup's complete derived-data directory.
 
 ## 10. Security & privacy posture
 

@@ -1,0 +1,58 @@
+.golemine-confirm-overlay[data-state="open"] {
+  animation: golemine-confirm-overlay-in var(--dur-base) var(--ease-out);
+}
+
+.golemine-confirm-overlay[data-state="closed"] {
+  animation: golemine-confirm-overlay-out var(--dur-fast) var(--ease-out);
+}
+
+.golemine-confirm-content[data-state="open"] {
+  animation: golemine-confirm-content-in var(--dur-slow) var(--ease-out);
+}
+
+.golemine-confirm-content[data-state="closed"] {
+  animation: golemine-confirm-content-out var(--dur-base) var(--ease-out);
+}
+
+@keyframes golemine-confirm-overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes golemine-confirm-overlay-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes golemine-confirm-content-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + var(--space-8))) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes golemine-confirm-content-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .golemine-confirm-overlay[data-state],
+  .golemine-confirm-content[data-state] {
+    animation-duration: 0s;
+  }
+}

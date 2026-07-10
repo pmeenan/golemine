@@ -4,33 +4,39 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M4 implemented for unencrypted iPhone backups — browsing and search
-now share one messages workspace (D-034). The search panel runs across all
-conversations; active search filters Threads by hit count/newest hit, adds an
-all-or-thread-scoped Results column, opens hits directly in the virtualized timeline,
-and keeps Details hidden until a message is selected. Search terms are
-case-insensitive implicit-AND FTS5 prefixes; quoted literals use Unicode `/iu` raw
-substring verification in a single-pass scan always budgeted to the newest 10,000
-candidate rows with disclosed truncation and throttled progress (D-035), whether or
-not a compatible internal ASCII FTS narrowing term exists. The standalone search
-route is removed, layout minima are tokenized, the wide detail-docking threshold is
-one token-resolved matchMedia source of truth for both layout and dialog semantics,
-modal focus containment is a shared hook, and Playwright covers search -> filtered
-threads/counts -> scoped/all results -> timeline/detail -> reset at the 1024px floor.
-Unnamed group threads now preserve only explicit source titles and otherwise identify
-all non-self participants by contact first name/name/handle; derived database version
-2 forces older first-participant fallback titles to be rebuilt.
-Search date filtering now uses an optional two-month React DayPicker range calendar in
-a focus-managed Radix popover, with month/year navigation, staged apply/cancel, a clear
-path, same-day selection, token-complete light/dark styling, and browser-tested native
-dropdown palettes and contrast. Navigation and selection are bounded from 2007 through
-the browser's current year at runtime (D-037).
-M2/M3 hardening remains in place: stale/torn WAL handling, source provenance and
-deferred media hashing, direct backup-worker -> db-worker ingest, per-backup SAH pools,
-route-scoped browse workers, hostile-safe snippet segments (D-030), normalized
-`serviceKind` styling (D-032), source-backed attachment preview/extraction, and
-isolated serialized HEIC thumbnail decoding (D-026/D-027/D-033). Next is M5 —
-encrypted backup ingest.**
+**Current status: M5 implemented — encrypted and unencrypted iPhone backups now use
+one provider-neutral ingest/source-read pipeline (D-038). Encrypted sessions parse the
+bounded keybag TLV stream, run the modern two-stage or legacy PBKDF2 KDF in
+`backup-worker`, unwrap class/Manifest/file keys with AES-KW, decrypt Manifest.db, and
+decrypt each MBFile in bounded AES-CBC chunks. Password failures are recoverable and
+occur before the sole `prepare` mutation boundary, so retrying cannot invalidate a
+previously ingested derived database. Passwords are cleared after RPC dispatch and
+never persisted; only mutable class keys and a decrypted transient Manifest reader
+live for the worker session. The messages route therefore prompts once per fresh
+route worker before original encrypted attachments can be previewed or extracted.
+Plaintext and encrypted-source hashes/sizes flow into ingest/read provenance, while
+the overview discloses that OPFS contains decrypted database content and generated
+media previews and remove still wipes them. A deterministic fully encrypted synthetic fixture covers Manifest.db,
+sms/contact databases and WALs, avatars, and an attachment; unit vectors and
+Playwright cover wrong-password/no-prepare, successful ingest, session-only storage,
+fresh attachment unlock, and decrypted preview. M4's unified browse/search workspace,
+bounded quoted search, date-range calendar, group identity, media pipeline, and all
+earlier WAL/OPFS/privacy hardening remain in place. A post-implementation review pass
+hardened M5: source-set budgets are enforced before the destructive prepare boundary
+and raised to 1 GiB per set / 512 MiB encrypted Manifest against sqlite-wasm's 2 GiB
+heap ceiling (D-039), unlock always verifies a supplied password even when a session
+is active, corrupt sibling keybag class keys are skipped and reported, the lock path
+drains reads before closing the Manifest reader, ciphertext hashing is opt-in,
+the crypto path drops redundant large-buffer copies, and both routes share one
+password-form component. Real backups whose encrypted files retain a block-aligned
+stored tail beyond `MBFile.Size` now decrypt and truncate to that authoritative size
+instead of being rejected as malformed; sparse files whose logical `Size` is larger
+than the stored prefix are zero-extended within the same pre-allocation budgets.
+Opening a different snapshot for an already
+loaded device now requires an explicit keep-or-replace decision; replacement wipes
+the old derived ingest and resets the selected source to `not-ingested` (D-040).
+Next is M5.5 — streaming source decryption/import (lifts the
+in-memory caps), then M6 — reports and export.**
 
 ## M0 — Scaffolding
 
@@ -87,6 +93,10 @@ Goal: user can open a backup folder, see it recognized, and manage a recents lis
       marketing-first layout.
 - [x] Backup detection in backup-worker: validate folder, parse `Info.plist` + `Manifest.plist`, detect encryption, surface device info. Clear errors for non-backup folders.
 - [x] Recents list in IndexedDB (handle persistence, `requestPermission()` re-grant flow, rename, remove — remove also wipes OPFS derived data).
+- [x] Same-device snapshot replacement confirmation (D-040): the same directory and
+      backup date reopen normally; a changed folder or date offers **Keep existing**
+      or **Replace backup**, with replacement wiping derived data before resetting the
+      recent to `not-ingested`.
 - [x] Backup overview page (`/backup/:id`): device info card, encrypted badge, ingest CTA.
 - [x] Info pages: how to back up an iPhone (Finder/iTunes, incl. why encrypted is OK,
       inline Finder steps, Apple Support references, backups may be created on another
@@ -288,11 +298,123 @@ searching are one experience with shared thread/timeline context (D-034).
 
 Goal: encrypted backups work end-to-end with password prompt.
 
-- [ ] Keybag TLV parser; PBKDF2 derivation (WebCrypto) with progress UI; wrong-password UX.
-- [ ] AES-KW class-key unwrap; Manifest.db decryption; per-file decrypt streaming in `readAttachment`.
-- [ ] Ingest path for encrypted backups (decrypt sms.db/contacts on the fly).
-- [ ] Session-only key handling verified (nothing persisted); "derived data contains decrypted content" disclosure + wipe-on-remove.
-- [ ] Encrypted fixture backup + tests (unit vectors for keybag/KDF, e2e happy path + wrong password).
+- [x] Keybag TLV parser; PBKDF2 derivation (WebCrypto) with truthful stage progress;
+      retryable wrong-password UX before the derived-data mutation boundary.
+- [x] AES-KW class-key unwrap; raw/page-bounded Manifest.db decryption; bounded
+      chunk decryption for per-file source reads with MBFile size truncation.
+- [x] Provider-neutral encrypted ingest path: decrypt Manifest.db, sms/contact/contact-
+      image databases, WAL sidecars, avatars, and eager attachment hashes before the
+      existing SQLite recovery/normalization pipeline.
+- [x] Session-only key handling verified: password fields clear immediately, storage
+      carries no password/key material, worker lock/termination destroys mutable class
+      keys, explicit attachment lock drains old reads and restores the password form,
+      decrypted database/media-preview persistence is disclosed, and remove retains
+      its OPFS derived-data wipe.
+- [x] Deterministic encrypted fixture + tests: independent keybag/KDF/AES vectors,
+      wrong-password/no-prepare and happy-path unit coverage, plus Playwright ingest ->
+      fresh route unlock -> decrypted attachment preview.
+
+## M5.5 — Streaming source decryption & import
+
+Goal: decrypted source bytes no longer need to fit in RAM. Databases and attachments
+stream from ciphertext to a transient OPFS file (or caller stream) in bounded chunks,
+lifting the D-039 in-memory budgets (1 GiB per source set, 512 MiB encrypted
+Manifest) and the sqlite-wasm 2 GiB heap ceiling as the size limit for real backups.
+
+Context for the implementer: AES-CBC decryption is already chunked
+(`decryptAes256CbcBlobChunks` in `src/workers/backup/crypto/aes-cbc.ts` reads 4 MiB
+Blob slices, chains IVs, yields borrowed plaintext chunks). What is RAM-bound today
+is only the plaintext *destination*: (1) source databases are assembled in one
+buffer because WAL reconstruction does random-access writes and
+`sqlite3_js_posix_create_file` copies the whole array into the wasm heap
+(`src/workers/backup/source-sqlite.ts`); (2) `readSourceFile` returns a
+`Uint8Array` over Comlink; (3) SHA-256 hashing is one-shot because WebCrypto has no
+incremental digest. Read docs/Decisions.md D-038/D-039 and AGENTS.md (M5 bullet)
+before starting; hard rules 1-4 and D-008 (no COOP/COEP, therefore no
+SharedArrayBuffer and no sqlite "opfs" VFS — it requires cross-origin isolation)
+are binding constraints.
+
+- [ ] **Incremental SHA-256.** Add a small, dependency-free incremental SHA-256
+      (pure TS in `src/workers/shared/`, NIST/FIPS 180-4 test vectors) so plaintext
+      and opt-in ciphertext hashes can be folded chunk-by-chunk during streaming.
+      This is a scoped exception to the "crypto is WebCrypto only" rule (D-038):
+      hashing here is integrity provenance, not key material. Record the decision
+      (D-041); keep one-shot WebCrypto digests for small in-memory paths if simpler.
+- [ ] **Transient plaintext staging in OPFS.** A per-backup staging area under the
+      existing derived-data directory (`golemine/backups/<id>/transient/` via
+      `src/workers/shared/opfs.ts` helpers) written with
+      `FileSystemSyncAccessHandle` from the backup worker. Lifecycle guarantees:
+      files are deleted on close/finally; explicit lock (`resetBackupSourceCaches`)
+      and session eviction also delete them; a sweep on next open/ingest removes
+      leftovers from crashes; Remove backup already wipes the parent directory.
+      Keep the existing zeroize discipline for in-memory chunk buffers; on-disk
+      plaintext is covered by the existing derived-data persistence disclosure
+      (extend the copy only if wording no longer holds).
+- [ ] **Streaming SQLite open seam.** Replace the heap-VFS copy for TRANSIENT
+      source databases with an OPFS-backed read path. Decision to record (D-041):
+      first check whether the installed `@sqlite.org/sqlite-wasm` `opfs-sahpool`
+      `importDb()` accepts chunked/callback input in our pinned version — if yes,
+      stream into a dedicated transient sahpool (separate from the derived-DB pool;
+      respect the D-024 capacity notes and D-029 route-scoped pool ownership). If
+      not, register a minimal custom read-only VFS backed by a
+      `FileSystemSyncAccessHandle` (xOpen/xRead/xFileSize/xClose only; sync access
+      handles are synchronous in workers, so no SAB is needed). Keep
+      `openSourceSqliteDatabase`'s API shape so manifest-db/ios-ingest callers are
+      mostly unchanged; keep the D-025 rollback-journal header forcing and D-021/
+      D-022 WAL semantics.
+- [ ] **Streaming WAL application.** Apply committed WAL frames by random-access
+      writes against the staged OPFS main-db file instead of growing an in-memory
+      copy (`applySqliteWal` currently materializes both). The frame-scan
+      validation logic (checksums, salts, committed-prefix stop) is unchanged —
+      only the write target moves. Unencrypted ingest streams a plain copy of the
+      source bytes to staging (no decrypt) so both paths converge on one seam.
+- [ ] **Manifest.db through the same path.** Encrypted Manifest decrypts
+      chunk-to-staging and opens via the streaming seam (removes the 512 MiB cap
+      and the transient wasm-heap copy). Unencrypted root Manifest.db/WAL/SHM use
+      the same staged copy + WAL application, retiring the legacy 1 GiB per-file
+      coexisting-buffer risk tracked since M5.
+- [ ] **Byte-free read RPC.** Extend `BackupWorkerApi.readSourceFile` (or add a
+      sibling) to return a `Blob`/`File` backed by the staged OPFS file instead of
+      a transferred `Uint8Array`; Blobs structured-clone without copying payload.
+      Media-worker previews accept the Blob directly (`createImageBitmap(blob)`);
+      user extraction pipes decrypt chunks straight into a `showSaveFilePicker`
+      writable stream, removing the 1 GiB extraction materialization (D-031).
+      Verify expected-plaintext-hash checks still run (incremental hasher) before
+      the response resolves. Keep the `Uint8Array` path for small reads if a
+      threshold fast path is simpler (suggest: at or below the current
+      `defaultMaxReadBytes` stays in memory).
+- [ ] **Budgets become disk-aware sanity bounds.** Replace the D-039 in-memory
+      budgets with per-file sanity checks that stay pre-prepare
+      (`assertRequiredSourceDatabaseSetWithinBudget` keeps its call site and its
+      before-destruction guarantee — check remaining OPFS quota via
+      `navigator.storage.estimate()` plus a generous absolute bound instead of the
+      1 GiB RAM budget). Keep all existing hostile-input checks: declared
+      plaintext vs stored size, block alignment, `maxReadBytes` request caps.
+      Update D-039 with a successor note, AGENTS.md M5 bullet, Architecture §
+      ingest text, and README's limit paragraph.
+- [ ] **Abort/lock semantics.** Streaming reads register in the encrypted
+      session's tracked-read set for their full duration (decrypt + stage +
+      respond) so lock still drains before the Manifest reader closes; abort
+      deletes the partial staging file. The messages route's lock-fallback
+      (worker termination) must not leave staging files behind — the
+      sweep-on-next-open covers the termination case.
+- [ ] **Tests.** Unit: incremental-hasher vectors; streaming seam with the
+      existing fixture databases (byte-identical query results vs the in-memory
+      path); WAL-on-staging application against the WAL fixtures; staging
+      lifecycle (delete-on-close, sweep-on-open, lock deletes). Fixture ingest and
+      `e2e/m5.spec.ts` must pass unchanged; add an e2e assertion that a preview
+      works after ingest with the streaming path active and that Remove backup
+      leaves no `transient/` residue.
+- [ ] **Docs.** D-041 (streaming import + VFS choice + incremental-digest
+      exception), Architecture pipeline section, AGENTS.md rules for the staging
+      lifecycle, Plan status line.
+
+Definition of done for review: no full-file plaintext `Uint8Array` for databases or
+large attachments anywhere in the worker path (grep for `new Uint8Array(plaintextSize)`
+class allocations); prepare-boundary and wrong-password guarantees unchanged; D-008
+still holds (no COOP/COEP); staging cannot outlive lock/remove except across a crash,
+where the next open sweeps it; all suites green including the license audit if any
+dependency was added (prefer none).
 
 ## M6 — Reports & export
 
@@ -330,6 +452,19 @@ Goal: court-exhibit-grade report from selected messages.
 - Report export as standalone HTML archive; CSV/JSON data export.
 - Chain-of-custody extras: full-backup hash manifest at import, action audit log.
 - Multi-backup cross-search.
+- Unify the remaining encrypted/unencrypted source-access assembly (per-call-site
+  `readRecord` lambdas + manifest-ownership flags in attachment-read/ios-ingest, and
+  the split manifest-cache vs encrypted-session state) behind one `openBackupSource()`
+  seam. Lock/teardown already goes through the single `resetBackupSourceCaches()`
+  helper; the full seam is deferred until the next consumer (report export or
+  streaming extraction) needs it.
+- Make the attachment-read final stale-session guard structural (finalize callback
+  executed inside the tracked session read) instead of the current comment-enforced
+  "no await between assertActive and returning plaintext" rule; the session already
+  re-validates and zeroizes internally, so the residual window is only the caller's
+  post-read progress awaits.
+- ~~Streaming source-SQLite import/decryption; unencrypted root Manifest aggregate/
+  streaming recovery.~~ Promoted to the scheduled M5.5 milestone above.
 
 ## Open questions
 

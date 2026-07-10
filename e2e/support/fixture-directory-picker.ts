@@ -14,20 +14,34 @@ export function readFixtureFiles(root: string): FixtureFile[] {
 
 export async function installFixtureDirectoryPicker(
   page: Page,
-  payload: { files: readonly FixtureFile[]; rootName: string },
+  payload: {
+    files: readonly FixtureFile[];
+    replacementRootName?: string;
+    rootName: string;
+  },
 ): Promise<void> {
-  await page.addInitScript((fixture: { files: readonly FixtureFile[]; rootName: string }) => {
+  await page.addInitScript((fixture: {
+    files: readonly FixtureFile[];
+    replacementRootName?: string;
+    rootName: string;
+  }) => {
+    let selectionCount = 0;
+
     Object.defineProperty(window, "showDirectoryPicker", {
       configurable: true,
       value: async () => {
         const opfsRoot = await navigator.storage.getDirectory();
-
-        await removeIfPresent(opfsRoot, "e2e-source-backups");
-
         const sourceRoot = await opfsRoot.getDirectoryHandle("e2e-source-backups", {
           create: true,
         });
-        const backupRoot = await sourceRoot.getDirectoryHandle(fixture.rootName, {
+        const rootName =
+          selectionCount === 0 || fixture.replacementRootName === undefined
+            ? fixture.rootName
+            : fixture.replacementRootName;
+
+        selectionCount += 1;
+        await removeIfPresent(sourceRoot, rootName);
+        const backupRoot = await sourceRoot.getDirectoryHandle(rootName, {
           create: true,
         });
 

@@ -37,7 +37,9 @@ const requiredBackupFiles = [
 type RequiredBackupFileName = (typeof requiredBackupFiles)[number];
 type RootPlistFileName = Exclude<RequiredBackupFileName, "Manifest.db">;
 
-const maxCompanionRootPlistBytes = 8 * 1024 * 1024;
+// D-019 role-specific root plist bound, shared with the encrypted-session
+// Manifest.plist key-material read so the limit has one source of truth.
+export const maxCompanionRootPlistBytes = 8 * 1024 * 1024;
 const maxInfoPlistBytes = 32 * 1024 * 1024;
 const rootPlistByteLimits = {
   "Info.plist": maxInfoPlistBytes,
@@ -107,6 +109,27 @@ export async function detectBackupDirectory(
   } catch (cause) {
     return workerFail<BackupDetectionResult>(toBackupWorkerError(cause));
   }
+}
+
+/**
+ * Single identity contract between a caller-supplied backup id and a
+ * detection result: an absent/blank id matches anything, otherwise the id
+ * must equal the detection id or the device UDID (both trimmed). Every
+ * backup-id assertion (session unlock, source reads, ingest) goes through
+ * this predicate so the matching rules cannot drift between entry points.
+ */
+export function backupIdMatchesDetection(
+  backupId: string | undefined,
+  detection: BackupDetectionResult,
+): boolean {
+  const normalized = backupId?.trim();
+
+  return (
+    normalized === undefined ||
+    normalized.length === 0 ||
+    normalized === detection.id.trim() ||
+    normalized === detection.deviceInfo.udid.trim()
+  );
 }
 
 export async function detectIosBackup(

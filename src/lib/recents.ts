@@ -52,11 +52,21 @@ export interface RecordDetectionOptions {
    * are retired instead of being stranded.
    */
   previousRecordId?: string;
+  /**
+   * The user explicitly chose to replace an existing backup snapshot for the
+   * same detected device. Wipe every derived-data directory before updating
+   * the recent and force a clean ingest state.
+   */
+  replaceExisting?: boolean;
 }
 
 export interface BackupRecentsStore {
   list(): Promise<RecentBackupRecord[]>;
   get(id: string): Promise<RecentBackupRecord | undefined>;
+  findReplacementCandidate(
+    detection: BackupDetectionResult,
+    directoryHandle: FileSystemDirectoryHandle,
+  ): Promise<RecentBackupRecord | undefined>;
   recordDetection(
     detection: BackupDetectionResult,
     directoryHandle: FileSystemDirectoryHandle,
@@ -113,11 +123,43 @@ export function createBackupRecentsStore(
 
       return record === undefined ? undefined : recoverInterruptedIngest(record);
     },
+    findReplacementCandidate: async (detection, directoryHandle) => {
+      const existing = await findRecordForDetection(persistence, detection);
+
+      if (existing === undefined) {
+        return undefined;
+      }
+
+      const sameDirectory = await isSameDirectoryEntry(
+        existing.directoryHandle,
+        directoryHandle,
+      );
+      const sameBackupDate =
+        existing.deviceInfo.lastBackupDate === detection.lastBackupDate;
+
+      return sameDirectory && sameBackupDate ? undefined : existing;
+    },
     // Detection writes go through recordDetection only — a raw upsert would
     // bypass the rename/ingest-status preservation and staleness handling.
     recordDetection: async (detection, directoryHandle, options = {}) => {
       const id = normalizeRecentBackupId(detection.id);
       const existing = await findRecordForDetection(persistence, detection);
+      const replaceExisting = options.replaceExisting === true;
+
+      if (replaceExisting && existing !== undefined) {
+        // Replacement is deliberately destructive only after explicit UI
+        // confirmation. First make the old record non-browsable, then wipe
+        // before publishing the new source handle. A partial/failed wipe can
+        // therefore never leave either snapshot looking ready to browse.
+        await persistence.put({
+          ...existing,
+          ingestStatus: "needs-reingest",
+        });
+        await derivedDataStorage.wipeDirectories(
+          getDerivedDataDirectoryNames(existing),
+        );
+      }
+
       const record: RecentBackupRecord = {
         id,
         // Preserve the user's rename and prior ingest state when the same
@@ -133,8 +175,12 @@ export function createBackupRecentsStore(
         },
         isEncrypted: detection.isEncrypted,
         lastOpened: new Date().toISOString(),
-        ingestStatus: reconcileIngestStatus(existing),
-        derivedDbVersion: existing?.derivedDbVersion ?? derivedDbVersion,
+        ingestStatus: replaceExisting
+          ? "not-ingested"
+          : reconcileIngestStatus(existing),
+        derivedDbVersion: replaceExisting
+          ? derivedDbVersion
+          : existing?.derivedDbVersion ?? derivedDbVersion,
       };
 
       await persistence.put(record);
@@ -402,6 +448,19 @@ async function findRecordForDetection(
   return records.find(
     (record) => record.id === udid || record.deviceInfo.udid === udid,
   );
+}
+
+async function isSameDirectoryEntry(
+  left: FileSystemDirectoryHandle,
+  right: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  try {
+    return await left.isSameEntry(right);
+  } catch {
+    // If Chrome cannot compare a persisted handle, prompting is safer than
+    // silently reusing derived data for a possibly different source folder.
+    return false;
+  }
 }
 
 function reconcileIngestStatus(

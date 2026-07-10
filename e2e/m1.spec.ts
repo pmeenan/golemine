@@ -129,6 +129,53 @@ test("opens a synthetic iPhone backup, persists recents, renames, and removes de
   await expect.poll(() => derivedDataDirectoryExists(page, iosMiniBackupUdid)).toBe(false);
 });
 
+test("confirms before replacing a different backup snapshot for the same device", async ({
+  page,
+}) => {
+  await installFixtureDirectoryPicker(page, {
+    files: readFixtureFiles(iosMiniBackupRoot),
+    replacementRootName: `${iosMiniBackupUdid}-newer-copy`,
+    rootName: iosMiniBackupUdid,
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open backup" }).click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Mina's iPhone backup" }),
+  ).toBeVisible({ timeout: 15_000 });
+  await createDerivedDataSentinel(page, iosMiniBackupUdid);
+  await page.getByRole("link", { name: appName }).click();
+
+  // The picker fixture uses a second source folder after the first selection,
+  // producing a distinct directory identity with the same detected device UDID.
+  await page.getByRole("button", { name: "Open backup" }).click();
+  const dialog = page.getByRole("dialog", {
+    name: "Replace existing backup?",
+  });
+
+  await expect(dialog).toBeVisible({ timeout: 15_000 });
+  await expect(
+    dialog.getByText(/permanently removes the existing local ingest/),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "Keep existing" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(
+    page.getByText(/Kept the existing backup for Mina's iPhone/),
+  ).toBeVisible();
+  await expect.poll(() => derivedDataDirectoryExists(page, iosMiniBackupUdid)).toBe(true);
+
+  await page.getByRole("button", { name: "Open backup" }).click();
+  await expect(dialog).toBeVisible({ timeout: 15_000 });
+  await dialog.getByRole("button", { name: "Replace backup" }).click();
+
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Mina's iPhone backup" }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Not ingested")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ingest messages" })).toBeVisible();
+  await expect.poll(() => derivedDataDirectoryExists(page, iosMiniBackupUdid)).toBe(false);
+});
+
 async function createDerivedDataSentinel(page: Page, backupId: string): Promise<void> {
   await page.evaluate(
     async ({ appDirectoryName, backupsDirectoryName, id }) => {

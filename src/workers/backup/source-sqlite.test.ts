@@ -3,9 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { getSqlite } from "../shared/sqlite-init";
+import { getSqlite, type Sqlite3Api } from "../shared/sqlite-init";
 import {
   applySqliteWal,
   openSourceSqliteDatabase,
@@ -46,7 +46,71 @@ describe("openSourceSqliteDatabase", () => {
       await rm(tempDirectory, { recursive: true, force: true });
     }
   });
+
+  it("unlinks a transient VFS copy when the read-only DB open fails", async () => {
+    const harness = createSqliteCleanupHarness({ throwOnOpen: true });
+
+    await expect(
+      openSourceSqliteDatabase(
+        { label: "open-failure", main: sqliteHeaderPage(pageSize) },
+        () => Promise.resolve(harness.sqlite3),
+      ),
+    ).rejects.toBeInstanceOf(Error);
+
+    expect(harness.createFile).toHaveBeenCalledTimes(1);
+    expect(harness.unlink).toHaveBeenCalledTimes(1);
+    expect(harness.dealloc).toHaveBeenCalledTimes(1);
+  });
+
+  it("unlinks a transient VFS copy even when db.close throws", async () => {
+    const harness = createSqliteCleanupHarness({ throwOnClose: true });
+    const source = await openSourceSqliteDatabase(
+      { label: "close-failure", main: sqliteHeaderPage(pageSize) },
+      () => Promise.resolve(harness.sqlite3),
+    );
+
+    expect(() => {
+      source.close();
+    }).toThrow("synthetic close failure");
+    expect(harness.unlink).toHaveBeenCalledTimes(1);
+    expect(harness.dealloc).toHaveBeenCalledTimes(1);
+  });
 });
+
+function createSqliteCleanupHarness(options: {
+  throwOnOpen?: boolean;
+  throwOnClose?: boolean;
+}) {
+  const createFile = vi.fn();
+  const unlink = vi.fn(() => 0);
+  const dealloc = vi.fn();
+
+  class FakeDb {
+    constructor(_databaseName: string, _mode: string) {
+      if (options.throwOnOpen === true) {
+        throw new Error("synthetic open failure");
+      }
+    }
+
+    close(): void {
+      if (options.throwOnClose === true) {
+        throw new Error("synthetic close failure");
+      }
+    }
+  }
+
+  const sqlite3 = {
+    capi: { sqlite3_js_posix_create_file: createFile },
+    oo1: { DB: FakeDb },
+    wasm: {
+      exports: { sqlite3__wasm_vfs_unlink: unlink },
+      allocCString: () => 42,
+      dealloc,
+    },
+  } as unknown as Sqlite3Api;
+
+  return { sqlite3, createFile, unlink, dealloc };
+}
 
 describe("applySqliteWal", () => {
   it("replays committed frames and ignores frames after the last commit", () => {

@@ -3,8 +3,8 @@ import {
   workerFail,
   workerOk,
   type BackupDetectionResult,
-  type ReadUnencryptedSourceFileRequest,
-  type ReadUnencryptedSourceFileResponse,
+  type ReadSourceFileRequest,
+  type ReadSourceFileResponse,
   type WorkerErrorCode,
   type WorkerProgressCallback,
   type WorkerResult,
@@ -12,14 +12,29 @@ import {
 } from "../../lib/worker-types";
 import { defaultMaxReadBytes } from "../shared/media-limits";
 import { emitWorkerProgress } from "../shared/progress";
-import { BackupDetectionError, detectIosBackup } from "./ios-backup";
+import {
+  BackupDetectionError,
+  backupIdMatchesDetection,
+  detectIosBackup,
+} from "./ios-backup";
+import {
+  BackupSessionError,
+  type EncryptedBackupSessionContext,
+  findEncryptedBackupSession,
+  requireEncryptedBackupSession,
+  resetEncryptedBackupSession,
+  toBackupSessionWorkerError,
+} from "./encrypted-session";
 import {
   ManifestDbError,
   ManifestDbReader,
   readSourceFileBytes,
   SourceFileTooLargeError,
 } from "./manifest-db";
-import { asReadonlySourceDirectory } from "./read-only-source";
+import {
+  asReadonlySourceDirectory,
+  isSameDirectoryHandle,
+} from "./read-only-source";
 import { SourceSqliteOpenError } from "./source-sqlite";
 
 /**
@@ -56,6 +71,17 @@ export function resetUnencryptedSourceFileCache(): void {
   }
 }
 
+/**
+ * Single lock/teardown seam for every per-backup source cache this worker
+ * holds: the unencrypted Manifest reader cache above and the encrypted
+ * session (keys + its transient Manifest reader). Callers must never reset
+ * one without the other, so the pairing lives here instead of at call sites.
+ */
+export async function resetBackupSourceCaches(): Promise<void> {
+  resetUnencryptedSourceFileCache();
+  await resetEncryptedBackupSession();
+}
+
 export class SourceFileReadError extends Error {
   constructor(
     readonly code: WorkerErrorCode,
@@ -71,9 +97,26 @@ export class SourceFileReadError extends Error {
 
 export async function readUnencryptedSourceFile(
   rootHandle: FileSystemDirectoryHandle,
-  request: ReadUnencryptedSourceFileRequest,
+  request: ReadSourceFileRequest,
   progress?: WorkerProgressCallback,
-): Promise<WorkerResult<ReadUnencryptedSourceFileResponse>> {
+): Promise<WorkerResult<ReadSourceFileResponse>> {
+  return readSourceFileInternal(rootHandle, request, progress, true);
+}
+
+export async function readSourceFile(
+  rootHandle: FileSystemDirectoryHandle,
+  request: ReadSourceFileRequest,
+  progress?: WorkerProgressCallback,
+): Promise<WorkerResult<ReadSourceFileResponse>> {
+  return readSourceFileInternal(rootHandle, request, progress, false);
+}
+
+async function readSourceFileInternal(
+  rootHandle: FileSystemDirectoryHandle,
+  request: ReadSourceFileRequest,
+  progress: WorkerProgressCallback | undefined,
+  unencryptedOnly: boolean,
+): Promise<WorkerResult<ReadSourceFileResponse>> {
   try {
     await emitWorkerProgress(
       "backup",
@@ -98,12 +141,15 @@ export async function readUnencryptedSourceFile(
     );
 
     const cacheKey = normalizedBackupId(request.backupId);
+    const encryptedSession = unencryptedOnly
+      ? undefined
+      : await findEncryptedBackupSession(rootHandle, cacheKey);
     let cached =
       cacheKey !== undefined && manifestReaderCache?.backupId === cacheKey
         ? manifestReaderCache
         : undefined;
 
-    if (cached !== undefined && !(await isSameRootDirectory(cached.root, rootHandle))) {
+    if (cached !== undefined && !(await isSameDirectoryHandle(cached.root, rootHandle))) {
       // Same backupId but a different root directory: evict (closing the
       // reader) and rebuild from the new root instead of trusting a stale
       // manifest index.
@@ -111,9 +157,12 @@ export async function readUnencryptedSourceFile(
       cached = undefined;
     }
 
-    const detection = cached?.detection ?? (await detectIosBackup(root));
+    const detection =
+      encryptedSession?.detection ??
+      cached?.detection ??
+      (await detectIosBackup(root));
 
-    assertBackupCanBeRead(request, detection);
+    assertBackupCanBeRead(request, detection, unencryptedOnly);
 
     await emitWorkerProgress(
       "backup",
@@ -125,9 +174,20 @@ export async function readUnencryptedSourceFile(
     );
 
     let manifest: ManifestDbReader;
+    let encryptedReadSession: EncryptedBackupSessionContext | undefined;
+    let readRecord = (record: Parameters<typeof readSourceFileBytes>[1], options: Parameters<typeof readSourceFileBytes>[2]) =>
+      readSourceFileBytes(root, record, options);
     let closeManifestAfterRead = false;
 
-    if (cached !== undefined) {
+    if (detection.isEncrypted) {
+      const session =
+        encryptedSession ??
+        (await requireEncryptedBackupSession(rootHandle, request, detection));
+      manifest = session.manifest;
+      encryptedReadSession = session;
+      readRecord = (record, options) =>
+        session.readSourceFile(record, options);
+    } else if (cached !== undefined) {
       manifest = cached.manifest;
     } else {
       manifest = await ManifestDbReader.open(root);
@@ -149,7 +209,18 @@ export async function readUnencryptedSourceFile(
     }
 
     try {
-      const record = manifest.findFile(request.sourceDomain, request.sourcePath);
+      let record: ReturnType<typeof manifest.findFile>;
+
+      try {
+        record = manifest.findFile(request.sourceDomain, request.sourcePath);
+      } catch (cause) {
+        // A lock racing this read can close the session-owned transient
+        // Manifest DB between session acquisition and this synchronous
+        // query. Re-checking activity converts that raw sqlite error into
+        // the recoverable needs-password code instead of a generic failure.
+        encryptedReadSession?.assertActive();
+        throw cause;
+      }
 
       if (record === undefined) {
         throw new SourceFileReadError(
@@ -174,77 +245,105 @@ export async function readUnencryptedSourceFile(
         3,
         5,
       );
-      const source = await readSourceFileBytes(root, record, {
+      const source = await readRecord(record, {
         maxReadBytes: request.maxReadBytes ?? defaultMaxReadBytes,
+        // The RPC response carries stored-source provenance (report export
+        // labels both hashes), so this read pays the ciphertext digest.
+        includeSourceSha256: true,
       });
 
-      await emitWorkerProgress(
-        "backup",
-        progress,
-        "hashing",
-        "Hashing source file bytes",
-        4,
-        5,
-      );
-
-      const expectedSha256 = normalizedSha256(request.expectedSha256);
-
-      if (expectedSha256 !== undefined && expectedSha256 !== source.sha256) {
-        throw new SourceFileReadError(
-          "backup_access_failed",
-          "The source file hash no longer matches the derived attachment record.",
-          true,
-          {
-            domain: record.domain,
-            relativePath: record.relativePath,
-            expectedSha256,
-            actualSha256: source.sha256,
-            fileId: record.fileId,
-          },
+      try {
+        await emitWorkerProgress(
+          "backup",
+          progress,
+          "hashing",
+          "Hashing source file bytes",
+          4,
+          5,
         );
-      }
 
-      const response: ReadUnencryptedSourceFileResponse = {
-        ...requestMetadata(request),
-        fileId: record.fileId,
-        domain: record.domain,
-        relativePath: record.relativePath,
-        bytes: source.bytes,
-        byteLength: source.bytes.byteLength,
-        sourceByteLength: source.sourceByteLength,
-        sha256: source.sha256,
-        ...(expectedSha256 === undefined
-          ? {}
-          : {
+        const expectedSha256 = normalizedSha256(request.expectedSha256);
+        // Requested via includeSourceSha256 above; absence would be an
+        // internal contract violation, not a recoverable read outcome.
+        const sourceSha256 = source.sourceSha256;
+
+        if (sourceSha256 === undefined) {
+          throw new SourceFileReadError(
+            "backup_access_failed",
+            "The stored-source hash was not computed for this read.",
+            true,
+            { fileId: record.fileId },
+          );
+        }
+
+        if (expectedSha256 !== undefined && expectedSha256 !== source.sha256) {
+          throw new SourceFileReadError(
+            "backup_access_failed",
+            "The source file hash no longer matches the derived attachment record.",
+            true,
+            {
+              domain: record.domain,
+              relativePath: record.relativePath,
               expectedSha256,
-              hashMatchesExpectedSha256: true,
-            }),
-      };
+              actualSha256: source.sha256,
+              fileId: record.fileId,
+            },
+          );
+        }
 
-      await emitWorkerProgress(
-        "backup",
-        progress,
-        "complete",
-        "Source file read complete",
-        5,
-        5,
-      );
+        const response: ReadSourceFileResponse = {
+          ...requestMetadata(request),
+          fileId: record.fileId,
+          domain: record.domain,
+          relativePath: record.relativePath,
+          bytes: source.bytes,
+          byteLength: source.bytes.byteLength,
+          sourceByteLength: source.sourceByteLength,
+          isEncrypted: source.isEncrypted,
+          sourceSha256,
+          sha256: source.sha256,
+          ...(expectedSha256 === undefined
+            ? {}
+            : {
+                expectedSha256,
+                hashMatchesExpectedSha256: true,
+              }),
+        };
 
-      return workerOk(response);
+        await emitWorkerProgress(
+          "backup",
+          progress,
+          "complete",
+          "Source file read complete",
+          5,
+          5,
+        );
+
+        // No await may occur between this assertion and returning plaintext.
+        // A lock/replacement during either post-read progress callback makes
+        // the read fail and the catch below clears the old-session bytes.
+        encryptedReadSession?.assertActive();
+        return workerOk(response);
+      } catch (cause) {
+        if (source.isEncrypted) {
+          source.bytes.fill(0);
+        }
+        throw cause;
+      }
     } finally {
       if (closeManifestAfterRead) {
         manifest.close();
       }
     }
   } catch (cause) {
-    return workerFail<ReadUnencryptedSourceFileResponse>(
+    return workerFail<ReadSourceFileResponse>(
       toSourceFileReadWorkerError(cause, request),
     );
   }
 }
 
 function validateSourceFileRequest(
-  request: ReadUnencryptedSourceFileRequest,
+  request: ReadSourceFileRequest,
 ): void {
   if (request.sourceDomain.trim().length === 0) {
     throw new SourceFileReadError(
@@ -278,31 +377,24 @@ function validateSourceFileRequest(
 }
 
 function assertBackupCanBeRead(
-  request: ReadUnencryptedSourceFileRequest,
+  request: ReadSourceFileRequest,
   detection: BackupDetectionResult,
+  unencryptedOnly: boolean,
 ): void {
-  if (request.backupId !== undefined && request.backupId.trim().length > 0) {
-    const backupId = request.backupId.trim();
-    const candidates = new Set([
-      detection.id.trim(),
-      detection.deviceInfo.udid.trim(),
-    ]);
-
-    if (!candidates.has(backupId)) {
-      throw new SourceFileReadError(
-        "backup_invalid",
-        "The selected folder no longer matches this recent backup. Open the backup folder again before reading source files.",
-        true,
-        {
-          expectedBackupId: backupId,
-          actualBackupId: detection.id,
-          actualUdid: detection.deviceInfo.udid,
-        },
-      );
-    }
+  if (!backupIdMatchesDetection(request.backupId, detection)) {
+    throw new SourceFileReadError(
+      "backup_invalid",
+      "The selected folder no longer matches this recent backup. Open the backup folder again before reading source files.",
+      true,
+      {
+        expectedBackupId: request.backupId?.trim() ?? "",
+        actualBackupId: detection.id,
+        actualUdid: detection.deviceInfo.udid,
+      },
+    );
   }
 
-  if (detection.isEncrypted) {
+  if (unencryptedOnly && detection.isEncrypted) {
     throw new SourceFileReadError(
       "backup_encrypted_unsupported",
       "Encrypted source file reads are scheduled for M5. This path only reads unencrypted backup files.",
@@ -313,9 +405,9 @@ function assertBackupCanBeRead(
 }
 
 function requestMetadata(
-  request: ReadUnencryptedSourceFileRequest,
+  request: ReadSourceFileRequest,
 ): Pick<
-  ReadUnencryptedSourceFileResponse,
+  ReadSourceFileResponse,
   | "backupId"
   | "sourceDomain"
   | "sourcePath"
@@ -331,19 +423,6 @@ function requestMetadata(
     ...(request.filename === undefined ? {} : { filename: request.filename }),
     ...(request.mime === undefined ? {} : { mime: request.mime }),
   };
-}
-
-async function isSameRootDirectory(
-  cachedRoot: FileSystemDirectoryHandle,
-  root: FileSystemDirectoryHandle,
-): Promise<boolean> {
-  try {
-    return await cachedRoot.isSameEntry(root);
-  } catch {
-    // Fail closed: if identity cannot be verified, rebuild from the supplied
-    // root rather than reuse a manifest that may describe a different folder.
-    return false;
-  }
 }
 
 function normalizedBackupId(value: string | undefined): string | undefined {
@@ -362,7 +441,7 @@ function normalizedSha256(value: string | undefined): string | undefined {
 
 function toSourceFileReadWorkerError(
   cause: unknown,
-  request: ReadUnencryptedSourceFileRequest,
+  request: ReadSourceFileRequest,
 ) {
   if (cause instanceof SourceFileReadError) {
     return toWorkerError({
@@ -373,6 +452,10 @@ function toSourceFileReadWorkerError(
       cause: cause.originalCause,
       details: cause.details,
     });
+  }
+
+  if (cause instanceof BackupSessionError) {
+    return toBackupSessionWorkerError(cause);
   }
 
   if (cause instanceof BackupDetectionError) {

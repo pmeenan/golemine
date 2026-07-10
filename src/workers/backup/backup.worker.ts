@@ -2,6 +2,7 @@ import { expose, releaseProxy, transfer, wrap } from "comlink";
 import type { Remote } from "comlink";
 import type {
   BackupIngestRequest,
+  BackupCredentials,
   BackupWorkerApi,
   DbWorkerApi,
   IngestSinkApi,
@@ -11,14 +12,34 @@ import type {
 } from "../../lib/worker-types";
 import { nestedDbWorkerName } from "../../lib/worker-names";
 import { detectBackupDirectory } from "./ios-backup";
-import { ingestUnencryptedBackupDirectory } from "./ios-ingest";
-import { readUnencryptedSourceFile } from "./attachment-read";
+import {
+  ingestBackupDirectory,
+  ingestUnencryptedBackupDirectory,
+} from "./ios-ingest";
+import {
+  readSourceFile,
+  readUnencryptedSourceFile,
+  resetBackupSourceCaches,
+} from "./attachment-read";
+import { unlockBackupSession } from "./encrypted-session";
 import { runDemoRoundTrip } from "../shared/demo";
 
 export const backupWorkerApi: BackupWorkerApi = {
   demoRoundTrip: (request, progress) =>
     runDemoRoundTrip("backup", request, progress),
   detectBackup: (root, progress) => detectBackupDirectory(root, progress),
+  ingestBackupToDb: (root, request, credentials, progress) =>
+    ingestBackupToDb(root, request, credentials, progress),
+  unlockBackupSession: (root, request, progress) =>
+    unlockBackupSession(root, request, progress),
+  lockBackupSession: () => resetBackupSourceCaches(),
+  readSourceFile: async (root, request, progress) => {
+    const result = await readSourceFile(root, request, progress);
+
+    return result.ok
+      ? transfer(result, [result.value.bytes.buffer as ArrayBuffer])
+      : result;
+  },
   ingestUnencryptedBackup: (root, request, sink, progress) =>
     ingestUnencryptedBackupDirectory(root, request, sink, progress),
   ingestUnencryptedBackupToDb: (root, request, progress) =>
@@ -46,6 +67,27 @@ async function ingestUnencryptedBackupToDb(
       root,
       request,
       client.sink,
+      progress,
+    );
+  } finally {
+    client.release();
+  }
+}
+
+async function ingestBackupToDb(
+  root: FileSystemDirectoryHandle,
+  request: BackupIngestRequest,
+  credentials?: BackupCredentials,
+  progress?: WorkerProgressCallback,
+): Promise<WorkerResult<BackupIngestReport>> {
+  const client = createDbWorkerIngestSink();
+
+  try {
+    return await ingestBackupDirectory(
+      root,
+      request,
+      client.sink,
+      credentials,
       progress,
     );
   } finally {

@@ -1,9 +1,11 @@
 import {
   ArrowLeft,
+  CircleAlert,
   Download,
   FileWarning,
   Image,
   ImageOff,
+  LockKeyhole,
   Loader2,
   MessageSquareText,
   Search,
@@ -18,6 +20,8 @@ import {
   type ReactNode,
   type Ref,
   Fragment,
+  createContext,
+  useContext,
   useCallback,
   useEffect,
   useMemo,
@@ -28,6 +32,11 @@ import { createPortal } from "react-dom";
 import { Link, useParams, useSearchParams } from "react-router";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
+import {
+  BackupPasswordForm,
+  type BackupPasswordFormController,
+  useBackupPasswordForm,
+} from "../../components/backup/backup-password-form";
 import { EmptyState, PageShell } from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -43,6 +52,7 @@ import {
   createBackupWorkerClient,
   createDbWorkerClient,
   createMediaWorkerClient,
+  proxiedWorkerProgress,
 } from "../../lib/worker-client";
 import type {
   AttachmentThumbnailOkResponse,
@@ -184,6 +194,7 @@ type AttachmentPreviewState =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "needs-permission" }
+  | { kind: "needs-password" }
   | {
       kind: "image";
       caption?: string;
@@ -197,6 +208,33 @@ type AttachmentPreviewState =
     }
   | { kind: "unsupported"; message: string }
   | { kind: "error"; message: string };
+
+type EncryptedSessionState =
+  | { kind: "locked" }
+  | { kind: "unlocking"; label: string }
+  | { kind: "locking"; label: string }
+  | { kind: "unlocked"; revision: number }
+  | { kind: "error"; message: string };
+
+interface EncryptedSessionContextValue {
+  focusUnlock: () => void;
+  isEncrypted: boolean;
+  isUnlocked: boolean;
+  requireUnlock: () => void;
+  revision: number;
+}
+
+const EncryptedSessionContext = createContext<EncryptedSessionContextValue>({
+  focusUnlock: () => undefined,
+  isEncrypted: false,
+  isUnlocked: true,
+  requireUnlock: () => undefined,
+  revision: 0,
+});
+
+function isRouteActive(ref: { readonly current: boolean }): boolean {
+  return ref.current;
+}
 
 export function MessagesRoute() {
   const { id } = useParams<{ id: string }>();
@@ -233,6 +271,10 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
     kind: "idle",
   });
   const [detailState, setDetailState] = useState<DetailState>({ kind: "empty" });
+  const [encryptedSessionState, setEncryptedSessionState] =
+    useState<EncryptedSessionState>(() =>
+      record.isEncrypted ? { kind: "locked" } : { kind: "unlocked", revision: 0 },
+    );
   // Lazily initialized from the dock media query so a cold deep link below
   // the dock threshold renders the Details pane as a modal overlay on the
   // very first frame instead of briefly auto-placing it in the grid.
@@ -268,6 +310,11 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   const wasDetailOpenRef = useRef(false);
   const previousDetailModeRef =
     useRef<"docked" | "overlay" | undefined>(undefined);
+  const encryptedPasswordForm = useBackupPasswordForm();
+  const encryptedUnlockInFlightRef = useRef(false);
+  const routeActiveRef = useRef(true);
+  const focusUnlockAfterDetailCloseRef = useRef(false);
+  const detailOverlayOpenRef = useRef(false);
   const runPreviewTask = useCallback(
     <TResult,>(task: () => Promise<TResult>): Promise<TResult> => {
       // Created lazily (not in useMemo) so a StrictMode remount gets a fresh,
@@ -293,6 +340,137 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
 
     return mediaClientRef.current;
   }, []);
+  const unlockEncryptedSession = useCallback(
+    async () => {
+      if (encryptedUnlockInFlightRef.current) {
+        return;
+      }
+
+      encryptedUnlockInFlightRef.current = true;
+      setEncryptedSessionState({
+        kind: "unlocking",
+        label: "Checking the backup password.",
+      });
+
+      try {
+        const permission = await ensureRecentBackupDirectoryPermission(record, {
+          request: true,
+        });
+
+        if (!isRouteActive(routeActiveRef)) {
+          encryptedPasswordForm.clear();
+          return;
+        }
+
+        if (permission !== "granted") {
+          encryptedPasswordForm.clear();
+          setEncryptedSessionState({
+            kind: "error",
+            message: `Chrome did not grant read access to ${record.friendlyName}.`,
+          });
+          encryptedPasswordForm.focusAfterFrame();
+          return;
+        }
+
+        const client = getBackupClient();
+        const progress = proxiedWorkerProgress((update) => {
+          if (!isRouteActive(routeActiveRef)) {
+            return;
+          }
+          setEncryptedSessionState({
+            kind: "unlocking",
+            label: update.label,
+          });
+        });
+        // The shared controller reads the uncontrolled field and clears it
+        // before any await; the worker RPC receives the credential in the
+        // same synchronous call. A backup_password_incorrect result refocuses
+        // the cleared field for an in-place retry.
+        // (async so the union-of-promises Comlink return type collapses to a
+        // promise of the WorkerResult union; the RPC call itself still runs
+        // synchronously when the controller invokes this dispatch.)
+        const result = await encryptedPasswordForm.submitWithPassword(
+          async (password) =>
+            client.api.unlockBackupSession(
+              record.directoryHandle,
+              { backupId: record.id, password },
+              progress,
+            ),
+          {
+            emptyPasswordMessage:
+              "Enter the backup password before unlocking attachments.",
+          },
+        );
+
+        if (!isRouteActive(routeActiveRef)) {
+          return;
+        }
+
+        if (!result.ok) {
+          setEncryptedSessionState({
+            kind: "error",
+            message: formatWorkerResultError(result.error),
+          });
+          return;
+        }
+
+        setEncryptedSessionState((current) => ({
+          kind: "unlocked",
+          revision: current.kind === "unlocked" ? current.revision + 1 : 1,
+        }));
+      } catch (cause) {
+        encryptedPasswordForm.clear();
+        if (!isRouteActive(routeActiveRef)) {
+          return;
+        }
+        setEncryptedSessionState({
+          kind: "error",
+          message: formatError(cause),
+        });
+        encryptedPasswordForm.focusAfterFrame();
+      } finally {
+        encryptedUnlockInFlightRef.current = false;
+      }
+    },
+    [encryptedPasswordForm, getBackupClient, record],
+  );
+  const lockEncryptedSession = useCallback(async () => {
+    if (encryptedUnlockInFlightRef.current) {
+      return;
+    }
+
+    encryptedUnlockInFlightRef.current = true;
+    setEncryptedSessionState({
+      kind: "locking",
+      label: "Clearing attachment decryption keys.",
+    });
+
+    const client = backupClientRef.current;
+
+    try {
+      await client?.api.lockBackupSession();
+    } catch {
+      // Terminating the route worker is the secure fallback if its explicit
+      // lock RPC fails. A later unlock lazily creates a fresh worker.
+      client?.release();
+      backupClientRef.current = undefined;
+      // Comlink never settles in-flight RPC promises on terminate, so preview
+      // tasks awaiting readSourceFile on the terminated worker are stranded
+      // and would hold the shared limiter's active slots forever. Retire the
+      // whole runner: reject queued tasks now and let the next preview lazily
+      // create a fresh limiter. Stranded tasks only ever release the retired
+      // runner's slots, and any late preview commits are dropped by the
+      // per-attachment request-id guard bumped when the session locks.
+      previewRunnerRef.current?.cancel();
+      previewRunnerRef.current = undefined;
+    } finally {
+      encryptedUnlockInFlightRef.current = false;
+      if (isRouteActive(routeActiveRef)) {
+        setEncryptedSessionState({ kind: "locked" });
+        encryptedPasswordForm.focusAfterFrame();
+      }
+    }
+  }, [encryptedPasswordForm]);
   const focusDetailReturnTarget = useCallback(() => {
     // Virtualized triggers unmount and remount as new elements, so the
     // activated message id (not a stale element reference or test hook) is
@@ -332,8 +510,12 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
     searchResultsStateRef.current = searchResultsState;
   }, [searchResultsState]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // React StrictMode probes setup/cleanup/setup with the same refs in dev.
+    routeActiveRef.current = true;
+
+    return () => {
+      routeActiveRef.current = false;
       // Reject queued preview tasks so real unmount never leaves callers
       // pending; the next runPreviewTask call lazily creates a new runner.
       previewRunnerRef.current?.cancel();
@@ -344,9 +526,8 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
       backupClientRef.current = undefined;
       mediaClientRef.current?.release();
       mediaClientRef.current = undefined;
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     if (activeSearch === undefined || isSubmittingSearch) {
@@ -660,6 +841,9 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
 
   const detailOpen = selectedMessageId !== undefined;
   const detailOverlayOpen = detailOverlayActive && detailOpen;
+  useEffect(() => {
+    detailOverlayOpenRef.current = detailOverlayOpen;
+  }, [detailOverlayOpen]);
 
   useEffect(() => {
     // Deep links and keyboard flows can open the overlay without going
@@ -694,12 +878,23 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
     }
 
     wasDetailOpenRef.current = false;
-    const frame = window.requestAnimationFrame(focusDetailReturnTarget);
+    const frame = window.requestAnimationFrame(() => {
+      if (focusUnlockAfterDetailCloseRef.current) {
+        focusUnlockAfterDetailCloseRef.current = false;
+        detailReturnFocusRef.current = undefined;
+        detailReturnFocusMessageIdRef.current = undefined;
+        detailReturnFocusOriginRef.current = undefined;
+        encryptedPasswordForm.focus();
+        return;
+      }
+
+      focusDetailReturnTarget();
+    });
 
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [detailOpen, focusDetailReturnTarget]);
+  }, [detailOpen, encryptedPasswordForm, focusDetailReturnTarget]);
 
   useEffect(() => {
     if (!detailOpen) {
@@ -864,6 +1059,56 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
       return next;
     });
   }, [setSearchParams]);
+  const focusEncryptedUnlock = useCallback(() => {
+    if (!isRouteActive(routeActiveRef)) {
+      return;
+    }
+
+    if (detailOverlayOpenRef.current) {
+      focusUnlockAfterDetailCloseRef.current = true;
+      closeDetail();
+      return;
+    }
+
+    encryptedPasswordForm.focus();
+  }, [closeDetail, encryptedPasswordForm]);
+  const requireEncryptedUnlock = useCallback(() => {
+    if (!isRouteActive(routeActiveRef)) {
+      return;
+    }
+
+    setEncryptedSessionState({ kind: "locked" });
+    // The success strip must first re-render as the shared password form.
+    // If Details is modal, focusEncryptedUnlock then closes it before focus.
+    requestAnimationFrame(focusEncryptedUnlock);
+  }, [focusEncryptedUnlock]);
+  // The context identity must change only when the derived fields change.
+  // Memoizing on the whole state object would mint a new identity for every
+  // unlock progress label, and each new identity cancels and re-issues every
+  // mounted attachment preview (loadPreview and the preview effects depend on
+  // this context). The changing label is rendered by the unlock form directly
+  // from the state and deliberately stays out of the context.
+  const isEncryptedSessionUnlocked = encryptedSessionState.kind === "unlocked";
+  const encryptedSessionRevision =
+    encryptedSessionState.kind === "unlocked"
+      ? encryptedSessionState.revision
+      : 0;
+  const encryptedSessionContext = useMemo<EncryptedSessionContextValue>(
+    () => ({
+      focusUnlock: focusEncryptedUnlock,
+      isEncrypted: record.isEncrypted,
+      isUnlocked: isEncryptedSessionUnlocked,
+      requireUnlock: requireEncryptedUnlock,
+      revision: encryptedSessionRevision,
+    }),
+    [
+      encryptedSessionRevision,
+      focusEncryptedUnlock,
+      isEncryptedSessionUnlocked,
+      record.isEncrypted,
+      requireEncryptedUnlock,
+    ],
+  );
 
   useModalFocusContainment({
     active: detailOverlayOpen,
@@ -1226,7 +1471,7 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   );
 
   return (
-    <>
+    <EncryptedSessionContext.Provider value={encryptedSessionContext}>
       <PageShell
       actions={
         <>
@@ -1237,6 +1482,7 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
             </Link>
           </Button>
           <Badge variant="success">Ingested</Badge>
+          {record.isEncrypted ? <Badge variant="warning">Encrypted</Badge> : null}
         </>
       }
       description="Browse or search conversations, inspect message metadata, and preview source attachments without modifying the backup."
@@ -1253,6 +1499,15 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
         onReset={resetSearch}
         onSubmit={submitSearch}
       />
+
+      {record.isEncrypted ? (
+        <EncryptedAttachmentUnlock
+          controller={encryptedPasswordForm}
+          onLock={lockEncryptedSession}
+          state={encryptedSessionState}
+          onUnlock={unlockEncryptedSession}
+        />
+      ) : null}
 
       <div
         aria-busy={isSubmittingSearch}
@@ -1396,7 +1651,91 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
             </div>,
             document.body,
           )}
-    </>
+    </EncryptedSessionContext.Provider>
+  );
+}
+
+function EncryptedAttachmentUnlock({
+  controller,
+  onLock,
+  onUnlock,
+  state,
+}: {
+  controller: BackupPasswordFormController;
+  onLock: () => Promise<void>;
+  onUnlock: () => Promise<void>;
+  state: EncryptedSessionState;
+}) {
+  if (state.kind === "unlocked") {
+    return (
+      <div
+        className="flex flex-wrap items-center gap-2 rounded-md border border-success bg-[var(--success-subtle)] px-3 py-2 text-caption text-[var(--success-foreground)]"
+        role="status"
+      >
+        <LockKeyhole aria-hidden="true" className="size-4" />
+        <span className="min-w-0 flex-1">
+          Source attachments are unlocked for this worker session. Keys are not stored;
+          generated previews remain local until the backup is removed.
+        </span>
+        <Button
+          onClick={() => {
+            void onLock();
+          }}
+          size="sm"
+          type="button"
+          variant="secondary"
+        >
+          Lock attachments
+        </Button>
+      </div>
+    );
+  }
+
+  const isBusy = state.kind === "unlocking" || state.kind === "locking";
+
+  return (
+    <BackupPasswordForm
+      actions={
+        <Button disabled={isBusy} size="sm" type="submit" variant="secondary">
+          {state.kind === "locking"
+            ? "Locking attachments"
+            : state.kind === "unlocking"
+              ? "Unlocking attachments"
+              : "Unlock attachments"}
+        </Button>
+      }
+      className="rounded-md border border-border bg-surface px-4 py-3 shadow-1"
+      controller={controller}
+      disabled={isBusy}
+      disclosureLeadIn="Searchable messages are already in the local derived database. Unlock the source backup to preview or extract original attachments."
+      errorDescriptionId="encrypted-unlock-error"
+      inputId="messages-backup-password"
+      inputSize="md"
+      invalid={state.kind === "error"}
+      layout="inline"
+      leading={
+        <LockKeyhole aria-hidden="true" className="mb-2 size-5 text-text-tertiary" />
+      }
+      onSubmit={() => {
+        void onUnlock();
+      }}
+      required
+    >
+      {state.kind === "unlocking" || state.kind === "locking" ? (
+        <p className="mt-2 text-caption text-[var(--info-foreground)]" role="status">
+          {state.label}
+        </p>
+      ) : state.kind === "error" ? (
+        <p
+          className="mt-2 flex items-start gap-2 text-caption text-danger"
+          id="encrypted-unlock-error"
+          role="alert"
+        >
+          <CircleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+          <span>{state.message}</span>
+        </p>
+      ) : null}
+    </BackupPasswordForm>
   );
 }
 
@@ -2466,6 +2805,7 @@ function useAttachmentPreview({
   record: RecentBackupRecord;
   runPreviewTask: RunPreviewTask;
 }) {
+  const encryptedSession = useContext(EncryptedSessionContext);
   const [previewState, setPreviewState] = useState<AttachmentPreviewState>({
     kind: "idle",
   });
@@ -2548,6 +2888,11 @@ function useAttachmentPreview({
         return;
       }
 
+      if (encryptedSession.isEncrypted && !encryptedSession.isUnlocked) {
+        commitPreviewState(requestId, { kind: "needs-password" });
+        return;
+      }
+
       const permission = await ensureRecentBackupDirectoryPermission(record, {
         request: requestPermission,
       });
@@ -2564,7 +2909,7 @@ function useAttachmentPreview({
           }
 
           const backupClient = getBackupClient();
-          const sourceResult = await backupClient.api.readUnencryptedSourceFile(
+          const sourceResult = await backupClient.api.readSourceFile(
             record.directoryHandle,
             {
               backupId: record.id,
@@ -2582,6 +2927,11 @@ function useAttachmentPreview({
           );
 
           if (!sourceResult.ok) {
+            if (sourceResult.error.code === "backup_password_required") {
+              commitPreviewState(requestId, { kind: "needs-password" });
+              encryptedSession.requireUnlock();
+              return;
+            }
             commitPreviewState(requestId, {
               kind: "error",
               message: formatWorkerResultError(sourceResult.error),
@@ -2694,6 +3044,7 @@ function useAttachmentPreview({
       attachment,
       canReadSource,
       commitPreviewState,
+      encryptedSession,
       getBackupClient,
       getMediaClient,
       record,
@@ -2715,7 +3066,12 @@ function useAttachmentPreview({
       return;
     }
     void loadPreview(false);
-  }, [attachment, attachment.mediaKind, loadPreview]);
+  }, [
+    attachment,
+    attachment.mediaKind,
+    encryptedSession.revision,
+    loadPreview,
+  ]);
 
   useEffect(
     () => () => {
@@ -2742,6 +3098,7 @@ function AttachmentPreview({
   record: RecentBackupRecord;
   runPreviewTask: RunPreviewTask;
 }) {
+  const encryptedSession = useContext(EncryptedSessionContext);
   const { previewState, loadPreview } = useAttachmentPreview({
     attachment,
     getBackupClient,
@@ -2790,6 +3147,19 @@ function AttachmentPreview({
         >
           Load preview
         </Button>
+      ) : previewState.kind === "needs-password" ? (
+        <Button
+          onClick={(event) => {
+            event.stopPropagation();
+            encryptedSession.focusUnlock();
+          }}
+          size="sm"
+          type="button"
+          variant="secondary"
+        >
+          <LockKeyhole aria-hidden="true" className="size-4" />
+          Unlock attachments
+        </Button>
       ) : previewState.kind === "unsupported" ? (
         <span className="text-caption text-text-secondary">{previewState.message}</span>
       ) : previewState.kind === "error" ? (
@@ -2834,6 +3204,7 @@ function AttachmentDetailCard({
   record: RecentBackupRecord;
   runPreviewTask: RunPreviewTask;
 }) {
+  const encryptedSession = useContext(EncryptedSessionContext);
   const [extractState, setExtractState] = useState<
     | { kind: "idle" }
     | { kind: "running" }
@@ -2870,6 +3241,15 @@ function AttachmentDetailCard({
         kind: "error",
         message: "Cannot extract this attachment because source provenance is incomplete.",
       });
+      return;
+    }
+
+    if (encryptedSession.isEncrypted && !encryptedSession.isUnlocked) {
+      setExtractStateIfMounted({
+        kind: "error",
+        message: "Unlock encrypted source attachments before extracting the original.",
+      });
+      encryptedSession.focusUnlock();
       return;
     }
 
@@ -2937,7 +3317,7 @@ function AttachmentDetailCard({
 
       try {
         const backupClient = getBackupClient();
-        const sourceResult = await backupClient.api.readUnencryptedSourceFile(
+        const sourceResult = await backupClient.api.readSourceFile(
           record.directoryHandle,
           {
             backupId: record.id,
@@ -2952,6 +3332,9 @@ function AttachmentDetailCard({
         );
 
         if (!sourceResult.ok) {
+          if (sourceResult.error.code === "backup_password_required") {
+            encryptedSession.requireUnlock();
+          }
           setExtractStateIfMounted({
             kind: "error",
             message: formatWorkerResultError(sourceResult.error),
@@ -3023,7 +3406,9 @@ function AttachmentDetailCard({
           <dd className="break-all font-mono text-text-secondary">{attachment.sourcePath}</dd>
           <dt className="text-text-tertiary">GUID</dt>
           <dd className="break-all font-mono text-text-secondary">{attachment.sourceGuid}</dd>
-          <dt className="text-text-tertiary">SHA-256</dt>
+          <dt className="text-text-tertiary">
+            {record.isEncrypted ? "Decrypted content SHA-256" : "SHA-256"}
+          </dt>
           <dd className="break-all font-mono text-text-secondary">{attachment.sha256}</dd>
         </dl>
       </div>

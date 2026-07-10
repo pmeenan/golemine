@@ -172,6 +172,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
   interrupted `ingesting` records are recovered as `needs-reingest` on read. Only a
   successful `ingested` status stamps the current `derivedDbVersion`; `ingesting` and
   `failed` preserve the prior version.
+  iOS IDs are normally UDIDs, so storage currently permits one active snapshot per
+  device (D-040). Before `recordDetection`, call `findReplacementCandidate`: the same
+  directory entry plus the same `lastBackupDate` is an ordinary reopen; a different
+  entry or date must show the Radix confirmation dialog. **Keep existing** performs no
+  write. **Replace backup** calls `recordDetection(..., { replaceExisting: true })`,
+  which wipes all old derived directories before publishing the new handle and resets
+  status to `not-ingested`. Never preserve `ingested` across a confirmed replacement.
 - M2 db-worker derived schema and ingest sink live in `src/workers/db/schema.ts` and
   `src/workers/db/ingest-sink.ts`. `prepareIngest` recreates the schema for
   `golemine.sqlite` in the per-backup OPFS `opfs-sahpool` directory under
@@ -216,15 +223,16 @@ metal and the ore it surfaces; no clay/terracotta styling).
   string-matches raw service names), and `src/workers/shared/retry.ts`
   (`retryAsyncOperation`, used to retry transient `installOpfsSAHPoolVfs`
   failures during route switches).
-- M2 unencrypted iOS ingest is exposed for production as
-  `BackupWorkerApi.ingestUnencryptedBackupToDb(root, request, progress?)` and
-  implemented in `src/workers/backup/ios-ingest.ts` plus the backup-worker db-worker
-  bridge. The older `ingestUnencryptedBackup(root, request, sink, progress?)` remains
-  as a test seam. The route uses Web Locks to prevent same-backup concurrent rebuilds
+- Production iOS ingest is provider-neutral:
+  `BackupWorkerApi.ingestBackupToDb(root, request, credentials?, progress?)` in
+  `src/workers/backup/ios-ingest.ts` plus the backup-worker/db-worker bridge. The
+  older `ingestUnencryptedBackup*` methods remain compatibility/test seams. The route
+  uses Web Locks to prevent same-backup concurrent rebuilds
   and must not relay ingest batches through React. Ingest emits a `prepare` progress
-  phase before the destructive db-worker `prepareIngest` call; the route treats the
-  first non-`starting` phase as "the derived DB is about to be (or has been)
-  modified", so pre-prepare failures never downgrade a previously `ingested` record
+  phase before the destructive db-worker `prepareIngest` call; the route treats only
+  that awaited `prepare` event as "the derived DB is about to be modified", so
+  detection/unlock/Manifest progress and other pre-prepare failures never downgrade a
+  previously `ingested` record
   while prepare/later failures do — with one exception: `WorkerErrorCode`
   `derived_db_pool_unavailable` (prepare could not acquire/open the per-backup SAH
   pool, e.g. another tab is browsing the same backup) guarantees the derived DB was
@@ -235,8 +243,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `WorkerErrorCode` `backup_manifest_unreadable`
   means a required database's MBFile record could not be read; it is distinct from
   `backup_file_missing` (entry absent from Manifest.db). Ingest validates
-  detection/encryption, opens `Manifest.db` with root `Manifest.db-wal`/`-shm`
-  sidecars applied when present, reads only the needed
+  detection/encryption, opens unencrypted `Manifest.db` with root
+  `Manifest.db-wal`/`-shm` sidecars applied when present (encrypted Manifest sidecars
+  are ignored because no independent root-sidecar keys exist), reads only the needed
   sms/contact/contact-image databases and sidecars, normalizes
   Messages/contacts/attachments/tapbacks/avatars (resolved participants retain both
   full contact names and contact first names; group `displayName` is emitted only for
@@ -266,6 +275,77 @@ metal and the ore it surfaces; no clay/terracotta styling).
   by actual `File.size`, and capped by a per-ingest eager hash budget; larger,
   unknown-size, deceptive-size, or budget-exhausted media keeps path/domain/GUID
   provenance and is hashed later on demand by extraction/report code.
+- M5 encrypted sessions live in `src/workers/backup/encrypted-session.ts` and the
+  dependency-free WebCrypto modules under `src/workers/backup/crypto/` (D-038).
+  `unlockBackupSession` accepts a password only on that RPC, parses bounded keybag TLV,
+  runs the modern two-stage or legacy PBKDF2 KDF, unwraps AES-KW class keys, decrypts
+  Manifest.db, and retains only mutable class keys plus its transient Manifest reader.
+  Clear the structured-cloned credential field/drop local string references immediately
+  after unlock/open (JS strings cannot be zeroized); continue clearing all mutable
+  password/key byte arrays. In-memory bounds (D-039): the encrypted Manifest.db cap is
+  512 MiB and each logical source main/WAL/SHM set has a 1 GiB aggregate budget
+  (unencrypted ingest included). These are sized against sqlite-wasm's hard 2 GiB
+  imported-memory maximum, which hosts the transient Manifest copy plus every
+  concurrently open source-set copy; do not raise them without re-deriving that budget
+  (streaming transient-VFS/OPFS import remains the real fix, D-038/D-039). Keep
+  rejection ahead of `arrayBuffer()`/decryption, and keep the REQUIRED messages set's
+  budget validated from Manifest metadata/stored sizes BEFORE the destructive
+  `prepare` boundary (`assertRequiredSourceDatabaseSetWithinBudget`) — a post-prepare
+  budget failure would wipe a previously good derived DB. Read-time budget charging
+  uses plaintext byte lengths (ciphertext may carry up to 16 PKCS#7 slop bytes).
+  Unencrypted root Manifest.db/WAL/SHM still uses the legacy 1 GiB per-file bounds;
+  Plan.md tracks aggregate/streaming recovery hardening because all three buffers can
+  otherwise coexist.
+  Explicit lock, different backup id/root `isSameEntry` failure, route unmount, or
+  worker termination destroys/closes the session; `lockBackupSession` goes through the
+  single `resetBackupSourceCaches()` seam in attachment-read (manifest cache + session
+  in tandem), and the session drains tracked reads before closing its Manifest reader.
+  Supplying a password to `unlockBackupSession` always verifies it — an active
+  matching session is reused only by password-less callers; a supplied password
+  triggers a full replace-unlock so a wrong password can never report success.
+  Corrupt sibling keybag class keys are skipped and reported
+  (`UnlockedBackupKeybag.warnings`), not fatal; wrong password remains the
+  all-candidates-fail signal. Never move passwords or raw keys to
+  React, recents, OPFS, logs, errors, or the normalized model. Overview ingest uses a
+  separate one-shot worker; messages deliberately prompts again to unlock original
+  attachments for its route-scoped worker. Password entry in both routes goes through
+  the shared `src/components/backup/backup-password-form.tsx`
+  (`useBackupPasswordForm` + `BackupPasswordForm`): uncontrolled input, synchronous
+  read-then-clear around dispatch, refocus on `backup_password_incorrect`, and the
+  single persistence disclosure (Design.md §7, D-038) live there — do not hand-roll
+  another password field. Wrong password is
+  `backup_password_incorrect` and recoverable; malformed/unsupported crypto is
+  distinct and remains pre-prepare. Encrypted MBFiles require `Size` and
+  `EncryptionKey`; validate block/source/plaintext bounds before hashing/allocation,
+  decrypt `File` slices through `decryptFileChunks`, and preserve plaintext
+  `sha256`/`bytes` plus ciphertext `sourceSha256`/`sourceBytes`/`isEncrypted` in
+  source-read responses and Manifest/database-input ingest provenance. The ciphertext
+  `sourceSha256` is opt-in (`includeSourceSha256`) because it costs a second full read:
+  database provenance and `readSourceFile` RPC responses request it; eager attachment
+  hashing does not. Normalized
+  attachment rows intentionally keep the optional plaintext hash for preview
+  verification; report export gets both labeled attachment hashes through an exact-path
+  `readSourceFile`. Exact ciphertext hashing is a scoped one-shot WebCrypto read
+  because no incremental digest exists; the final plaintext is still materialized by
+  the current Uint8Array RPC. Manifest decryption and file decryption share the one
+  chunked CBC generator (`decryptAes256CbcBlobChunks`, reusable ciphertext scratch,
+  borrowed subarray chunks); there is no one-shot whole-buffer decrypt anymore.
+  Per-file ciphertext may contain a block-aligned stored tail more than 16 bytes beyond
+  authoritative `MBFile.Size`; decrypt and truncate to `Size` rather than rejecting the
+  delta. Sparse files may instead declare `Size` larger than the encrypted materialized
+  prefix; leave the bounded destination's remaining bytes zero-filled. Preserve
+  ciphertext alignment and enforce caller caps independently against stored and logical
+  sizes before reading/allocation.
+  The deterministic encrypted fixture and vectors live
+  alongside the existing mini backup under `e2e/fixtures/`; `e2e/m5.spec.ts` locks the
+  wrong-password, no-secret-persistence, fresh-session unlock, and decrypted-preview
+  flow.
+  The messages success strip's **Lock attachments** action must await session
+  invalidation/active-read drain, restore and focus the shared password form, and fall
+  back to terminating the route worker if the lock RPC fails.
+  Route cleanup sets `routeActiveRef` false before releasing clients; preserve the
+  post-permission/pre-client and post-RPC guards so a deferred Chrome permission prompt
+  cannot create or strand an encrypted worker after unmount.
 - M4 unified browse/search is implemented in `src/features/m3/messages-route.tsx` and
   covered by `e2e/m3.spec.ts`; there is no standalone search route. It requires an
   `ingested` recent, uses `react-virtuoso` for conversation/timeline/result lists,
@@ -361,12 +441,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
   use a per-conversation correlated
   LIMIT-1 lookup (not ROW_NUMBER over all messages) — preserve its ordering
   `COALESCE(sent_at_utc, '') DESC, source_rowid DESC, id DESC` when touching it.
-- M3 attachment source reads use
-  `BackupWorkerApi.readUnencryptedSourceFile(root, request, progress?)` in
-  `src/workers/backup/attachment-read.ts`. It revalidates the unencrypted backup,
-  applies root Manifest WAL sidecars, performs exact source domain/path lookup, reads
-  through read-only source wrappers, enforces caller byte caps, and verifies optional
-  expected hashes. Byte-bearing backup/media worker responses and media-worker image
+- Attachment source reads use provider-neutral
+  `BackupWorkerApi.readSourceFile(root, request, progress?)` in
+  `src/workers/backup/attachment-read.ts` (the old unencrypted method is a compatibility
+  seam). It revalidates backup/root identity, applies unencrypted root Manifest WAL
+  sidecars or requires the matching encrypted session, performs exact source
+  domain/path lookup, reads through read-only wrappers, enforces caller byte caps, and
+  verifies optional plaintext hashes. Byte-bearing backup/media worker responses and media-worker image
   requests use Comlink `transfer()` for their `Uint8Array` buffers. Preview,
   extraction, and future report hashing should use this worker API; do not pass raw
   writable-capable handles into provider code. The backup worker memoizes the
@@ -414,5 +495,11 @@ metal and the ore it surfaces; no clay/terracotta styling).
   salts/checksums, a WAL-only message/contact, a tapback, an attachment file, a
   prefixed valid PNG avatar, and a malformed avatar warning case. The generator may
   print Node's experimental warning for `node:sqlite`; that is fixture-build-time only.
+  M5 adds `generated/ios-mini-encrypted-backup/` from the same plaintext sources with
+  NSKeyedArchiver-shaped MBFile records, two passcode-wrapped class records,
+  deterministic independent Manifest/file keys, PKCS#7-encrypted databases/WALs/media,
+  exported production-sized PBKDF2/AES-KW vectors, and generator decrypt/byte-compare
+  self-checks. Default fixture DPIC is CI-accelerated; run the 10,000,000-round vector
+  with `GOLEMINE_RUN_SLOW_KDF=1`.
 - Crypto: WebCrypto only (PBKDF2, AES-KW, AES-CBC, SHA-256); passwords/keys are
   session memory only, never persisted.

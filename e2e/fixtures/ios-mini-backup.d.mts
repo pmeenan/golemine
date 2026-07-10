@@ -2,6 +2,7 @@
 // check a .d.mts against its .mjs implementation, so keep the two files in
 // sync when adding or renaming exports.
 export declare const iosMiniBackupUdid: string;
+export declare const iosMiniEncryptedBackupUdid: string;
 
 export declare const iosMiniBackupDevice: {
   udid: string;
@@ -13,6 +14,8 @@ export declare const iosMiniBackupDevice: {
   phoneNumber: string;
   lastBackupDate: string;
 };
+
+export declare const iosMiniEncryptedBackupDevice: typeof iosMiniBackupDevice;
 
 export declare const iosMiniBackupExpectedMetadata: {
   id: string;
@@ -53,6 +56,74 @@ export interface IosMiniBackupExpectedAttachmentSourceFile
   transferName: string;
   mimeType: string;
 }
+
+export declare const iosMiniEncryptedBackupPassword: string;
+
+export interface IosMiniEncryptedKeyVector {
+  keyHex: string;
+  wrappedKeyHex: string;
+}
+
+export declare const iosMiniEncryptedBackupCryptoVectors: {
+  protectionClass: number;
+  password: string;
+  keybag: {
+    version: number;
+    type: number;
+    wrap: number;
+    uuidHex: string;
+    hmckHex: string;
+    saltHex: string;
+    iterations: number;
+    doubleProtectionWrapType: number;
+    doubleProtectionIterations: number;
+    doubleProtectionSaltHex: string;
+  };
+  intermediateKeyHex: string;
+  passcodeKeyHex: string;
+  realisticKdf: {
+    iterations: number;
+    doubleProtectionIterations: number;
+    intermediateKeyHex: string;
+    passcodeKeyHex: string;
+  };
+  secondaryClassKey: IosMiniEncryptedKeyVector & {
+    uuidHex: string;
+    class: number;
+    wrap: number;
+    keyType: number;
+  };
+  classKey: IosMiniEncryptedKeyVector & {
+    uuidHex: string;
+    class: number;
+    wrap: number;
+    keyType: number;
+  };
+  manifestKey: IosMiniEncryptedKeyVector;
+  fileKeys: {
+    smsDb: IosMiniEncryptedKeyVector;
+    smsDbWal: IosMiniEncryptedKeyVector;
+    addressBookDb: IosMiniEncryptedKeyVector;
+    addressBookDbWal: IosMiniEncryptedKeyVector;
+    addressBookImagesDb: IosMiniEncryptedKeyVector;
+    attachment: IosMiniEncryptedKeyVector;
+  };
+};
+
+export declare const iosMiniEncryptedBackupExpectedMetadata: Omit<
+  typeof iosMiniBackupExpectedMetadata,
+  "id" | "isEncrypted"
+> & {
+  id: "ios-mini-encrypted-backup";
+  isEncrypted: true;
+  crypto: {
+    protectionClass: number;
+    password: string;
+    manifestCipher: string;
+    perFileCipher: string;
+    keyWrap: string;
+  };
+};
 
 export declare const iosMiniBackupExpectedContacts: readonly {
   rowId: number;
@@ -126,6 +197,13 @@ export declare function plistDict(body: string): string;
 
 export declare function iosMiniBackupManifestPlist(): string;
 
+export declare function iosMiniEncryptedBackupManifestPlist(input: {
+  backupKeyBagBase64: string;
+  manifestKeyBase64: string;
+}): string;
+
 export declare function iosMiniBackupStatusPlist(): string;
 
 export declare function iosMiniBackupInfoPlist(): string;
+
+export declare function iosMiniEncryptedBackupInfoPlist(): string;

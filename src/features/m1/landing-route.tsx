@@ -20,6 +20,7 @@ import {
 } from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
 import { Tooltip, TooltipProvider } from "../../components/ui/tooltip";
 import { cn } from "../../lib/cn";
 import { firstDroppedDirectoryHandle } from "../../lib/drag-drop";
@@ -34,6 +35,7 @@ import {
 } from "../../lib/worker-client";
 import {
   formatWorkerErrorPayload,
+  type BackupDetectionResult,
   type WorkerProgressEvent,
 } from "../../lib/worker-types";
 import { WorkerDiagnostics } from "../m0/worker-diagnostics";
@@ -44,6 +46,13 @@ type OpeningStatus =
   | { kind: "success"; label: string }
   | { kind: "error"; label: string };
 
+interface ReplacementPromptState {
+  detection: BackupDetectionResult;
+  existing: RecentBackupRecord;
+}
+
+type ReplacementDecision = "keep" | "replace" | "unmounted";
+
 export function LandingRoute() {
   const navigate = useNavigate();
   const recentsStore = useMemo(() => createBackupRecentsStore(), []);
@@ -51,6 +60,12 @@ export function LandingRoute() {
   const [openingStatus, setOpeningStatus] = useState<OpeningStatus>({ kind: "idle" });
   const [isDragging, setIsDragging] = useState(false);
   const [isLoadingRecents, setIsLoadingRecents] = useState(true);
+  const [replacementPrompt, setReplacementPrompt] =
+    useState<ReplacementPromptState | null>(null);
+  const replacementResolverRef = useRef<
+    ((decision: ReplacementDecision) => void) | null
+  >(null);
+  const routeActiveRef = useRef(true);
 
   const reportError = useCallback((cause: unknown) => {
     setOpeningStatus({
@@ -73,6 +88,42 @@ export function LandingRoute() {
   useEffect(() => {
     void refreshRecents();
   }, [refreshRecents]);
+
+  useEffect(() => {
+    routeActiveRef.current = true;
+
+    return () => {
+      routeActiveRef.current = false;
+      replacementResolverRef.current?.("unmounted");
+      replacementResolverRef.current = null;
+    };
+  }, []);
+
+  const resolveReplacementPrompt = useCallback((decision: "keep" | "replace") => {
+    const resolve = replacementResolverRef.current;
+
+    replacementResolverRef.current = null;
+    setReplacementPrompt(null);
+    resolve?.(decision);
+  }, []);
+
+  const requestReplacementConfirmation = useCallback(
+    (
+      existing: RecentBackupRecord,
+      detection: BackupDetectionResult,
+    ): Promise<ReplacementDecision> =>
+      new Promise((resolve) => {
+        if (!routeActiveRef.current) {
+          resolve("unmounted");
+          return;
+        }
+
+        replacementResolverRef.current?.("keep");
+        replacementResolverRef.current = resolve;
+        setReplacementPrompt({ detection, existing });
+      }),
+    [],
+  );
 
   // Serializes detection runs: the drop zone and per-row Open buttons stay
   // clickable while a detection is in flight, and two interleaved runs could
@@ -113,8 +164,50 @@ export function LandingRoute() {
           return;
         }
 
+        if (!routeActiveRef.current) {
+          return;
+        }
+
+        const replacementCandidate =
+          await recentsStore.findReplacementCandidate(result.value, handle);
+        let replaceExisting = false;
+
+        if (replacementCandidate !== undefined) {
+          setOpeningStatus({
+            kind: "running",
+            label: "Waiting for backup replacement confirmation.",
+          });
+          const replacementDecision = await requestReplacementConfirmation(
+            replacementCandidate,
+            result.value,
+          );
+
+          if (replacementDecision === "unmounted") {
+            return;
+          }
+
+          replaceExisting = replacementDecision === "replace";
+
+          if (!replaceExisting) {
+            setOpeningStatus({
+              kind: "success",
+              label: `Kept the existing backup for ${
+                replacementCandidate.deviceInfo.name ??
+                replacementCandidate.friendlyName
+              }. The selected folder was not opened.`,
+            });
+            return;
+          }
+
+          setOpeningStatus({
+            kind: "running",
+            label: "Removing the existing local ingest.",
+          });
+        }
+
         const recent = await recentsStore.recordDetection(result.value, handle, {
           previousRecordId,
+          replaceExisting,
         });
 
         setOpeningStatus({
@@ -129,7 +222,12 @@ export function LandingRoute() {
         isOpeningRef.current = false;
       }
     },
-    [navigate, recentsStore, reportError],
+    [
+      navigate,
+      recentsStore,
+      reportError,
+      requestReplacementConfirmation,
+    ],
   );
 
   const pickBackupFolder = useCallback(async () => {
@@ -328,7 +426,66 @@ export function LandingRoute() {
       </Panel>
 
       <WorkerDiagnostics />
+
+      <BackupReplacementDialog
+        onCancel={() => {
+          resolveReplacementPrompt("keep");
+        }}
+        onConfirm={() => {
+          resolveReplacementPrompt("replace");
+        }}
+        prompt={replacementPrompt}
+      />
     </PageShell>
+  );
+}
+
+function BackupReplacementDialog({
+  onCancel,
+  onConfirm,
+  prompt,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+  prompt: ReplacementPromptState | null;
+}) {
+  const deviceName =
+    prompt?.existing.deviceInfo.name ?? prompt?.existing.friendlyName;
+
+  return (
+    <ConfirmationDialog
+      cancelLabel="Keep existing"
+      confirmLabel="Replace backup"
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+      open={prompt !== null}
+      title="Replace existing backup?"
+    >
+      {prompt === null ? null : (
+        <>
+          <p>
+            A backup for {deviceName} is already loaded. Replacing it permanently
+            removes the existing local ingest and generated previews, then opens
+            the selected backup ready for a clean ingest. Source backup folders
+            are not modified.
+          </p>
+          <dl className="mt-4 grid gap-3 rounded-md border border-border bg-surface-sunken p-3 text-caption">
+            <div>
+              <dt className="text-text-secondary">Loaded source</dt>
+              <dd className="mt-1 break-all font-mono text-text">
+                {prompt.existing.directoryHandle.name}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-text-secondary">Selected source</dt>
+              <dd className="mt-1 break-all font-mono text-text">
+                {prompt.detection.sourceFolderName}
+              </dd>
+            </div>
+          </dl>
+        </>
+      )}
+    </ConfirmationDialog>
   );
 }
 

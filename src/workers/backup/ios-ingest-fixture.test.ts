@@ -2,13 +2,18 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { derivedDbVersion } from "../../lib/constants";
 import {
   type IngestSinkApi,
+  type IngestBatch,
   workerOk,
 } from "../../lib/worker-types";
 import {
+  iosMiniEncryptedBackupDevice,
+  iosMiniEncryptedBackupExpectedMetadata,
+  iosMiniEncryptedBackupPassword,
+  iosMiniEncryptedBackupUdid,
   iosMiniBackupExpectedAvatarWarnings,
   iosMiniBackupExpectedMessages,
   iosMiniBackupExpectedMetadata,
@@ -18,7 +23,11 @@ import {
   ManifestDbReader,
   readSourceFileBytes,
 } from "./manifest-db";
-import { ingestUnencryptedBackupDirectory } from "./ios-ingest";
+import {
+  ingestBackupDirectory,
+  ingestUnencryptedBackupDirectory,
+} from "./ios-ingest";
+import { resetEncryptedBackupSession } from "./encrypted-session";
 import { normalizeIosMessages } from "./ios-normalize";
 import type {
   ReadonlySourceDirectoryHandle,
@@ -31,6 +40,15 @@ const fixtureRoot = path.join(
   "../../../e2e/fixtures/generated/ios-mini-backup",
   iosMiniBackupUdid,
 );
+const encryptedFixtureRoot = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../e2e/fixtures/generated/ios-mini-encrypted-backup",
+  iosMiniEncryptedBackupUdid,
+);
+
+afterEach(async () => {
+  await resetEncryptedBackupSession();
+});
 
 describe("iOS M2 ingest fixture", () => {
   it("reads Manifest.db file records and MBFile metadata", async () => {
@@ -200,7 +218,175 @@ describe("iOS M2 ingest fixture", () => {
     expect(result.error.code).toBe("backup_invalid");
     expect(prepareIngest).not.toHaveBeenCalled();
   });
+
+  it("rejects a wrong encrypted-backup password before prepare", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const { sink, prepareIngest } = createCollectingSink();
+    const phases: string[] = [];
+    const result = await ingestBackupDirectory(
+      root as unknown as FileSystemDirectoryHandle,
+      encryptedIngestRequest(),
+      sink,
+      { password: "incorrect-password" },
+      (event) => {
+        phases.push(event.phase);
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("Expected wrong encrypted backup password to fail.");
+    }
+
+    expect(result.error).toMatchObject({
+      code: "backup_password_incorrect",
+      recoverable: true,
+    });
+    expect(prepareIngest).not.toHaveBeenCalled();
+    expect(phases).not.toContain("prepare");
+  });
+
+  it("fails an over-budget required source set before preparing the db sink", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const { sink, prepareIngest } = createCollectingSink();
+    const phases: string[] = [];
+    const result = await ingestBackupDirectory(
+      root as unknown as FileSystemDirectoryHandle,
+      encryptedIngestRequest(),
+      sink,
+      { password: iosMiniEncryptedBackupPassword },
+      (event) => {
+        phases.push(event.phase);
+      },
+      // Far below the fixture sms.db set: the budget must fail BEFORE the
+      // destructive prepare boundary, never after it.
+      { sourceDatabaseBudgetBytes: 16 },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("Expected the over-budget ingest to fail.");
+    }
+    expect(result.error.code).toBe("backup_ingest_failed");
+    expect(prepareIngest).not.toHaveBeenCalled();
+    expect(phases).not.toContain("prepare");
+  });
+
+  it("decrypts and ingests the encrypted fixture before streaming normalized batches", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const credentials = { password: iosMiniEncryptedBackupPassword };
+    let passwordAtPrepare: string | undefined;
+    const { sink, batches, prepareIngest } = createCollectingSink(() => {
+      passwordAtPrepare = credentials.password;
+    });
+    const phases: string[] = [];
+    const result = await ingestBackupDirectory(
+      root as unknown as FileSystemDirectoryHandle,
+      encryptedIngestRequest(),
+      sink,
+      credentials,
+      (event) => {
+        phases.push(event.phase);
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(`${result.error.code}: ${result.error.message}`);
+    }
+
+    expect(prepareIngest).toHaveBeenCalledTimes(1);
+    expect(credentials.password).toBe("");
+    expect(passwordAtPrepare).toBe("");
+    expect(phases.indexOf("prepare")).toBeGreaterThan(
+      Math.max(phases.indexOf("unlocking"), phases.indexOf("decrypting")),
+    );
+    expect(result.value.counts).toMatchObject({
+      messages: iosMiniEncryptedBackupExpectedMetadata.counts.normalizedMessages,
+      conversations: iosMiniEncryptedBackupExpectedMetadata.counts.conversations,
+      attachments: iosMiniEncryptedBackupExpectedMetadata.counts.attachments,
+      reactions: iosMiniEncryptedBackupExpectedMetadata.counts.reactions,
+    });
+    const manifestSource = result.value.sourceFiles.find(
+      (source) => source.role === "manifest-db",
+    );
+    const messagesSource = result.value.sourceFiles.find(
+      (source) => source.role === "messages-db",
+    );
+    expect(manifestSource?.isEncrypted).toBe(true);
+    expect(manifestSource?.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(messagesSource?.isEncrypted).toBe(true);
+    expect(messagesSource?.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    const attachments = batches
+      .filter((batch): batch is Extract<IngestBatch, { kind: "attachments" }> =>
+        batch.kind === "attachments",
+      )
+      .flatMap((batch) => batch.items);
+    expect(attachments[0]?.sha256).toMatch(/^[a-f0-9]{64}$/u);
+  });
 });
+
+function encryptedIngestRequest() {
+  return {
+    backupId: iosMiniEncryptedBackupUdid,
+    provider: "ios-itunes" as const,
+    sourceKind: "itunes-finder" as const,
+    sourceFolderName: iosMiniEncryptedBackupUdid,
+    friendlyName: iosMiniEncryptedBackupDevice.displayName,
+    deviceInfo: {
+      udid: iosMiniEncryptedBackupUdid,
+      name: iosMiniEncryptedBackupDevice.deviceName,
+      model: iosMiniEncryptedBackupDevice.productType,
+      osVersion: iosMiniEncryptedBackupDevice.productVersion,
+      serialNumber: iosMiniEncryptedBackupDevice.serialNumber,
+      phoneNumber: iosMiniEncryptedBackupDevice.phoneNumber,
+    },
+    isEncrypted: true,
+    derivedDbVersion,
+  };
+}
+
+function createCollectingSink(onPrepare?: () => void) {
+  const batches: IngestBatch[] = [];
+  const prepareIngest = vi.fn<IngestSinkApi["prepareIngest"]>((request) => {
+    onPrepare?.();
+    return Promise.resolve(
+      workerOk({ backupId: request.backupId, kind: "prepare", accepted: 0 }),
+    );
+  });
+  const sink: IngestSinkApi = {
+    prepareIngest,
+    writeIngestBatch: (batch) => {
+      batches.push(batch);
+      return Promise.resolve(
+        workerOk({
+          backupId: batch.backupId,
+          kind: batch.kind,
+          accepted: batch.items.length,
+        }),
+      );
+    },
+    finalizeIngest: (report) =>
+      Promise.resolve(
+        workerOk({
+          ...report,
+          databaseName: "golemine.sqlite",
+          derivedDbVersion,
+        }),
+      ),
+  };
+
+  return { sink, batches, prepareIngest };
+}
 
 async function openFixtureDatabase(
   root: ReadonlySourceDirectoryHandle,

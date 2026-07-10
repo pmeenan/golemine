@@ -38,8 +38,8 @@ export async function openSourceSqliteDatabase(input: {
   main: Uint8Array;
   wal?: Uint8Array;
   shm?: Uint8Array;
-}): Promise<SourceSqliteDatabase> {
-  const sqlite3 = await getSqlite();
+}, loadSqlite: () => Promise<Sqlite3Api> = getSqlite): Promise<SourceSqliteDatabase> {
+  const sqlite3 = await loadSqlite();
   const databaseName = makeTransientDatabaseName(input.label);
   const details = sourceOpenDetails(input, databaseName);
 
@@ -59,48 +59,58 @@ export async function openSourceSqliteDatabase(input: {
   }
 
   try {
-    sqlite3.capi.sqlite3_js_posix_create_file(databaseName, mainBytes);
-  } catch (cause) {
-    throw new SourceSqliteOpenError(
-      sourceSqliteOpenErrorMessage(
-        `Could not copy source SQLite database "${input.label}" into the transient sqlite VFS.`,
-        cause,
-      ),
-      details,
-      cause,
-    );
-  }
-
-  // Source bytes are copied into sqlite-wasm's transient in-worker VFS first.
-  // WAL frames are applied to that copy above; the user's backup folder
-  // remains read-only and SQLite opens a normal reconstructed database.
-  let db: SqliteDatabase;
-
-  try {
-    db = new sqlite3.oo1.DB(databaseName, "r");
-  } catch (cause) {
-    throw new SourceSqliteOpenError(
-      sourceSqliteOpenErrorMessage(
-        `Could not open source SQLite database "${input.label}" from the transient sqlite VFS.`,
-        cause,
-      ),
-      details,
-      cause,
-    );
-  }
-
-  return {
-    db,
-    databaseName,
-    close: () => {
-      db.close();
-      // sqlite3_js_posix_create_file writes a full copy of the source bytes
-      // into the wasm VFS; closing the handle does not remove it. Without an
-      // explicit unlink every open leaks that copy in wasm memory for the
-      // worker's lifetime.
+    try {
+      sqlite3.capi.sqlite3_js_posix_create_file(databaseName, mainBytes);
+    } catch (cause) {
       deleteTransientDatabaseFile(sqlite3, databaseName);
-    },
-  };
+      throw new SourceSqliteOpenError(
+        sourceSqliteOpenErrorMessage(
+          `Could not copy source SQLite database "${input.label}" into the transient sqlite VFS.`,
+          cause,
+        ),
+        details,
+        cause,
+      );
+    }
+
+    // Source bytes are copied into sqlite-wasm's transient in-worker VFS first.
+    // WAL frames are applied to that copy above; the user's backup folder
+    // remains read-only and SQLite opens a normal reconstructed database.
+    let db: SqliteDatabase;
+
+    try {
+      db = new sqlite3.oo1.DB(databaseName, "r");
+    } catch (cause) {
+      deleteTransientDatabaseFile(sqlite3, databaseName);
+      throw new SourceSqliteOpenError(
+        sourceSqliteOpenErrorMessage(
+          `Could not open source SQLite database "${input.label}" from the transient sqlite VFS.`,
+          cause,
+        ),
+        details,
+        cause,
+      );
+    }
+
+    return {
+      db,
+      databaseName,
+      close: () => {
+        try {
+          db.close();
+        } finally {
+          // sqlite3_js_posix_create_file writes a full copy of the source bytes
+          // into the wasm VFS; closing the handle does not remove it. Unlink
+          // even when close throws so decrypted transient files never linger.
+          deleteTransientDatabaseFile(sqlite3, databaseName);
+        }
+      },
+    };
+  } finally {
+    // prepareSourceSqliteBytesForReadOnlyOpen always returns an owned copy.
+    // sqlite-wasm has copied it into the transient VFS by the success path.
+    mainBytes.fill(0);
+  }
 }
 
 function deleteTransientDatabaseFile(

@@ -34,6 +34,23 @@ export function asReadonlySourceDirectory(
   };
 }
 
+/**
+ * Fail-closed directory identity check shared by the manifest-reader cache and
+ * the encrypted-session cache: if identity cannot be verified, treat the
+ * handles as different so callers rebuild from the supplied root rather than
+ * reuse state that may describe another folder.
+ */
+export async function isSameDirectoryHandle(
+  cachedRoot: FileSystemDirectoryHandle,
+  suppliedRoot: FileSystemDirectoryHandle,
+): Promise<boolean> {
+  try {
+    return await cachedRoot.isSameEntry(suppliedRoot);
+  } catch {
+    return false;
+  }
+}
+
 function asReadonlySourceFile(handle: FileSystemFileHandle): ReadonlySourceFileHandle {
   return {
     kind: "file",

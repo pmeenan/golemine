@@ -26,6 +26,28 @@
         "Manifest.db is a real SQLite database with Files rows for sms.db, sms.db-wal, AddressBook.sqlitedb, AddressBook.sqlitedb-wal, AddressBookImages.sqlitedb, and one MediaDomain attachment path.",
         "sms.db, AddressBook.sqlitedb, and AddressBookImages.sqlitedb are real SQLite databases containing synthetic M2 ingest data, including typedstream message text, WAL-only rows, a tapback reaction row, attachment metadata, contact handles, a prefixed thumbnail blob for image magic sniffing, and a malformed avatar blob for warning coverage."
       ]
+    },
+    {
+      "id": "ios-mini-encrypted-backup",
+      "provider": "ios-itunes",
+      "path": "generated/ios-mini-encrypted-backup/00008030-001C195E0A88805E",
+      "description": "Synthetic encrypted iPhone Finder/iTunes backup root for M5 password, ingest, browse, and attachment-decryption flows.",
+      "device": {
+        "displayName": "Mina's encrypted iPhone backup",
+        "deviceName": "Mina's encrypted iPhone",
+        "productType": "iPhone15,2",
+        "productVersion": "18.5",
+        "serialNumber": "C39SYNTHM5001",
+        "udid": "00008030-001C195E0A88805E",
+        "phoneNumber": "+15555550123"
+      },
+      "provenance": [
+        "Generated entirely from the same static synthetic messages, contacts, SQLite databases, WAL sidecars, avatar blobs, and PNG attachment as ios-mini-backup; contains no real personal data and no copied backup content.",
+        "Manifest.plist carries a deterministic BackupKeyBag with two passcode-wrapped class records plus a class-4 ManifestKey. The fixed synthetic password and independent PBKDF2/AES-KW vectors are exported by ios-mini-backup.mjs.",
+        "Default CI uses the real two-stage KDF structure and a realistic 10,000-round SHA-1 stage, while reducing the expensive SHA-256 stage to 100,000 rounds. A separate exported 10,000,000-round vector can run on demand with GOLEMINE_RUN_SLOW_KDF=1.",
+        "Manifest.db and every source database, WAL sidecar, contact-image database, and attachment are independently AES-256-CBC encrypted with a zero IV and PKCS#7 padding. MBFile.Size remains authoritative, including for block-aligned plaintext that receives a full 16-byte padding block.",
+        "Each encrypted Files.file value is an NSKeyedArchiver-shaped MBFile: $top.root is a UID into $objects, and EncryptionKey is a UID to a NSMutableData object carrying NS.data. The 44-byte value is a little-endian class number followed by a 40-byte RFC 3394 AES-KW key. The generator unwraps, decrypts, validates padding, and byte-compares every payload; focused parser and ingest tests validate the archived metadata indirection."
+      ]
     }
   ]
 }

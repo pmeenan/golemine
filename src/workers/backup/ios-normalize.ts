@@ -19,6 +19,8 @@ import {
   SourceFileTooLargeError,
   type ManifestDbReader,
   type ManifestFileRecord,
+  type ReadSourceFileBytesOptions,
+  type SourceFileBytes,
 } from "./manifest-db";
 import { bytesStartWith } from "../shared/binary";
 import {
@@ -61,6 +63,11 @@ export interface IosNormalizeInput {
   contactImagesDb?: SqliteDatabase;
   manifest: ManifestDbReader;
   root: ReadonlySourceDirectoryHandle;
+  /** Provider/session-aware plaintext reader (encrypted ingest injects one). */
+  readSourceFile?: (
+    record: ManifestFileRecord,
+    options?: ReadSourceFileBytesOptions,
+  ) => Promise<SourceFileBytes>;
   initialWarnings?: IngestWarning[];
   progress?: WorkerProgressCallback;
 }
@@ -230,12 +237,13 @@ export async function normalizeIosMessages(
     warnings,
   );
   const attachments = await buildAttachments(
-    input.root,
     input.manifest,
     input.smsDb,
     messageIdByRowId,
     warnings,
     input.progress,
+    input.readSourceFile ??
+      ((record, options) => readSourceFileBytes(input.root, record, options)),
   );
 
   return {
@@ -755,12 +763,15 @@ function buildReactions(
 }
 
 async function buildAttachments(
-  root: ReadonlySourceDirectoryHandle,
   manifest: ManifestDbReader,
   db: SqliteDatabase,
   messageIdByRowId: ReadonlyMap<number, string>,
   warnings: IngestWarning[],
   progress: WorkerProgressCallback | undefined,
+  readSourceFile: (
+    record: ManifestFileRecord,
+    options?: ReadSourceFileBytesOptions,
+  ) => Promise<SourceFileBytes>,
 ): Promise<NormalizedAttachment[]> {
   if (!sqliteTableExists(db, "attachment") || !sqliteTableExists(db, "message_attachment_join")) {
     return [];
@@ -823,14 +834,20 @@ async function buildAttachments(
               source: normalizedPath,
             });
           } else if (shouldHashAttachmentSource(manifestRecord, remainingAttachmentHashBytes)) {
-            const source = await readSourceFileBytes(root, manifestRecord, {
+            const source = await readSourceFile(manifestRecord, {
               maxReadBytes: Math.min(
                 maxInlineAttachmentHashBytes,
                 remainingAttachmentHashBytes,
               ),
             });
-            sourceSha256 = source.sha256;
-            remainingAttachmentHashBytes -= source.sourceByteLength;
+            try {
+              sourceSha256 = source.sha256;
+              remainingAttachmentHashBytes -= source.sourceByteLength;
+            } finally {
+              // Eager ingest needs only the digest/provenance. Do not retain
+              // decrypted attachment content until worker GC.
+              source.bytes.fill(0);
+            }
           } else {
             warnings.push({
               code: "attachment-source-hash-deferred",
