@@ -2,14 +2,17 @@
 import { AlertTriangle, ArrowLeft, Database, Loader2 } from "lucide-react";
 import {
   type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { Link } from "react-router";
+import type { VirtuosoHandle } from "react-virtuoso";
 
-import { EmptyState, MetadataRow, PageShell } from "../../components/layout/page-shell";
+import { EmptyState, PageShell } from "../../components/layout/page-shell";
 import { Button } from "../../components/ui/button";
 import { cn } from "../../lib/cn";
 import type { RecentBackupRecord } from "../../lib/recents";
@@ -101,7 +104,7 @@ export async function loadM3RecentRouteState(
 }
 
 /**
- * Route bootstrap shared by the M3 messages and search routes: owns a recents
+ * Route bootstrap for the M3/M4 unified messages workspace: owns a recents
  * store and resolves the gate state for the backup id in the URL.
  */
 export function useRecentRouteState(backupId: string): RecentRouteState {
@@ -130,7 +133,7 @@ export function useRecentRouteState(backupId: string): RecentRouteState {
 
 /**
  * Shared conversation-list pagination state machine (initial page load plus
- * offset-guarded load-more) used by the messages and search routes.
+ * offset-guarded load-more) used by the messages workspace.
  */
 export function useConversationPages({
   backupId,
@@ -408,14 +411,58 @@ export function RecentRouteGate({
   return children(routeState.record);
 }
 
-export function DataRow({
-  label,
-  value,
+/**
+ * Centers a Virtuoso list on an activated message. Every explicit activation
+ * bumps `activationRevision`, so re-activating the same selected hit
+ * re-centers it; the handled-key ref keeps ordinary re-renders from
+ * re-scrolling a list the user has since moved.
+ */
+export function useVirtuosoJump({
+  activationRevision,
+  canHandleJump,
+  findIndex,
+  jumpMessageId,
+  virtuosoRef,
 }: {
-  label: string;
-  value: string | number | boolean | undefined;
-}) {
-  return <MetadataRow label={label} value={formatFieldValue(value)} />;
+  activationRevision: number;
+  canHandleJump: boolean;
+  findIndex: (messageId: string) => number;
+  jumpMessageId: string | undefined;
+  virtuosoRef: RefObject<VirtuosoHandle | null>;
+}): void {
+  const handledJumpKeyRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (jumpMessageId === undefined) {
+      handledJumpKeyRef.current = undefined;
+      return;
+    }
+
+    const jumpKey = `${jumpMessageId}:${String(activationRevision)}`;
+
+    if (!canHandleJump || handledJumpKeyRef.current === jumpKey) {
+      return;
+    }
+
+    const index = findIndex(jumpMessageId);
+
+    if (index < 0) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        align: "center",
+        behavior: "auto",
+        index,
+      });
+      handledJumpKeyRef.current = jumpKey;
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activationRevision, canHandleJump, findIndex, jumpMessageId, virtuosoRef]);
 }
 
 export function InlineNotice({
@@ -512,7 +559,12 @@ export function participantLabel(input: {
 
 export function conversationTitle(input: {
   displayName?: string;
-  participants: readonly { contactName?: string; handle: string; isSelf?: boolean }[];
+  participants: readonly {
+    contactFirstName?: string;
+    contactName?: string;
+    handle: string;
+    isSelf?: boolean;
+  }[];
 }): string {
   if (input.displayName !== undefined && input.displayName.trim().length > 0) {
     return input.displayName;
@@ -524,19 +576,30 @@ export function conversationTitle(input: {
   const participants =
     otherParticipants.length > 0 ? otherParticipants : input.participants;
 
-  return participants.map(participantLabel).join(", ") || "Unnamed conversation";
+  if (participants.length <= 1) {
+    return participants.map(participantLabel).join("") || "Unnamed conversation";
+  }
+
+  return formatParticipantList(
+    participants.map(
+      (participant) =>
+        participant.contactFirstName ??
+        participant.contactName ??
+        participant.handle,
+    ),
+  );
 }
 
-function formatFieldValue(value: string | number | boolean | undefined): string {
-  if (value === undefined) {
-    return "Not present";
+function formatParticipantList(labels: readonly string[]): string {
+  if (labels.length === 2) {
+    return `${labels[0]} and ${labels[1]}`;
   }
 
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
-  }
+  const finalLabel = labels.at(-1);
 
-  return String(value);
+  return finalLabel === undefined
+    ? labels.join(", ")
+    : `${labels.slice(0, -1).join(", ")} and ${finalLabel}`;
 }
 
 function isWorkerErrorPayload(value: unknown): value is WorkerErrorPayload {

@@ -11,7 +11,12 @@ import {
   type ContactAvatarStore,
   type DerivedDatabaseFactory,
 } from "./ingest-sink";
-import { buildSnippetSegments, createDbWorkerQueryApi } from "./queries";
+import {
+  buildQuotedLiteralSnippetSegments,
+  buildSnippetSegments,
+  compileUserTextToFtsExpression,
+  createDbWorkerQueryApi,
+} from "./queries";
 import { derivedDatabaseFilename, type DerivedSqliteDatabase } from "./schema";
 import { getSqlite } from "../shared/sqlite-init";
 
@@ -311,7 +316,7 @@ describe("db-worker queries", () => {
       conversation: {
         id: "c-direct",
         participants: [
-          { id: "p-alex", handle: "+15550101111" },
+          { id: "p-alex", handle: "+15550101111", contactFirstName: "Alex" },
           { id: "p-self", handle: "me" },
         ],
       },
@@ -514,6 +519,770 @@ describe("db-worker queries", () => {
     );
   });
 
+  it("compiles implicit-AND prefixes and only sound quoted narrowing terms", () => {
+    expect(
+      compileUserTextToFtsExpression(
+        'alpha bron "PHOTO update" "🧪!"',
+      ),
+    ).toEqual({
+      expression: '"alpha"* "bron"* "update"*',
+      terms: ["alpha", "bron", "PHOTO", "update"],
+      unquotedTerms: ["alpha", "bron"],
+      quotedSubstrings: ["PHOTO update", "🧪!"],
+      hasSearchCriteria: true,
+      requiresVerification: true,
+    });
+
+    expect(compileUserTextToFtsExpression('"rass"')).toMatchObject({
+      expression: "",
+      terms: ["rass"],
+      quotedSubstrings: ["rass"],
+      hasSearchCriteria: true,
+      requiresVerification: true,
+    });
+    expect(compileUserTextToFtsExpression("rass")).toMatchObject({
+      expression: '"rass"*',
+      requiresVerification: false,
+    });
+    expect(compileUserTextToFtsExpression('"x Ა"')).toMatchObject({
+      expression: "",
+      terms: ["x", "Ა"],
+      quotedSubstrings: ["x Ა"],
+    });
+    expect(compileUserTextToFtsExpression('"Ა x"')).toMatchObject({
+      expression: '"x"*',
+      terms: ["Ა", "x"],
+      quotedSubstrings: ["Ა x"],
+    });
+    expect(compileUserTextToFtsExpression("Ა")).toMatchObject({
+      expression: '"Ა"*',
+      terms: ["Ა"],
+      requiresVerification: false,
+    });
+  });
+
+  it("matches unquoted prefixes with implicit AND in any order", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-prefix",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "A BRONZED plate carries alphabetic marks",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const result = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: "alpha bron",
+      }),
+    );
+
+    expect(result.results.map((item) => item.message.id)).toContain("m-prefix");
+    expect(result.coverage).toEqual({
+      strategy: "fts",
+      candidateRows: 2,
+      truncated: false,
+    });
+  });
+
+  it("verifies mixed quoted substrings after sound FTS narrowing", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-quoted-match",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "The PHOTO UPDATE includes quartz",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-quoted-false-candidate",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:01:00.000Z",
+            rawTimestamp: "804422460000000000",
+            body: "The photo has an unrelated update includes quartz",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const result = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"photo update includes" quartz',
+      }),
+    );
+
+    expect(result.results.map((item) => item.message.id)).toEqual([
+      "m-quoted-match",
+    ]);
+    expect(result.coverage).toEqual({
+      strategy: "fts",
+      candidateRows: 2,
+      truncated: false,
+    });
+    expect(result.results[0]?.snippets).toContainEqual({
+      text: "PHOTO UPDATE includes",
+      highlighted: true,
+    });
+  });
+
+  it("finds case-insensitive mid-token quoted literals without unsound FTS narrowing", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-mid-token",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "Polished BRASS casing",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const result = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"rass"',
+      }),
+    );
+
+    expect(result.results.map((item) => item.message.id)).toEqual([
+      "m-mid-token",
+    ]);
+    expect(result.coverage).toEqual({
+      strategy: "bounded-scan",
+      candidateRows: 6,
+      truncated: false,
+      rowBudget: 10_000,
+    });
+    expect(result.results[0]?.snippets).toContainEqual({
+      text: "RASS",
+      highlighted: true,
+    });
+
+    const narrowed = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"rass" casing',
+      }),
+    );
+
+    expect(narrowed.results.map((item) => item.message.id)).toEqual([
+      "m-mid-token",
+    ]);
+    expect(narrowed.coverage.strategy).toBe("fts");
+  });
+
+  it("keeps one bounded corpus when results are scoped to a conversation", async () => {
+    const harness = await createHarness({ boundedSearchRowBudget: 1 });
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-global-cap-newest",
+            conversationId: "c-group",
+            senderId: "p-blair",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "Newest BRASS global hit",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-outside-global-cap",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T11:30:00.000Z",
+            rawTimestamp: "804420600000000000",
+            body: "Older BRASS scoped hit",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const globalResults = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"rass"',
+      }),
+    );
+    const globalConversations = unwrap(
+      await harness.queryApi.listSearchConversations({
+        backupId: testRequest.backupId,
+        text: '"rass"',
+      }),
+    );
+    const scopedResults = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"rass"',
+        filters: { conversationId: "c-direct" },
+      }),
+    );
+
+    expect(globalResults.results.map((item) => item.message.id)).toEqual([
+      "m-global-cap-newest",
+    ]);
+    expect(globalConversations.conversations).toEqual([
+      expect.objectContaining({ id: "c-group", hitCount: 1 }),
+    ]);
+    expect(scopedResults.results).toEqual([]);
+    expect(scopedResults.total).toBe(0);
+    expect(scopedResults.coverage).toEqual(globalResults.coverage);
+    expect(scopedResults.coverage).toEqual({
+      strategy: "bounded-scan",
+      candidateRows: 7,
+      truncated: true,
+      rowBudget: 1,
+    });
+  });
+
+  it("bounds FTS-narrowed quoted verification scans and discloses truncation", async () => {
+    const harness = await createHarness({ boundedSearchRowBudget: 1 });
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-narrowed-newest",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "Newest BRASS casing",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-narrowed-older",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T11:30:00.000Z",
+            rawTimestamp: "804420600000000000",
+            body: "Older BRASS casing",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const result = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"rass" casing',
+      }),
+    );
+
+    expect(result.results.map((item) => item.message.id)).toEqual([
+      "m-narrowed-newest",
+    ]);
+    expect(result.total).toBe(1);
+    expect(result.coverage).toEqual({
+      strategy: "bounded-scan",
+      candidateRows: 2,
+      truncated: true,
+      rowBudget: 1,
+    });
+  });
+
+  it("highlights unquoted terms inside quoted-literal snippets", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-mixed-highlight",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "A BRONZED filigree wraps the gear assembly",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const result = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: 'bronz "gear"',
+      }),
+    );
+
+    expect(result.results.map((item) => item.message.id)).toEqual([
+      "m-mixed-highlight",
+    ]);
+    // The quoted literal and the unquoted AND-term (as a whole prefixed
+    // token) are both highlighted; without the term highlight the user
+    // cannot tell why the mixed query matched this message.
+    expect(result.results[0]?.snippets).toContainEqual({
+      text: "gear",
+      highlighted: true,
+    });
+    expect(result.results[0]?.snippets).toContainEqual({
+      text: "BRONZED",
+      highlighted: true,
+    });
+  });
+
+  it("aligns quoted snippet windows to code-point boundaries", () => {
+    const body = `${"🙂".repeat(150)} quartz mine`;
+    const segments = buildQuotedLiteralSnippetSegments(body, ["quartz mine"]);
+
+    expect(
+      segments.some(
+        (segment) => segment.highlighted && segment.text.includes("quartz mine"),
+      ),
+    ).toBe(true);
+
+    for (const segment of segments) {
+      // A window edge landing inside a surrogate pair would leave a lone
+      // surrogate (rendered as U+FFFD) at a segment boundary.
+      expect(/\p{Cs}/u.test(segment.text)).toBe(false);
+    }
+  });
+
+  it("uses Unicode case folding for verified quoted literals", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-final-sigma",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "Greek ος ending",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-long-s",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:01:00.000Z",
+            rawTimestamp: "804422460000000000",
+            body: "A ſpecial archival form",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const sigmaResults = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"οσ"',
+      }),
+    );
+    const longSResults = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"special"',
+      }),
+    );
+
+    expect(sigmaResults.results.map((item) => item.message.id)).toContain(
+      "m-final-sigma",
+    );
+    expect(
+      sigmaResults.results.find((item) => item.message.id === "m-final-sigma")
+        ?.snippets,
+    ).toContainEqual({ text: "ος", highlighted: true });
+    expect(longSResults.results.map((item) => item.message.id)).toContain(
+      "m-long-s",
+    );
+    expect(
+      longSResults.results.find((item) => item.message.id === "m-long-s")
+        ?.snippets,
+    ).toContainEqual({ text: "ſpecial", highlighted: true });
+  });
+
+  it("does not let unicode61 version skew hide verified Georgian quoted matches", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-georgian-bounded",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "x ა",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-georgian-ascii-narrowed",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:01:00.000Z",
+            rawTimestamp: "804422460000000000",
+            body: "ა X",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const bounded = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"x Ა"',
+      }),
+    );
+    const asciiNarrowed = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"Ა x"',
+      }),
+    );
+
+    expect(bounded.results.map((item) => item.message.id)).toEqual([
+      "m-georgian-bounded",
+    ]);
+    expect(bounded.coverage.strategy).toBe("bounded-scan");
+    expect(bounded.results[0]?.snippets).toContainEqual({
+      text: "x ა",
+      highlighted: true,
+    });
+    expect(asciiNarrowed.results.map((item) => item.message.id)).toEqual([
+      "m-georgian-ascii-narrowed",
+    ]);
+    expect(asciiNarrowed.coverage.strategy).toBe("fts");
+    expect(asciiNarrowed.results[0]?.snippets).toContainEqual({
+      text: "ა X",
+      highlighted: true,
+    });
+  });
+
+  it("reports bounded-scan truncation for punctuation-only quoted searches", async () => {
+    const harness = await createHarness({ boundedSearchRowBudget: 1 });
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-punctuation-newest",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "Newest 🧪! literal",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-punctuation-older",
+            conversationId: "c-group",
+            senderId: "p-blair",
+            sentAtUtc: "2026-07-08T11:30:00.000Z",
+            rawTimestamp: "804420600000000000",
+            body: "Older 🧪! literal",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const result = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"🧪!"',
+      }),
+    );
+
+    expect(result.results.map((item) => item.message.id)).toEqual([
+      "m-punctuation-newest",
+    ]);
+    expect(result.total).toBe(1);
+    expect(result.coverage).toEqual({
+      strategy: "bounded-scan",
+      candidateRows: 7,
+      truncated: true,
+      rowBudget: 1,
+    });
+
+    const conversations = unwrap(
+      await harness.queryApi.listSearchConversations({
+        backupId: testRequest.backupId,
+        text: '"🧪!"',
+      }),
+    );
+
+    expect(conversations.conversations).toEqual([
+      expect.objectContaining({ id: "c-direct", hitCount: 1 }),
+    ]);
+    expect(conversations.coverage).toEqual(result.coverage);
+    expect(conversations.coverage.truncated).toBe(true);
+  });
+
+  it("lists active-search conversations by newest hit with hit counts", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+
+    const page = unwrap(
+      await harness.queryApi.listSearchConversations({
+        backupId: testRequest.backupId,
+        text: "bronze",
+      }),
+    );
+
+    expect(page.total).toBe(2);
+    expect(page.conversations).toEqual([
+      expect.objectContaining({
+        id: "c-direct",
+        hitCount: 3,
+        latestHitAtUtc: "2026-07-08T10:10:00.000Z",
+      }),
+      expect.objectContaining({
+        id: "c-group",
+        hitCount: 1,
+        latestHitAtUtc: "2026-07-08T09:30:00.000Z",
+      }),
+    ]);
+    expect(page.coverage).toEqual({
+      strategy: "fts",
+      candidateRows: 4,
+      truncated: false,
+    });
+
+    const secondPage = unwrap(
+      await harness.queryApi.listSearchConversations({
+        backupId: testRequest.backupId,
+        text: "bronze",
+        limit: 1,
+        offset: 1,
+      }),
+    );
+
+    expect(secondPage.conversations.map((conversation) => conversation.id)).toEqual([
+      "c-group",
+    ]);
+  });
+
+  it("lists verified quoted hits per conversation and applies non-conversation filters", async () => {
+    const harness = await createHarness();
+
+    await seedDataset(harness.ingestApi);
+    unwrap(
+      await harness.ingestApi.writeIngestBatch({
+        backupId: testRequest.backupId,
+        kind: "messages",
+        items: [
+          {
+            id: "m-rass-direct-new",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T12:00:00.000Z",
+            rawTimestamp: "804422400000000000",
+            body: "New BRASS plate",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 300,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-rass-direct-old",
+            conversationId: "c-direct",
+            senderId: "p-alex",
+            sentAtUtc: "2026-07-08T11:45:00.000Z",
+            rawTimestamp: "804421500000000000",
+            body: "Old grass note",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 301,
+            isSystemEvent: false,
+          },
+          {
+            id: "m-rass-group",
+            conversationId: "c-group",
+            senderId: "p-blair",
+            sentAtUtc: "2026-07-08T11:30:00.000Z",
+            rawTimestamp: "804420600000000000",
+            body: "Group brass note",
+            service: "iMessage",
+            isFromMe: false,
+            edited: false,
+            unsent: false,
+            sourceRowId: 302,
+            isSystemEvent: false,
+          },
+        ],
+      }),
+    );
+
+    const page = unwrap(
+      await harness.queryApi.listSearchConversations({
+        backupId: testRequest.backupId,
+        text: '"rass"',
+      }),
+    );
+
+    expect(page.conversations).toEqual([
+      expect.objectContaining({
+        id: "c-direct",
+        hitCount: 2,
+        latestHitAtUtc: "2026-07-08T12:00:00.000Z",
+      }),
+      expect.objectContaining({
+        id: "c-group",
+        hitCount: 1,
+        latestHitAtUtc: "2026-07-08T11:30:00.000Z",
+      }),
+    ]);
+    expect(page.coverage).toMatchObject({
+      strategy: "bounded-scan",
+      truncated: false,
+    });
+
+    const participantFiltered = unwrap(
+      await harness.queryApi.listSearchConversations({
+        backupId: testRequest.backupId,
+        text: '"rass"',
+        filters: { participantId: "p-blair" },
+      }),
+    );
+
+    expect(participantFiltered.conversations).toEqual([
+      expect.objectContaining({ id: "c-group", hitCount: 1 }),
+    ]);
+  });
+
   it("uses FTS snippets for diacritic-folded search highlights", async () => {
     const harness = await createHarness();
 
@@ -636,6 +1405,46 @@ describe("db-worker queries", () => {
     expect(
       sentinelResult?.snippets.map((segment) => segment.text).join(""),
     ).toContain("zircon");
+
+    const quotedResult = unwrap(
+      await harness.queryApi.searchMessages({
+        backupId: testRequest.backupId,
+        text: '"zircon"',
+      }),
+    ).results.find(
+      (searchResult) => searchResult.message.id === "m-sentinel",
+    );
+
+    expect(quotedResult).toBeDefined();
+    expect(
+      quotedResult?.snippets.every(
+        (segment) =>
+          !segment.highlighted &&
+          !segment.text.includes("\u0001") &&
+          !segment.text.includes("\u0002"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps a clipped highlight for quoted literals longer than the snippet budget", () => {
+    const literal = "a".repeat(221);
+    const segments = buildQuotedLiteralSnippetSegments(
+      `before ${literal.toUpperCase()} after`,
+      [literal],
+    );
+
+    expect(segments).toEqual([
+      { text: "...", highlighted: false },
+      { text: "A".repeat(220), highlighted: true },
+      { text: "...", highlighted: false },
+    ]);
+    expect(
+      segments.every(
+        (segment) =>
+          !segment.text.includes("\u0001") &&
+          !segment.text.includes("\u0002"),
+      ),
+    ).toBe(true);
   });
 
   it("returns no snippet segments when a body strips to nothing after sentinel removal", () => {
@@ -652,10 +1461,20 @@ describe("db-worker queries", () => {
     expect(buildSnippetSegments(undefined, "bronze")).toEqual([
       { text: "bronze", highlighted: false },
     ]);
+    expect(
+      buildQuotedLiteralSnippetSegments(
+        "Sneaky \u0001forged\u0002 zircon payload",
+        ["zircon"],
+      ),
+    ).toEqual([
+      { text: "Sneaky forged zircon payload", highlighted: false },
+    ]);
   });
 });
 
-async function createHarness(): Promise<{
+async function createHarness(options: {
+  boundedSearchRowBudget?: number;
+} = {}): Promise<{
   db: DerivedSqliteDatabase;
   ingestApi: Pick<DbWorkerApi, "prepareIngest" | "writeIngestBatch">;
   queryApi: Pick<
@@ -666,6 +1485,7 @@ async function createHarness(): Promise<{
     | "getMessageTimelineMessagesPage"
     | "getMessageDetails"
     | "searchMessages"
+    | "listSearchConversations"
   >;
 }> {
   const db = await createMemoryDatabase();
@@ -685,7 +1505,10 @@ async function createHarness(): Promise<{
   return {
     db,
     ingestApi: createDbWorkerIngestApi({ databaseFactory, avatarStore }),
-    queryApi: createDbWorkerQueryApi({ databaseFactory }),
+    queryApi: createDbWorkerQueryApi({
+      databaseFactory,
+      boundedSearchRowBudget: options.boundedSearchRowBudget,
+    }),
   };
 }
 
@@ -709,6 +1532,7 @@ async function seedDataset(
           id: "p-alex",
           handle: "+15550101111",
           kind: "phone",
+          contactFirstName: "Alex",
           contactName: "Alex Example",
           isSelf: false,
         },
@@ -716,6 +1540,7 @@ async function seedDataset(
           id: "p-blair",
           handle: "blair@example.test",
           kind: "email",
+          contactFirstName: "Blair",
           contactName: "Blair Example",
           isSelf: false,
         },

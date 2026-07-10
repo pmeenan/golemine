@@ -92,6 +92,7 @@ describe("db ingest sink", () => {
             id: "p-alex",
             handle: "+15550101111",
             kind: "phone",
+            contactFirstName: "Alex",
             contactName: "Alex Example",
             isSelf: false,
           },
@@ -218,11 +219,18 @@ describe("db ingest sink", () => {
     ).toBe(2);
     expect(
       harness.db.selectObject(
-        "SELECT avatar_path AS avatarPath FROM participants WHERE id = ?;",
+        `
+          SELECT
+            avatar_path AS avatarPath,
+            contact_first_name AS contactFirstName
+          FROM participants
+          WHERE id = ?;
+        `,
         ["p-alex"],
       ),
     ).toEqual({
       avatarPath: `${contactAvatarRelativeDirectory}/${avatarSha256}.png`,
+      contactFirstName: "Alex",
     });
     expect(
       harness.db.selectObject(

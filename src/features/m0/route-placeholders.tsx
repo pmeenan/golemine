@@ -1,4 +1,4 @@
-import { FileText, MessageSquareText, Search } from "lucide-react";
+import { FileText, MessageSquareText } from "lucide-react";
 import { Link, useParams } from "react-router";
 import { type ReactNode } from "react";
 
@@ -104,49 +104,6 @@ function Pane({
       </div>
       {children}
     </section>
-  );
-}
-
-export function SearchRoute() {
-  const backupId = useBackupId();
-
-  return (
-    <PageShell
-      actions={<BackupIdBadge backupId={backupId} />}
-      description="Search UI is routed and styled. Query execution waits for the db-worker and FTS5 milestone."
-      eyebrow="Search"
-      title="Search backup"
-    >
-      <Panel>
-        <div className="flex items-center gap-3">
-          <input
-            aria-label="Search messages"
-            className="h-[var(--control-height-lg)] min-w-0 flex-1 rounded-md border border-border-strong bg-surface-sunken px-3 text-body text-text placeholder:text-text-tertiary disabled:opacity-[var(--opacity-disabled)]"
-            disabled
-            placeholder="Search is not connected in M0"
-            type="search"
-          />
-          <Button disabled size="lg" type="button">
-            <Search aria-hidden="true" className="size-4" />
-            Search
-          </Button>
-        </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <Badge variant="neutral">Conversation filter</Badge>
-          <Badge variant="neutral">Date range</Badge>
-          <Badge variant="neutral">Has attachment</Badge>
-          <Badge variant="neutral">Participant</Badge>
-        </div>
-      </Panel>
-
-      <Panel>
-        <PanelHeader
-          badge={<Badge variant="neutral">0 results</Badge>}
-          description="FTS5 snippets and jump-to-context actions will appear here after ingest exists."
-          title="Results"
-        />
-      </Panel>
-    </PageShell>
   );
 }
 

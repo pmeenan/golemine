@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  conversationTitle,
   isInlinePreviewMediaKind,
   isThumbnailPreviewMediaKind,
   mergeBy,
@@ -51,5 +52,82 @@ describe("M3 page merge helpers", () => {
 
     expect(merged).toHaveLength(1);
     expect(Object.is(merged[0], firstA)).toBe(true);
+  });
+});
+
+describe("conversationTitle", () => {
+  it("keeps an explicit conversation name", () => {
+    expect(
+      conversationTitle({
+        displayName: "Weekend plans",
+        participants: [
+          {
+            contactFirstName: "Brian",
+            contactName: "Brian Meenan",
+            handle: "+15550101001",
+          },
+          {
+            contactFirstName: "Karin",
+            contactName: "Karin Stone",
+            handle: "+15550101002",
+          },
+        ],
+      }),
+    ).toBe("Weekend plans");
+  });
+
+  it("lists the first names of every non-self participant in an unnamed group", () => {
+    expect(
+      conversationTitle({
+        participants: [
+          {
+            contactFirstName: "Mina",
+            contactName: "Mina Talos",
+            handle: "self",
+            isSelf: true,
+          },
+          {
+            contactFirstName: "Brian",
+            contactName: "Brian Meenan",
+            handle: "+15550101001",
+          },
+          {
+            contactFirstName: "Karin",
+            contactName: "Karin Stone",
+            handle: "+15550101002",
+          },
+          {
+            contactFirstName: "Sean",
+            contactName: "Sean Parker",
+            handle: "+15550101003",
+          },
+        ],
+      }),
+    ).toBe("Brian, Karin and Sean");
+  });
+
+  it("uses full contact names and raw handles when first names are unavailable", () => {
+    expect(
+      conversationTitle({
+        participants: [
+          { contactName: "Northwind Legal", handle: "legal@example.test" },
+          { handle: "+15550101004" },
+        ],
+      }),
+    ).toBe("Northwind Legal and +15550101004");
+  });
+
+  it("keeps the full contact name for a one-to-one conversation", () => {
+    expect(
+      conversationTitle({
+        participants: [
+          {
+            contactFirstName: "Brian",
+            contactName: "Brian Meenan",
+            handle: "+15550101001",
+          },
+        ],
+      }),
+    ).toBe("Brian Meenan");
   });
 });

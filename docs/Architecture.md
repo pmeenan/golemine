@@ -114,8 +114,9 @@ but does not relay ingest batches. Ingest is resumable/restartable: if
 interrupted, the derived DB is rebuilt from scratch (source is the source of truth).
 
 Worker lifetimes: one-shot open/detect/ingest UI operations create a fresh worker
-client per operation and release it when the operation finishes. The M3 browse/search
-routes instead own route-scoped db/backup/media workers for the route lifetime, so
+client per operation and release it when the operation finishes. The unified M4
+messages workspace instead owns route-scoped db/backup/media workers for the route
+lifetime, so
 repeated queries, previews, and thumbnails do not churn worker startup or contend for
 the same per-backup SAH pool; the pool hand-off race on route switches is absorbed by
 a brief `installOpfsSAHPoolVfs` retry (D-029). Cross-worker helpers (sqlite init and
@@ -226,8 +227,11 @@ into provider internals or holding writable-capable handles.
 
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 
-- **Conversation** — thread; 1:1 or group; participants; display name; service.
-- **Participant** — handle (phone/email), resolved contact name, is-self flag.
+- **Conversation** — thread; 1:1 or group; participants; display name; service. For
+  groups, `displayName` is present only when the source explicitly named the chat;
+  unnamed-group identity is derived from participants at presentation time (D-036).
+- **Participant** — handle (phone/email), resolved contact name and first name when
+  available, is-self flag.
 - **Message** — conversation ref, sender, UTC timestamp (+ raw source timestamp),
   body text, service (iMessage/SMS), status (sent/delivered/read timestamps),
   edited/unsent flags, source GUID + source row id (provenance).
@@ -247,7 +251,8 @@ under `src/workers/db/schema.ts`):
 
 ```sql
 conversations(id, provider_key, kind, display_name, service, last_message_at, message_count)
-participants(id, handle, kind, contact_name, is_self, avatar_sha256, avatar_mime, avatar_path)
+participants(id, handle, kind, contact_name, contact_first_name, is_self,
+             avatar_sha256, avatar_mime, avatar_path)
 contact_avatars(participant_id, sha256, mime, byte_length, opfs_path, created_at)
 conversation_participants(conversation_id, participant_id)
 messages(id, conversation_id, sender_id, sent_at_utc, raw_timestamp, body, service,
@@ -287,12 +292,24 @@ participants and last-message preview (a per-conversation correlated LIMIT-1 loo
 `getMessageTimelinePage` returns bounded chronological windows with
 attachments/reactions hydrated, and `getMessageTimelineMessagesPage` returns the same
 window without conversation hydration for load-more; `getMessageDetails` returns
-message + conversation provenance; and `searchMessages` compiles FTS5 `MATCH` plus
-conversation, participant, date-range, and has-attachment filters into SQL. Message
+message + conversation provenance. `searchMessages` implements case-insensitive
+implicit-AND FTS5 prefix terms plus escaped Unicode `/iu` verification for quoted
+substrings, then applies conversation, participant, date-range, and has-attachment
+filters. Only compatible internal ASCII tokens narrow quoted candidates through FTS,
+avoiding Unicode case-table skew between JavaScript and SQLite `unicode61`. Every
+quoted verification scan — FTS-narrowed or not — examines at most the newest 10,000
+candidate rows in a single ordered prepared-statement pass with throttled progress
+and returns explicit coverage/truncation metadata (D-035).
+`listSearchConversations` applies the same semantics and returns bounded pages of
+conversations ordered by newest hit with exact in-coverage hit counts. Message
 records carry a normalized `serviceKind` (`imessage`/`sms-family`/`unknown`, D-032) so
-the UI never string-matches raw service names. Results
-return message ids and structured snippet segments only; hostile bodies containing the
-snippet highlight sentinels degrade to a single non-highlighted segment (D-030). The
+the UI never string-matches raw service names. Conversation participants retain the
+resolved contact first name separately from the full display name; unnamed groups use
+all non-self participants to build a natural label, while one-to-one threads keep the
+full contact label (D-036). Search results return normalized
+message/conversation records and structured snippet segments. Hostile bodies that
+contain the snippet highlight sentinels degrade to a single non-highlighted segment
+(D-030). The
 UI renders all backup text
 as text nodes, exposes load-more controls for additional pages, and navigates to the
 message in its thread context.
@@ -305,13 +322,13 @@ Routes (react-router, all client-side):
   machine"), drag/drop + open-folder entry points, recents list (rename/remove).
 - `/guide/iphone`, `/guide/android` — static how-to-back-up-your-phone pages.
 - `/backup/:id` — backup overview: device info, ingest status/progress, capability tiles.
-- `/backup/:id/messages` — three-pane messages UI for ingested backups: thread list
-  (virtualized, sorted by recency) → message timeline (virtualized, bubble rendering,
-  attachment previews, reactions badged onto their target) → detail/metadata panel for
-  a selected message. Conversation/timeline pages can load additional db-worker
-  windows. Attachment previews and extraction read source bytes lazily through
-  backup-worker.
-- `/backup/:id/search` — query + filters, result list with snippets, jump-to-context.
+- `/backup/:id/messages` — unified browse/search workspace for ingested backups.
+  Browse mode shows Threads → Timeline. Active search shows hit-filtered Threads →
+  newest-first Results → Timeline, with all/thread result scoping and jump-to-message.
+  Details is absent until a message is selected, docks only on wide viewports, and is
+  an accessible overlay otherwise. Conversation/timeline/search pages are bounded and
+  load additional windows. Attachment previews and extraction read source bytes
+  lazily through backup-worker.
 - `/backup/:id/report/:reportId` — report builder: ordered selected messages, case
   metadata form, print preview.
 - `/backup/:id/report/:reportId/print` — print-optimized rendering (see §8).
@@ -394,7 +411,7 @@ attachments decrypt on demand without re-deriving (~seconds of PBKDF2).
   src/
     app/              routes, layout, providers
     components/       shared UI components
-    features/         landing/, recents/, m3/ messages/search, report/, guides/
+    features/         landing/, recents/, m3/ unified messages/search, report/, guides/
     workers/
       backup/         backup-worker: providers/ios/, crypto/, plist/, typedstream/
       db/             db-worker: schema, queries, ingest sink, FTS
@@ -422,6 +439,6 @@ printing.
 
 The first generated fixture is `e2e/fixtures/generated/ios-mini-backup/`, a synthetic
 unencrypted iPhone backup root used by the M1 open -> detect -> recents Playwright flow,
-the M2 open -> ingest -> derived summary flow, and the M3 browse/search flow. Its source module and generator
+the M2 open -> ingest -> derived summary flow, and the M3/M4 browse/search flow. Its source module and generator
 produce deterministic Manifest/sms/contact SQLite data, real WAL sidecars, tapbacks,
 attachments, contact-avatar happy/error cases, and expected normalized metadata.

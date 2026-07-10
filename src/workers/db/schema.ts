@@ -53,6 +53,7 @@ export function createDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
       handle TEXT NOT NULL,
       kind TEXT NOT NULL CHECK (kind IN ('phone', 'email', 'unknown', 'self')),
       contact_name TEXT,
+      contact_first_name TEXT,
       is_self INTEGER NOT NULL CHECK (is_self IN (0, 1)),
       avatar_sha256 TEXT,
       avatar_mime TEXT CHECK (

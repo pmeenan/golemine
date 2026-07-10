@@ -7,7 +7,6 @@ import { WorkspaceCapabilityGate } from "../features/m1/capability-gate";
 import { AndroidGuideRoute, IphoneGuideRoute } from "../features/m1/guide-routes";
 import { LandingRoute } from "../features/m1/landing-route";
 import { MessagesRoute } from "../features/m3/messages-route";
-import { SearchRoute } from "../features/m3/search-route";
 import {
   NotFoundRoute,
   PrintReportRoute,
@@ -42,10 +41,6 @@ const router = createBrowserRouter([
       {
         path: "/backup/:id/messages",
         element: workspaceRoute(<MessagesRoute />),
-      },
-      {
-        path: "/backup/:id/search",
-        element: workspaceRoute(<SearchRoute />),
       },
       {
         path: "/backup/:id/report/:reportId",

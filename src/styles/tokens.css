@@ -4,6 +4,7 @@
   --surface: oklch(1 0 0);
   --surface-raised: oklch(1 0 0);
   --surface-sunken: oklch(0.955 0.004 255);
+  --overlay-scrim: oklch(0.1 0.01 255 / 0.5);
   --border: oklch(0.90 0.006 255);
   --border-strong: oklch(0.82 0.008 255);
   --text: oklch(0.21 0.012 255);
@@ -81,10 +82,14 @@
   --layout-content-text: 45rem;
   --layout-content-wide: 60rem;
   --layout-responsive-floor: 64rem;
+  --layout-detail-dock: 96rem;
   --layout-workspace-min: 32rem;
   --pane-threads: 20rem;
+  --pane-search-threads: 15rem;
+  --pane-results: 16rem;
   --pane-detail: 22.5rem;
   --pane-timeline-min: 30rem;
+  --pane-search-timeline-min: 26rem;
   --surface-glass: oklch(1 0 0 / 0.78);
   --glass-blur: 1rem;
   --glass-saturation: 1.4;

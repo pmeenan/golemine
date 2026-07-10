@@ -150,6 +150,7 @@ interface ContactImageRow {
 
 interface ContactRecord {
   displayName: string;
+  firstName?: string;
   phones: Set<string>;
   emails: Set<string>;
   avatar?: {
@@ -162,6 +163,7 @@ interface ContactRecord {
 
 interface ResolvedContact {
   displayName: string;
+  firstName?: string;
   avatar?: ContactRecord["avatar"];
 }
 
@@ -405,7 +407,14 @@ function buildParticipants(
       handle,
       kind: classifyHandle(handle),
       isSelf: false,
-      ...(resolved === undefined ? {} : { contactName: resolved.displayName }),
+      ...(resolved === undefined
+        ? {}
+        : {
+            contactName: resolved.displayName,
+            ...(resolved.firstName === undefined
+              ? {}
+              : { contactFirstName: resolved.firstName }),
+          }),
       ...(avatar === undefined
         ? {}
         : {
@@ -647,10 +656,13 @@ function buildConversations(
     const kind: NormalizedConversationKind =
       (readNumber(chat.style) ?? 0) === 43 ? "group" : "direct";
     const service = readString(chat.service_name);
+    const explicitDisplayName = readString(chat.display_name);
     const displayName =
-      readString(chat.display_name) ??
-      directConversationName(participantIds, participantById) ??
-      readString(chat.chat_identifier);
+      kind === "group"
+        ? explicitDisplayName
+        : explicitDisplayName ??
+          directConversationName(participantIds, participantById) ??
+          readString(chat.chat_identifier);
     const chatStats = stats.get(id);
 
     return {
@@ -938,8 +950,11 @@ function readContactPeople(
       continue;
     }
 
+    const firstName = readString(person.first)?.trim();
+
     contacts.set(recordId, {
       displayName: contactDisplayName(person),
+      ...(firstName === undefined ? {} : { firstName }),
       phones: new Set<string>(),
       emails: new Set<string>(),
     });
@@ -1076,6 +1091,9 @@ class ContactIndex {
       ? undefined
       : {
           displayName: contact.displayName,
+          ...(contact.firstName === undefined
+            ? {}
+            : { firstName: contact.firstName }),
           ...(contact.avatar === undefined ? {} : { avatar: contact.avatar }),
         };
   }

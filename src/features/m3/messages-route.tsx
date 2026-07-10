@@ -6,11 +6,15 @@ import {
   ImageOff,
   Loader2,
   MessageSquareText,
+  Search,
   Video,
   X,
 } from "lucide-react";
 import { transfer } from "comlink";
 import {
+  type Dispatch,
+  type SetStateAction,
+  type SyntheticEvent,
   type ReactNode,
   type Ref,
   Fragment,
@@ -20,12 +24,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router";
-import { Virtuoso } from "react-virtuoso";
+import { createPortal } from "react-dom";
+import { Link, useParams, useSearchParams } from "react-router";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
 import { EmptyState, PageShell } from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { useModalFocusContainment } from "../../components/ui/modal-focus";
 import { cn } from "../../lib/cn";
 import {
   ensureRecentBackupDirectoryPermission,
@@ -40,9 +46,15 @@ import type {
   AttachmentThumbnailOkResponse,
   DbAttachmentSummary,
   DbConversationSummary,
+  DbSearchConversationSummary,
   DbMessageRecord,
+  ListSearchConversationsResponse,
   MessageDetailsResponse,
   MessageTimelinePageResponse,
+  SearchConversationFilters,
+  SearchMessageResult,
+  SearchMessagesResponse,
+  WorkerResult,
 } from "../../lib/worker-types";
 import {
   defaultThumbnailMaxPixelSize,
@@ -53,7 +65,6 @@ import {
 import {
   conversationTitle,
   type ConversationsState,
-  DataRow,
   formatBytes,
   formatDateTime,
   formatDay,
@@ -62,17 +73,34 @@ import {
   InlineNotice,
   isInlinePreviewMediaKind,
   isThumbnailPreviewMediaKind,
+  mergeBy,
   mergeById,
   participantLabel,
   RecentRouteGate,
   useConversationPages,
   useRecentRouteState,
+  useVirtuosoJump,
 } from "./m3-shared";
+import {
+  includePinnedSearchResult,
+  selectScopedCachedSearchResult,
+} from "./search-result-pinning";
 
 const conversationPageSize = 100;
+const searchPageSize = 100;
 const timelinePageSize = 100;
 const timelineInitialFirstItemIndex = 100_000;
 const previewConcurrency = 2;
+
+/**
+ * Shared list-row treatment for the threads/results panes; the selected
+ * state renders the Design.md accent bar. Rows may override the paddings
+ * (cn resolves the conflict in favor of the later class).
+ */
+const listRowClass =
+  "relative block w-full border-b border-border px-3 py-3 text-left hover:bg-surface-raised";
+const listRowSelectedClass =
+  "bg-accent-subtle pl-4 before:absolute before:left-0 before:top-0 before:h-full before:w-[var(--space-2)] before:bg-accent";
 
 type TimelineState =
   | { kind: "idle" }
@@ -102,6 +130,43 @@ type DetailState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
   | { kind: "ready"; details: MessageDetailsResponse };
+
+interface ActiveSearch {
+  filters: SearchConversationFilters;
+  text: string;
+  token: number;
+}
+
+/** Draft form values lifted out of SearchPanel only on submit. */
+interface SearchDraft {
+  fromDate: string;
+  hasAttachment: boolean;
+  participantQuery: string;
+  query: string;
+  toDate: string;
+}
+
+/**
+ * One paged-search state machine shared by the threads and results panes: a
+ * stale `response` stays displayed through loading/error so replacement
+ * searches never blank the workspace.
+ */
+type SearchPaneState<TResponse> =
+  | { kind: "idle" }
+  | { kind: "loading"; response?: TResponse }
+  | { kind: "error"; message: string; response?: TResponse }
+  | {
+      kind: "ready";
+      loadingMore: boolean;
+      moreError?: string;
+      response: TResponse;
+    };
+
+type SearchThreadsState = SearchPaneState<ListSearchConversationsResponse>;
+type SearchResultsState = SearchPaneState<SearchMessagesResponse>;
+
+/** Where the detail-opening activation came from, for focus return. */
+type DetailReturnOrigin = "message" | "search-result";
 
 type TimelineRow =
   | { kind: "day"; id: string; label: string }
@@ -150,21 +215,57 @@ export function MessagesRoute() {
 
 function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
   const selectedConversationId = searchParams.get("conversation") ?? undefined;
   const selectedMessageId = searchParams.get("message") ?? undefined;
+  const [activeSearch, setActiveSearch] = useState<ActiveSearch | undefined>();
+  const [isSubmittingSearch, setIsSubmittingSearch] = useState(false);
+  const [searchSubmissionError, setSearchSubmissionError] = useState<
+    string | undefined
+  >();
+  const [scopeRequestVersion, setScopeRequestVersion] = useState(0);
+  const [searchThreadsState, setSearchThreadsState] =
+    useState<SearchThreadsState>({ kind: "idle" });
+  const [searchResultsState, setSearchResultsState] =
+    useState<SearchResultsState>({ kind: "idle" });
   const [timelineState, setTimelineState] = useState<TimelineState>({
     kind: "idle",
   });
   const [detailState, setDetailState] = useState<DetailState>({ kind: "empty" });
-  const [detailOverlayActive, setDetailOverlayActive] = useState(false);
+  // Lazily initialized from the dock media query so a cold deep link below
+  // the dock threshold renders the Details pane as a modal overlay on the
+  // very first frame instead of briefly auto-placing it in the grid.
+  const [detailOverlayActive, setDetailOverlayActive] = useState(
+    () => !detailDockMediaQuery().matches,
+  );
+  const [activatedSearchResults, setActivatedSearchResults] = useState<
+    ReadonlyMap<string, SearchMessageResult>
+  >(() => new Map());
+  const [searchResultActivationRevision, setSearchResultActivationRevision] =
+    useState(0);
   const timelineStateRef = useRef<TimelineState>(timelineState);
   const dbClientRef = useRef<DbWorkerClient | undefined>(undefined);
   const backupClientRef = useRef<BackupWorkerClient | undefined>(undefined);
   const mediaClientRef = useRef<MediaWorkerClient | undefined>(undefined);
   const previewRunnerRef = useRef<PreviewTaskRunner | undefined>(undefined);
+  const searchTokenRef = useRef(0);
+  const resultsRequestKeyRef = useRef("");
+  const displayedResultsKeyRef = useRef("");
+  const displayedResultsScopeConversationIdRef =
+    useRef<string | undefined>(undefined);
+  // Set while a replacement search's URL cleanup (deleting the pre-submit
+  // conversation selection) is still committing through the router
+  // transition; the scoped-results effect skips that transient stale scope.
+  const pendingScopeClearRef =
+    useRef<{ conversationId: string; token: number } | undefined>(undefined);
+  const searchResultsStateRef = useRef<SearchResultsState>(searchResultsState);
   const detailPaneRef = useRef<HTMLElement | null>(null);
   const detailReturnFocusRef = useRef<HTMLElement | undefined>(undefined);
+  const detailReturnFocusMessageIdRef = useRef<string | undefined>(undefined);
+  const detailReturnFocusOriginRef =
+    useRef<DetailReturnOrigin | undefined>(undefined);
+  const wasDetailOpenRef = useRef(false);
+  const previousDetailModeRef =
+    useRef<"docked" | "overlay" | undefined>(undefined);
   const runPreviewTask = useCallback(
     <TResult,>(task: () => Promise<TResult>): Promise<TResult> => {
       // Created lazily (not in useMemo) so a StrictMode remount gets a fresh,
@@ -190,6 +291,31 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
 
     return mediaClientRef.current;
   }, []);
+  const focusDetailReturnTarget = useCallback(() => {
+    // Virtualized triggers unmount and remount as new elements, so the
+    // activated message id (not a stale element reference or test hook) is
+    // the durable identity: prefer the re-found trigger, then the matching
+    // timeline bubble, then the original element if it is still connected.
+    const messageId = detailReturnFocusMessageIdRef.current;
+    const findByAttribute = (attribute: string): HTMLElement | undefined =>
+      messageId === undefined
+        ? undefined
+        : (document.querySelector<HTMLElement>(
+            `[${attribute}="${CSS.escape(messageId)}"]`,
+          ) ?? undefined);
+    const recordedTarget = detailReturnFocusRef.current;
+
+    (
+      (detailReturnFocusOriginRef.current === "search-result"
+        ? findByAttribute("data-search-result-id")
+        : undefined) ??
+      findByAttribute("data-message-id") ??
+      (recordedTarget?.isConnected === true ? recordedTarget : undefined)
+    )?.focus();
+    detailReturnFocusRef.current = undefined;
+    detailReturnFocusMessageIdRef.current = undefined;
+    detailReturnFocusOriginRef.current = undefined;
+  }, []);
   const { conversationsState, loadMoreConversations } = useConversationPages({
     backupId: record.id,
     getDbClient,
@@ -199,6 +325,10 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   useEffect(() => {
     timelineStateRef.current = timelineState;
   }, [timelineState]);
+
+  useEffect(() => {
+    searchResultsStateRef.current = searchResultsState;
+  }, [searchResultsState]);
 
   useEffect(
     () => () => {
@@ -217,10 +347,129 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   );
 
   useEffect(() => {
-    // Below the responsive floor (Design.md section 8; Tailwind lg ===
-    // --layout-responsive-floor === 64rem) the detail pane overlays instead
-    // of docking, so it needs dialog semantics and focus handling.
-    const media = window.matchMedia("(min-width: 64rem)");
+    if (activeSearch === undefined || isSubmittingSearch) {
+      resultsRequestKeyRef.current = "";
+      return;
+    }
+
+    const requestKey = buildResultsScopeKey(
+      activeSearch.token,
+      selectedConversationId,
+    );
+    const pendingScopeClear = pendingScopeClearRef.current;
+
+    if (pendingScopeClear !== undefined) {
+      if (
+        pendingScopeClear.token === activeSearch.token &&
+        selectedConversationId === pendingScopeClear.conversationId
+      ) {
+        // The replacement search already displayed all-scope results; the
+        // URL cleanup deleting this conversation selection is still
+        // committing through the router transition. Skip the transient
+        // stale-scope fetch it would otherwise trigger.
+        return;
+      }
+
+      pendingScopeClearRef.current = undefined;
+    }
+
+    if (displayedResultsKeyRef.current === requestKey) {
+      resultsRequestKeyRef.current = requestKey;
+      const displayedResponse = getSearchResponse(
+        searchResultsStateRef.current,
+      );
+
+      if (
+        displayedResponse !== undefined &&
+        searchResultsStateRef.current.kind !== "ready"
+      ) {
+        const nextState: SearchResultsState = {
+          kind: "ready",
+          loadingMore: false,
+          response: displayedResponse,
+        };
+
+        searchResultsStateRef.current = nextState;
+        setSearchResultsState(nextState);
+      }
+      return;
+    }
+
+    const active = { current: true };
+    const client = getDbClient();
+    const previousResponse = getSearchResponse(
+      searchResultsStateRef.current,
+    );
+
+    resultsRequestKeyRef.current = requestKey;
+    setSearchResultsState({ kind: "loading", response: previousResponse });
+    void (async () => {
+      try {
+        const result = await client.api.searchMessages({
+          backupId: record.id,
+          filters: {
+            ...activeSearch.filters,
+            ...(selectedConversationId === undefined
+              ? {}
+              : { conversationId: selectedConversationId }),
+          },
+          limit: searchPageSize,
+          text: activeSearch.text,
+        });
+
+        if (!active.current || resultsRequestKeyRef.current !== requestKey) {
+          return;
+        }
+
+        if (!result.ok) {
+          setSearchResultsState({
+            kind: "error",
+            message: formatWorkerResultError(result.error),
+            response: previousResponse,
+          });
+          return;
+        }
+
+        displayedResultsKeyRef.current = requestKey;
+        displayedResultsScopeConversationIdRef.current = selectedConversationId;
+        const nextState: SearchResultsState = {
+          kind: "ready",
+          loadingMore: false,
+          response: result.value,
+        };
+
+        searchResultsStateRef.current = nextState;
+        setSearchResultsState(nextState);
+      } catch (cause) {
+        if (active.current && resultsRequestKeyRef.current === requestKey) {
+          setSearchResultsState({
+            kind: "error",
+            message: formatError(cause),
+            response: previousResponse,
+          });
+        }
+      }
+    })();
+
+    return () => {
+      active.current = false;
+    };
+  }, [
+    activeSearch,
+    getDbClient,
+    isSubmittingSearch,
+    record.id,
+    scopeRequestVersion,
+    selectedConversationId,
+  ]);
+
+  useEffect(() => {
+    // The fourth pane docks only when all columns physically fit. The
+    // --layout-detail-dock token resolved by detailDockMediaQuery is the
+    // single source of truth: this state drives the dialog/overlay semantics
+    // AND the grid-template-columns classes below (CSS media queries cannot
+    // reference custom properties, so no stylesheet breakpoint is involved).
+    const media = detailDockMediaQuery();
     const update = () => {
       setDetailOverlayActive(!media.matches);
     };
@@ -234,6 +483,10 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   }, []);
 
   useEffect(() => {
+    if (activeSearch !== undefined) {
+      return;
+    }
+
     if (conversationsState.kind !== "ready") {
       return;
     }
@@ -259,7 +512,7 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
       },
       { replace: true },
     );
-  }, [conversationsState, selectedConversationId, setSearchParams]);
+  }, [activeSearch, conversationsState, selectedConversationId, setSearchParams]);
 
   useEffect(() => {
     if (selectedConversationId === undefined) {
@@ -403,27 +656,134 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
     };
   }, [getDbClient, record.id, selectedMessageId, timelineState]);
 
-  const detailOverlayOpen = detailOverlayActive && selectedMessageId !== undefined;
+  const detailOpen = selectedMessageId !== undefined;
+  const detailOverlayOpen = detailOverlayActive && detailOpen;
 
   useEffect(() => {
+    // Deep links and keyboard flows can open the overlay without going
+    // through selectMessage; remember where focus was so Close can return
+    // it. Declared before the containment hook below so it reads the
+    // activeElement before the dialog steals focus.
     if (!detailOverlayOpen) {
       return;
     }
 
     const previous = document.activeElement;
 
-    detailReturnFocusRef.current =
-      previous instanceof HTMLElement ? previous : undefined;
-    detailPaneRef.current?.focus();
+    if (
+      detailReturnFocusRef.current === undefined &&
+      previous instanceof HTMLElement
+    ) {
+      detailReturnFocusRef.current = previous;
+    }
+  }, [detailOverlayOpen]);
+
+  useEffect(() => {
+    // Return focus to the activating element only when the details close
+    // entirely — crossing the dock threshold keeps them open (in the other
+    // mode) and must not yank focus back or clear the return-target refs.
+    if (detailOpen) {
+      wasDetailOpenRef.current = true;
+      return;
+    }
+
+    if (!wasDetailOpenRef.current) {
+      return;
+    }
+
+    wasDetailOpenRef.current = false;
+    const frame = window.requestAnimationFrame(focusDetailReturnTarget);
 
     return () => {
-      detailReturnFocusRef.current?.focus();
-      detailReturnFocusRef.current = undefined;
+      window.cancelAnimationFrame(frame);
     };
-  }, [detailOverlayOpen]);
+  }, [detailOpen, focusDetailReturnTarget]);
+
+  useEffect(() => {
+    if (!detailOpen) {
+      previousDetailModeRef.current = undefined;
+      return;
+    }
+
+    const mode = detailOverlayActive ? "overlay" : "docked";
+    const previousMode = previousDetailModeRef.current;
+
+    previousDetailModeRef.current = mode;
+
+    if (previousMode !== undefined && previousMode !== mode && mode === "docked") {
+      // The overlay pane unmounted with focus inside it while details stay
+      // open; land focus on the docked pane instead of dropping it on
+      // <body>. (The docked -> overlay direction is focused by the modal
+      // containment hook.)
+      detailPaneRef.current?.focus();
+    }
+  }, [detailOpen, detailOverlayActive]);
 
   const selectedConversation =
     timelineState.kind === "ready" ? timelineState.page.conversation : undefined;
+  const displayedSearchThreads = getSearchResponse(searchThreadsState);
+  const displayedSearchResults = getSearchResponse(searchResultsState);
+  const effectivePinnedSearchResult = selectScopedCachedSearchResult(
+    activatedSearchResults,
+    selectedMessageId,
+    selectedConversationId,
+  );
+  const pinnedSearchConversation = effectivePinnedSearchResult?.conversation;
+  const selectedSearchConversation =
+    displayedSearchThreads?.conversations.find(
+      (conversation) => conversation.id === selectedConversationId,
+    ) ??
+    (pinnedSearchConversation?.id === selectedConversationId
+      ? pinnedSearchConversation
+      : undefined) ??
+    (timelineState.kind === "ready" &&
+    timelineState.page.conversation.id === selectedConversationId
+      ? timelineState.page.conversation
+      : undefined);
+  const currentSearchResultsKey =
+    activeSearch === undefined
+      ? ""
+      : buildResultsScopeKey(activeSearch.token, selectedConversationId);
+  const canJumpSearchResults =
+    searchResultsState.kind === "ready" &&
+    displayedResultsKeyRef.current === currentSearchResultsKey;
+  const canJumpTimeline =
+    timelineState.kind === "ready" &&
+    timelineState.page.conversation.id === selectedConversationId;
+  const displayedResultsScopeConversationId =
+    displayedResultsScopeConversationIdRef.current;
+  const displayedResultsScopeConversation =
+    displayedResultsScopeConversationId === undefined
+      ? undefined
+      : displayedSearchThreads?.conversations.find(
+          (conversation) =>
+            conversation.id === displayedResultsScopeConversationId,
+        ) ??
+        Array.from(activatedSearchResults.values()).find(
+          (result) =>
+            result.conversation.id === displayedResultsScopeConversationId,
+        )?.conversation ??
+        (timelineState.kind === "ready" &&
+        timelineState.page.conversation.id ===
+          displayedResultsScopeConversationId
+          ? timelineState.page.conversation
+          : undefined);
+  const isDisplayingPreviousSearchScope =
+    displayedSearchResults !== undefined &&
+    displayedResultsKeyRef.current !== currentSearchResultsKey;
+  const searchResultsPaneBaseTitle =
+    displayedSearchResults === undefined
+      ? selectedSearchConversation === undefined
+        ? "Results"
+        : "Results: " + conversationTitle(selectedSearchConversation)
+      : displayedResultsScopeConversationId === undefined
+        ? "Results"
+        : displayedResultsScopeConversation === undefined
+          ? "Results: Selected thread"
+          : "Results: " + conversationTitle(displayedResultsScopeConversation);
+  const searchResultsPaneTitle =
+    searchResultsPaneBaseTitle +
+    (isDisplayingPreviousSearchScope ? " (previous scope)" : "");
   const timelineRows = useMemo(
     () =>
       timelineState.kind === "ready"
@@ -445,8 +805,23 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
     },
     [setSearchParams],
   );
+  const showAllSearchResults = useCallback(() => {
+    // Deliberately pushes a history entry (no replace): "All" is a user
+    // navigation, so Back returns to the previously scoped thread.
+    setSearchParams(clearSelectionSearchParams);
+  }, [setSearchParams]);
   const selectMessage = useCallback(
-    (messageId: string, conversationId: string) => {
+    (
+      messageId: string,
+      conversationId: string,
+      origin: DetailReturnOrigin = "message",
+    ) => {
+      const activeElement = document.activeElement;
+
+      detailReturnFocusRef.current =
+        activeElement instanceof HTMLElement ? activeElement : undefined;
+      detailReturnFocusMessageIdRef.current = messageId;
+      detailReturnFocusOriginRef.current = origin;
       setSearchParams((current) => {
         const next = new URLSearchParams(current);
 
@@ -458,7 +833,27 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
     },
     [setSearchParams],
   );
+  const selectSearchResult = useCallback(
+    (result: SearchMessageResult) => {
+      setActivatedSearchResults((current) => {
+        const next = new Map(current);
+
+        next.set(result.message.id, result);
+
+        return next;
+      });
+      setSearchResultActivationRevision((current) => current + 1);
+      selectMessage(
+        result.message.id,
+        result.message.conversationId,
+        "search-result",
+      );
+    },
+    [selectMessage],
+  );
   const closeDetail = useCallback(() => {
+    // Focus return is handled by the detail-close effect above, which also
+    // covers Escape, browser Back, and every other way ?message can clear.
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
 
@@ -467,6 +862,238 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
       return next;
     });
   }, [setSearchParams]);
+
+  useModalFocusContainment({
+    active: detailOverlayOpen,
+    containerRef: detailPaneRef,
+    onDismiss: closeDetail,
+  });
+  const submitSearch = useCallback(
+    (draft: SearchDraft) => {
+      const text = draft.query.trim();
+
+      if (text.length === 0 || isSubmittingSearch) {
+        return;
+      }
+
+      const token = searchTokenRef.current + 1;
+      const filters = buildSearchFilters(draft);
+      const pendingSearch: ActiveSearch = { filters, text, token };
+      const previousToken = activeSearch?.token ?? searchTokenRef.current;
+      const previousThreadsResponse = getSearchResponse(searchThreadsState);
+      const previousResultsResponse = getSearchResponse(searchResultsState);
+      const stableThreadsState: SearchThreadsState =
+        previousThreadsResponse === undefined
+          ? searchThreadsState
+          : {
+              kind: "ready",
+              loadingMore: false,
+              response: previousThreadsResponse,
+            };
+      const stableResultsState: SearchResultsState =
+        previousResultsResponse === undefined
+          ? searchResultsState
+          : {
+              kind: "ready",
+              loadingMore: false,
+              response: previousResultsResponse,
+            };
+      const restorePreviousSearch = (message: string) => {
+        searchTokenRef.current = previousToken;
+        resultsRequestKeyRef.current = displayedResultsKeyRef.current;
+        pendingScopeClearRef.current = undefined;
+        searchResultsStateRef.current = stableResultsState;
+        setSearchThreadsState(stableThreadsState);
+        setSearchResultsState(stableResultsState);
+        setSearchSubmissionError(message);
+        setIsSubmittingSearch(false);
+        setScopeRequestVersion((current) => current + 1);
+      };
+
+      searchTokenRef.current = token;
+      resultsRequestKeyRef.current = buildReplacementResultsKey(token);
+      setSearchSubmissionError(undefined);
+      setIsSubmittingSearch(true);
+      searchResultsStateRef.current = stableResultsState;
+      setSearchThreadsState(stableThreadsState);
+      setSearchResultsState(stableResultsState);
+
+      void (async () => {
+        try {
+          const [threadsResult, resultsResult] = await Promise.all([
+            getDbClient().api.listSearchConversations({
+              backupId: record.id,
+              filters,
+              limit: searchPageSize,
+              text,
+            }),
+            getDbClient().api.searchMessages({
+              backupId: record.id,
+              filters,
+              limit: searchPageSize,
+              text,
+            }),
+          ]);
+
+          if (searchTokenRef.current !== token) {
+            return;
+          }
+
+          if (!threadsResult.ok || !resultsResult.ok) {
+            const message = !threadsResult.ok
+              ? formatWorkerResultError(threadsResult.error)
+              : !resultsResult.ok
+                ? formatWorkerResultError(resultsResult.error)
+                : "The search could not be completed.";
+
+            restorePreviousSearch(message);
+            return;
+          }
+
+          const resultsKey = buildResultsScopeKey(token, undefined);
+          const nextResultsState: SearchResultsState = {
+            kind: "ready",
+            loadingMore: false,
+            response: resultsResult.value,
+          };
+
+          resultsRequestKeyRef.current = resultsKey;
+          displayedResultsKeyRef.current = resultsKey;
+          displayedResultsScopeConversationIdRef.current = undefined;
+          // The conversation param below is deleted inside a router
+          // transition that commits after this batch of state updates; mark
+          // the old selection so the scoped-results effect ignores the
+          // intermediate render instead of fetching a stale scope.
+          pendingScopeClearRef.current =
+            selectedConversationId === undefined
+              ? undefined
+              : { conversationId: selectedConversationId, token };
+          searchResultsStateRef.current = nextResultsState;
+          setActivatedSearchResults(new Map());
+          setSearchThreadsState({
+            kind: "ready",
+            loadingMore: false,
+            response: threadsResult.value,
+          });
+          setSearchResultsState(nextResultsState);
+          setActiveSearch(pendingSearch);
+          setSearchSubmissionError(undefined);
+          setSearchParams(clearSelectionSearchParams, { replace: true });
+        } catch (cause) {
+          if (searchTokenRef.current === token) {
+            restorePreviousSearch(formatError(cause));
+          }
+        } finally {
+          if (searchTokenRef.current === token) {
+            setIsSubmittingSearch(false);
+          }
+        }
+      })();
+    },
+    [
+      getDbClient,
+      isSubmittingSearch,
+      activeSearch,
+      record.id,
+      searchResultsState,
+      searchThreadsState,
+      selectedConversationId,
+      setSearchParams,
+    ],
+  );
+  const resetSearch = useCallback(() => {
+    searchTokenRef.current += 1;
+    resultsRequestKeyRef.current = "";
+    displayedResultsKeyRef.current = "";
+    displayedResultsScopeConversationIdRef.current = undefined;
+    pendingScopeClearRef.current = undefined;
+    searchResultsStateRef.current = { kind: "idle" };
+    setIsSubmittingSearch(false);
+    setSearchSubmissionError(undefined);
+    setActiveSearch(undefined);
+    setActivatedSearchResults(new Map());
+    setSearchThreadsState({ kind: "idle" });
+    setSearchResultsState({ kind: "idle" });
+    setSearchParams(clearSelectionSearchParams, { replace: true });
+  }, [setSearchParams]);
+  const loadMoreSearchThreads = useCallback(async () => {
+    if (activeSearch === undefined) {
+      return;
+    }
+
+    // A replacement search bumps the token, so pages from the previous
+    // search are discarded rather than merged into the new response.
+    const requestedToken = activeSearch.token;
+
+    await loadMoreSearchPage({
+      fetchPage: (offset) =>
+        getDbClient().api.listSearchConversations({
+          backupId: record.id,
+          filters: activeSearch.filters,
+          limit: searchPageSize,
+          offset,
+          text: activeSearch.text,
+        }),
+      getItemCount: (response) => response.conversations.length,
+      getTotal: (response) => response.total,
+      isStale: () => searchTokenRef.current !== requestedToken,
+      mergeResponses: (current, next) => ({
+        ...next,
+        conversations: mergeById(current.conversations, next.conversations),
+        offset: 0,
+      }),
+      setState: setSearchThreadsState,
+      state: searchThreadsState,
+    });
+  }, [activeSearch, getDbClient, record.id, searchThreadsState]);
+  const loadMoreSearchResults = useCallback(async () => {
+    if (activeSearch === undefined) {
+      return;
+    }
+
+    // Results are additionally scoped by the selected conversation, so the
+    // staleness guard is the scope request key, not just the search token.
+    const requestKey = resultsRequestKeyRef.current;
+
+    await loadMoreSearchPage({
+      fetchPage: (offset) =>
+        getDbClient().api.searchMessages({
+          backupId: record.id,
+          filters: {
+            ...activeSearch.filters,
+            ...(selectedConversationId === undefined
+              ? {}
+              : { conversationId: selectedConversationId }),
+          },
+          limit: searchPageSize,
+          offset,
+          text: activeSearch.text,
+        }),
+      getItemCount: (response) => response.results.length,
+      getTotal: (response) => response.total,
+      isStale: () => resultsRequestKeyRef.current !== requestKey,
+      mergeResponses: (current, next) => ({
+        ...next,
+        offset: 0,
+        results: mergeBy(
+          current.results,
+          next.results,
+          (item) => item.message.id,
+        ),
+      }),
+      setState: setSearchResultsState,
+      state: searchResultsState,
+    });
+  }, [
+    activeSearch,
+    getDbClient,
+    record.id,
+    searchResultsState,
+    selectedConversationId,
+  ]);
+  const retryResultsScope = useCallback(() => {
+    setScopeRequestVersion((current) => current + 1);
+  }, []);
   const loadTimelinePage = useCallback(
     async (direction: "after" | "before") => {
       let request:
@@ -597,7 +1224,8 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   );
 
   return (
-    <PageShell
+    <>
+      <PageShell
       actions={
         <>
           <Button asChild size="sm" variant="ghost">
@@ -609,30 +1237,116 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
           <Badge variant="success">Ingested</Badge>
         </>
       }
-      description="Browse conversations, inspect message metadata, and preview source attachments without modifying the backup."
+      description="Browse or search conversations, inspect message metadata, and preview source attachments without modifying the backup."
       eyebrow="Messages"
       maxWidth="full"
       title={record.friendlyName}
     >
-      <div className="relative grid min-h-[var(--layout-workspace-min)] overflow-hidden rounded-lg border border-border bg-surface shadow-1 [grid-template-columns:minmax(var(--pane-threads),35%)_minmax(0,1fr)] lg:h-[calc(100vh_-_var(--layout-top-bar)_-_var(--space-64)_-_var(--space-64)_-_var(--space-48))] lg:[grid-template-columns:var(--pane-threads)_minmax(var(--pane-timeline-min),1fr)_var(--pane-detail)]">
-        <MessagesPane title="Threads">
-          <ConversationPane
-            conversationsState={conversationsState}
-            selectedConversationId={selectedConversationId}
-            onLoadMoreConversations={() => {
-              void loadMoreConversations();
-            }}
-            onSelectConversation={selectConversation}
-          />
+      <SearchPanel
+        activeSearch={activeSearch}
+        isSubmittingSearch={isSubmittingSearch}
+        searchResultsState={searchResultsState}
+        submissionError={searchSubmissionError}
+        searchThreadsState={searchThreadsState}
+        onReset={resetSearch}
+        onSubmit={submitSearch}
+      />
+
+      <div
+        aria-busy={isSubmittingSearch}
+        className={cn(
+          "relative grid min-h-[var(--layout-workspace-min)] flex-1 overflow-hidden rounded-lg border border-border bg-surface shadow-1",
+          activeSearch === undefined
+            ? "[grid-template-columns:var(--pane-threads)_minmax(var(--pane-timeline-min),1fr)]"
+            : "[grid-template-columns:var(--pane-search-threads)_var(--pane-results)_minmax(var(--pane-search-timeline-min),1fr)]",
+          // The docked fourth column follows the same --layout-detail-dock
+          // matchMedia state as the dialog semantics (detailDockMediaQuery)
+          // — not a stylesheet breakpoint, which could not track the
+          // rem-based token.
+          detailOpen &&
+            !detailOverlayActive &&
+            (activeSearch === undefined
+              ? "[grid-template-columns:var(--pane-threads)_minmax(var(--pane-timeline-min),1fr)_var(--pane-detail)]"
+              : "[grid-template-columns:var(--pane-search-threads)_var(--pane-results)_minmax(var(--pane-search-timeline-min),1fr)_var(--pane-detail)]"),
+        )}
+        data-testid="messages-workspace"
+        inert={isSubmittingSearch}
+      >
+        <MessagesPane testId="threads-pane" title="Threads">
+          {activeSearch === undefined ? (
+            <ConversationPane
+              conversationsState={conversationsState}
+              selectedConversationId={selectedConversationId}
+              onLoadMoreConversations={() => {
+                void loadMoreConversations();
+              }}
+              onSelectConversation={selectConversation}
+            />
+          ) : (
+            <SearchConversationPane
+              selectedConversationId={selectedConversationId}
+              state={searchThreadsState}
+              onLoadMore={() => {
+                void loadMoreSearchThreads();
+              }}
+              onSelectConversation={selectConversation}
+            />
+          )}
         </MessagesPane>
 
+        {activeSearch === undefined ? null : (
+          <MessagesPane
+            actions={
+              <div className="flex items-center gap-2">
+                {displayedSearchResults === undefined ? null : (
+                  <Badge variant="neutral">
+                    {displayedSearchResults.total.toLocaleString()}
+                  </Badge>
+                )}
+                <Button
+                  aria-label="Show results from all threads"
+                  disabled={selectedConversationId === undefined}
+                  onClick={showAllSearchResults}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  All
+                </Button>
+              </div>
+            }
+            className="border-l border-border"
+            testId="search-results-pane"
+            title={searchResultsPaneTitle}
+          >
+            <SearchResultsPane
+              activationRevision={searchResultActivationRevision}
+              canHandleJump={canJumpSearchResults}
+              isDisplayingPreviousScope={isDisplayingPreviousSearchScope}
+              jumpMessageId={effectivePinnedSearchResult?.message.id}
+              pinnedResult={effectivePinnedSearchResult}
+              selectedMessageId={selectedMessageId}
+              state={searchResultsState}
+              onLoadMore={() => {
+                void loadMoreSearchResults();
+              }}
+              onRetry={retryResultsScope}
+              onSelectResult={selectSearchResult}
+            />
+          </MessagesPane>
+        )}
+
         <MessagesPane
-          className="border-l border-border lg:border-r"
+          className="border-l border-border"
+          testId="timeline-pane"
           title={selectedConversation === undefined ? "Timeline" : conversationTitle(selectedConversation)}
         >
           <TimelinePane
+            activationRevision={searchResultActivationRevision}
+            canHandleJump={canJumpTimeline}
             getBackupClient={getBackupClient}
             getMediaClient={getMediaClient}
+            jumpMessageId={effectivePinnedSearchResult?.message.id}
             record={record}
             runPreviewTask={runPreviewTask}
             selectedMessageId={selectedMessageId}
@@ -645,42 +1359,633 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
           />
         </MessagesPane>
 
-        <MessagesPane
-          actions={
-            <Button
-              className="lg:hidden"
-              onClick={closeDetail}
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              <X aria-hidden="true" className="size-4" />
-              Close
-            </Button>
-          }
-          className={cn(
-            "absolute inset-y-0 right-0 z-10 w-[min(var(--pane-detail),calc(100%_-_var(--space-16)))] border-l border-border shadow-2 lg:static lg:z-auto lg:w-auto lg:shadow-none",
-            selectedMessageId === undefined && "hidden lg:flex",
+          {selectedMessageId === undefined || detailOverlayOpen ? null : (
+            <MessageDetailsPane
+              detailState={detailState}
+              getBackupClient={getBackupClient}
+              getMediaClient={getMediaClient}
+              isOverlay={false}
+              paneRef={detailPaneRef}
+              record={record}
+              runPreviewTask={runPreviewTask}
+              onDismiss={closeDetail}
+            />
           )}
-          dialog={
-            detailOverlayOpen
-              ? { label: "Message details", onDismiss: closeDetail }
-              : undefined
-          }
-          paneRef={detailPaneRef}
-          title="Details"
+        </div>
+      </PageShell>
+
+      {selectedMessageId === undefined || !detailOverlayOpen
+        ? null
+        : createPortal(
+            <div
+              className="fixed inset-0 z-50 flex justify-end bg-[var(--overlay-scrim)]"
+              data-testid="message-details-overlay"
+            >
+              <MessageDetailsPane
+                detailState={detailState}
+                getBackupClient={getBackupClient}
+                getMediaClient={getMediaClient}
+                isOverlay
+                paneRef={detailPaneRef}
+                record={record}
+                runPreviewTask={runPreviewTask}
+                onDismiss={closeDetail}
+              />
+            </div>,
+            document.body,
+          )}
+    </>
+  );
+}
+
+function MessageDetailsPane({
+  detailState,
+  getBackupClient,
+  getMediaClient,
+  isOverlay,
+  onDismiss,
+  paneRef,
+  record,
+  runPreviewTask,
+}: {
+  detailState: DetailState;
+  getBackupClient: () => BackupWorkerClient;
+  getMediaClient: () => MediaWorkerClient;
+  isOverlay: boolean;
+  onDismiss: () => void;
+  paneRef: Ref<HTMLElement>;
+  record: RecentBackupRecord;
+  runPreviewTask: RunPreviewTask;
+}) {
+  return (
+    <MessagesPane
+      actions={
+        <Button
+          aria-label="Close message details"
+          onClick={onDismiss}
+          size="sm"
+          type="button"
+          variant="ghost"
         >
-          <DetailPane
-            getBackupClient={getBackupClient}
-            getMediaClient={getMediaClient}
-            navigate={navigate}
-            record={record}
-            runPreviewTask={runPreviewTask}
-            state={detailState}
-          />
-        </MessagesPane>
+          <X aria-hidden="true" className="size-4" />
+          Close
+        </Button>
+      }
+      className={cn(
+        "border-l border-border",
+        isOverlay &&
+          "ml-auto w-[min(var(--pane-detail),calc(100%_-_var(--space-16)))] shadow-3",
+      )}
+      dialog={isOverlay ? { label: "Message details" } : undefined}
+      paneRef={paneRef}
+      testId="message-details-pane"
+      title="Details"
+    >
+      <DetailPane
+        getBackupClient={getBackupClient}
+        getMediaClient={getMediaClient}
+        record={record}
+        runPreviewTask={runPreviewTask}
+        state={detailState}
+      />
+    </MessagesPane>
+  );
+}
+
+function SearchPanel({
+  activeSearch,
+  isSubmittingSearch,
+  onReset,
+  onSubmit,
+  searchResultsState,
+  searchThreadsState,
+  submissionError,
+}: {
+  activeSearch: ActiveSearch | undefined;
+  isSubmittingSearch: boolean;
+  onReset: () => void;
+  onSubmit: (draft: SearchDraft) => void;
+  searchResultsState: SearchResultsState;
+  searchThreadsState: SearchThreadsState;
+  submissionError: string | undefined;
+}) {
+  // Draft fields live here — not in the workspace — so keystrokes re-render
+  // only this panel, never the virtualized panes. Values lift on submit.
+  const [query, setQuery] = useState("");
+  const [participantQuery, setParticipantQuery] = useState("");
+  const [hasAttachment, setHasAttachment] = useState(false);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const handleSubmit = (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    onSubmit({ fromDate, hasAttachment, participantQuery, query, toDate });
+  };
+  const handleReset = () => {
+    setQuery("");
+    setParticipantQuery("");
+    setHasAttachment(false);
+    setFromDate("");
+    setToDate("");
+    onReset();
+  };
+  const isStartingSearch =
+    isSubmittingSearch || searchThreadsState.kind === "loading";
+  const isSearching =
+    isStartingSearch ||
+    (activeSearch !== undefined && searchResultsState.kind === "loading");
+  const initialSearchError =
+    activeSearch === undefined
+      ? searchThreadsState.kind === "error"
+        ? searchThreadsState.message
+        : searchResultsState.kind === "error"
+          ? searchResultsState.message
+          : undefined
+      : undefined;
+
+  return (
+    <section
+      aria-label="Message search filters"
+      className="rounded-lg border border-border bg-surface p-4 shadow-1"
+      data-testid="m4-search-panel"
+    >
+      <form
+        className="grid gap-4"
+        data-testid="m4-search-form"
+        onSubmit={handleSubmit}
+      >
+        <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-end">
+          <label className="min-w-0 flex-1">
+            <span className="text-caption text-text-secondary">Search messages</span>
+            <input
+              className="mt-1 h-[var(--control-height-lg)] w-full rounded-md border border-border-strong bg-surface-sunken px-3 text-body text-text placeholder:text-text-tertiary"
+              onChange={(event) => {
+                setQuery(event.target.value);
+              }}
+              placeholder="Enter words or a quoted string"
+              required
+              type="search"
+              value={query}
+            />
+          </label>
+          <Button
+            disabled={isStartingSearch || query.trim().length === 0}
+            size="lg"
+            type="submit"
+            variant="primary"
+          >
+            <Search aria-hidden="true" className="size-4" />
+            {isStartingSearch ? "Searching..." : "Search"}
+          </Button>
+          <Button
+            disabled={
+              activeSearch === undefined &&
+              query.length === 0 &&
+              participantQuery.length === 0 &&
+              fromDate.length === 0 &&
+              toDate.length === 0 &&
+              !hasAttachment
+            }
+            onClick={handleReset}
+            size="lg"
+            type="button"
+            variant="secondary"
+          >
+            Reset
+          </Button>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <label>
+            <span className="text-caption text-text-secondary">Participant</span>
+            <input
+              className="mt-1 h-[var(--control-height-md)] w-full rounded-md border border-border-strong bg-surface-sunken px-2 text-body text-text placeholder:text-text-tertiary"
+              onChange={(event) => {
+                setParticipantQuery(event.target.value);
+              }}
+              placeholder="Name or handle"
+              type="text"
+              value={participantQuery}
+            />
+          </label>
+          <label>
+            <span className="text-caption text-text-secondary">From</span>
+            <input
+              className="mt-1 h-[var(--control-height-md)] w-full rounded-md border border-border-strong bg-surface-sunken px-2 text-body text-text"
+              onChange={(event) => {
+                setFromDate(event.target.value);
+              }}
+              type="date"
+              value={fromDate}
+            />
+          </label>
+          <label>
+            <span className="text-caption text-text-secondary">To</span>
+            <input
+              className="mt-1 h-[var(--control-height-md)] w-full rounded-md border border-border-strong bg-surface-sunken px-2 text-body text-text"
+              onChange={(event) => {
+                setToDate(event.target.value);
+              }}
+              type="date"
+              value={toDate}
+            />
+          </label>
+          <label className="flex min-h-[var(--control-height-lg)] items-center gap-2 self-end text-body text-text">
+            <input
+              checked={hasAttachment}
+              className="rounded border-border-strong bg-surface-sunken text-accent"
+              onChange={(event) => {
+                setHasAttachment(event.target.checked);
+              }}
+              type="checkbox"
+            />
+            Has attachment
+          </label>
+        </div>
+      </form>
+
+      <div aria-live="polite" className="mt-3 flex items-center gap-2 text-caption text-text-secondary">
+        {activeSearch === undefined ? (
+          <span>
+            {isStartingSearch
+              ? "Searching all extracted conversations."
+              : "Search spans all extracted conversations."}
+          </span>
+        ) : (
+          <>
+            <Badge variant="accent">Search active</Badge>
+            <span className="min-w-0 truncate">
+              {isSubmittingSearch
+                ? `Searching for “${query.trim()}”`
+                : `${isSearching ? "Searching" : "Showing results"} for “${activeSearch.text}”`}
+            </span>
+          </>
+        )}
       </div>
-    </PageShell>
+      {initialSearchError === undefined ? null : (
+        <div className="mt-3">
+          <InlineNotice kind="danger">{initialSearchError}</InlineNotice>
+        </div>
+      )}
+      {submissionError === undefined ? null : (
+        <div className="mt-3">
+          <InlineNotice kind="danger">{submissionError}</InlineNotice>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SearchConversationPane({
+  onLoadMore,
+  onSelectConversation,
+  selectedConversationId,
+  state,
+}: {
+  onLoadMore: () => void;
+  onSelectConversation: (conversationId: string) => void;
+  selectedConversationId: string | undefined;
+  state: SearchThreadsState;
+}) {
+  const response = getSearchResponse(state);
+
+  if (state.kind === "idle" || (state.kind === "loading" && response === undefined)) {
+    return (
+      <PaneEmpty icon={<Loader2 aria-hidden="true" className="size-6" />}>
+        Finding conversations with matches.
+      </PaneEmpty>
+    );
+  }
+
+  if (state.kind === "error" && response === undefined) {
+    return (
+      <div className="p-4">
+        <InlineNotice kind="danger">{state.message}</InlineNotice>
+      </div>
+    );
+  }
+
+  if (response === undefined) {
+    return null;
+  }
+
+  return (
+    <div className="flex h-full flex-col" data-testid="search-thread-list">
+      {state.kind === "loading" ? (
+        <div className="border-b border-border p-3">
+          <InlineNotice>Finding conversations. Previous matches remain visible.</InlineNotice>
+        </div>
+      ) : state.kind === "error" ? (
+        <div className="border-b border-border p-3">
+          <InlineNotice kind="danger">{state.message}</InlineNotice>
+        </div>
+      ) : null}
+      {response.coverage.truncated ? (
+        <div className="border-b border-border p-3">
+          <CoverageWarning coverage={response.coverage} />
+        </div>
+      ) : null}
+      <div className="min-h-0 flex-1">
+        {response.conversations.length === 0 ? (
+          <PaneEmpty icon={<MessageSquareText aria-hidden="true" className="size-6" />}>
+            {state.kind === "loading"
+              ? "The previous search had no matching conversations. Finding new matches."
+              : state.kind === "error"
+                ? "The previous search had no matching conversations."
+                : "No conversations matched this search."}
+          </PaneEmpty>
+        ) : (
+          <Virtuoso
+            className="h-full"
+            data={response.conversations}
+            itemContent={(_, conversation) => (
+              <SearchConversationRow
+                conversation={conversation}
+                isSelected={conversation.id === selectedConversationId}
+                onSelect={() => {
+                  onSelectConversation(conversation.id);
+                }}
+              />
+            )}
+          />
+        )}
+      </div>
+      {state.kind !== "ready" || state.moreError === undefined ? null : (
+        <div className="border-t border-border p-3">
+          <InlineNotice kind="danger">{state.moreError}</InlineNotice>
+        </div>
+      )}
+      {state.kind === "ready" && response.conversations.length < response.total ? (
+        <div className="border-t border-border p-3">
+          <Button
+            className="w-full"
+            disabled={state.loadingMore}
+            onClick={onLoadMore}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            {state.loadingMore ? "Loading..." : "Load more threads"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SearchConversationRow({
+  conversation,
+  isSelected,
+  onSelect,
+}: {
+  conversation: DbSearchConversationSummary;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      aria-current={isSelected ? "true" : undefined}
+      className={cn(listRowClass, isSelected && listRowSelectedClass)}
+      data-testid={`conversation-${conversation.id}`}
+      onClick={onSelect}
+      type="button"
+    >
+      <span className="flex min-w-0 items-start justify-between gap-2">
+        <span className="min-w-0 truncate text-body font-[var(--font-weight-strong)] text-text">
+          {conversationTitle(conversation)}
+        </span>
+        <Badge
+          aria-label={`${conversation.hitCount.toLocaleString()} search ${
+            conversation.hitCount === 1 ? "hit" : "hits"
+          }`}
+          data-testid={`search-hit-count-${conversation.id}`}
+          variant="neutral"
+        >
+          {conversation.hitCount.toLocaleString()}
+        </Badge>
+      </span>
+      <span className="mt-2 block text-micro text-text-tertiary">
+        Latest match {formatDateTime(conversation.latestHitAtUtc)}
+      </span>
+    </button>
+  );
+}
+
+function SearchResultsPane({
+  activationRevision,
+  canHandleJump,
+  isDisplayingPreviousScope,
+  jumpMessageId,
+  onLoadMore,
+  onRetry,
+  onSelectResult,
+  pinnedResult,
+  selectedMessageId,
+  state,
+}: {
+  activationRevision: number;
+  canHandleJump: boolean;
+  isDisplayingPreviousScope: boolean;
+  jumpMessageId: string | undefined;
+  onLoadMore: () => void;
+  onRetry: () => void;
+  onSelectResult: (result: SearchMessageResult) => void;
+  pinnedResult: SearchMessageResult | undefined;
+  selectedMessageId: string | undefined;
+  state: SearchResultsState;
+}) {
+  const response = getSearchResponse(state);
+  const displayedResults = useMemo(
+    () => includePinnedSearchResult(response?.results ?? [], pinnedResult),
+    [pinnedResult, response?.results],
+  );
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const findResultIndex = useCallback(
+    (messageId: string) =>
+      displayedResults.findIndex((result) => result.message.id === messageId),
+    [displayedResults],
+  );
+
+  useVirtuosoJump({
+    activationRevision,
+    canHandleJump,
+    findIndex: findResultIndex,
+    jumpMessageId,
+    virtuosoRef,
+  });
+
+  if (state.kind === "idle" || (state.kind === "loading" && response === undefined)) {
+    return (
+      <PaneEmpty icon={<Loader2 aria-hidden="true" className="size-6" />}>
+        Searching messages.
+      </PaneEmpty>
+    );
+  }
+
+  if (state.kind === "error" && response === undefined) {
+    return (
+      <div className="grid gap-3 p-4">
+        <InlineNotice kind="danger">{state.message}</InlineNotice>
+        <Button onClick={onRetry} size="sm" type="button" variant="secondary">
+          Retry search
+        </Button>
+      </div>
+    );
+  }
+
+  if (response === undefined) {
+    return null;
+  }
+
+  return (
+    <div className="flex h-full flex-col" data-testid="m4-search-results">
+      {state.kind === "loading" ? (
+        <div className="border-b border-border p-3">
+          <InlineNotice>
+            Searching messages. Previous-scope results remain visible.
+          </InlineNotice>
+        </div>
+      ) : state.kind === "error" ? (
+        <div className="grid gap-2 border-b border-border p-3">
+          <InlineNotice kind="danger">
+            {state.message}
+            {isDisplayingPreviousScope
+              ? " Showing previous-scope results."
+              : ""}
+          </InlineNotice>
+          <Button
+            onClick={onRetry}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            Retry search
+          </Button>
+        </div>
+      ) : null}
+      {response.coverage.truncated ? (
+        <div className="border-b border-border p-3">
+          <CoverageWarning coverage={response.coverage} />
+        </div>
+      ) : null}
+      <div className="min-h-0 flex-1">
+        {displayedResults.length === 0 ? (
+          <PaneEmpty icon={<MessageSquareText aria-hidden="true" className="size-6" />}>
+            {state.kind === "loading"
+              ? "The previous search scope had no matching messages. Searching again."
+              : state.kind === "error"
+                ? "The previous search scope had no matching messages."
+                : "No messages matched this search scope."}
+          </PaneEmpty>
+        ) : (
+          <Virtuoso
+            className="h-full"
+            data={displayedResults}
+            itemContent={(_, result) => (
+              <SearchResultRow
+                isSelected={result.message.id === selectedMessageId}
+                result={result}
+                onSelect={() => {
+                  onSelectResult(result);
+                }}
+              />
+            )}
+            ref={virtuosoRef}
+          />
+        )}
+      </div>
+      {state.kind !== "ready" || state.moreError === undefined ? null : (
+        <div className="border-t border-border p-3">
+          <InlineNotice kind="danger">{state.moreError}</InlineNotice>
+        </div>
+      )}
+      {state.kind === "ready" && response.results.length < response.total ? (
+        <div className="border-t border-border p-3">
+          <Button
+            className="w-full"
+            disabled={state.loadingMore || isDisplayingPreviousScope}
+            onClick={onLoadMore}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            {state.loadingMore ? "Loading..." : "Load more results"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SearchResultRow({
+  isSelected,
+  onSelect,
+  result,
+}: {
+  isSelected: boolean;
+  onSelect: () => void;
+  result: SearchMessageResult;
+}) {
+  const sender =
+    result.message.sender === undefined
+      ? result.message.isFromMe
+        ? "Me"
+        : "Unknown sender"
+      : participantLabel(result.message.sender);
+
+  return (
+    <button
+      aria-current={isSelected ? "true" : undefined}
+      className={cn(listRowClass, isSelected && listRowSelectedClass)}
+      data-search-result-id={result.message.id}
+      data-testid={`search-result-${String(result.message.sourceRowId)}`}
+      onClick={onSelect}
+      type="button"
+    >
+      <span className="block truncate text-body font-[var(--font-weight-strong)] text-text">
+        {conversationTitle(result.conversation)}
+      </span>
+      <span className="mt-1 block truncate text-caption text-text-secondary">
+        {sender} / {formatDateTime(result.message.sentAtUtc)}
+      </span>
+      <span className="mt-2 block break-words text-body text-text">
+        {result.snippets.map((segment, index) => (
+          <span
+            className={cn(
+              segment.highlighted &&
+                "bg-accent-subtle text-accent-text underline decoration-accent-text",
+            )}
+            key={`${segment.text}-${String(index)}`}
+          >
+            {segment.text}
+          </span>
+        ))}
+      </span>
+      {result.message.attachments.length > 0 ? (
+        <span className="mt-2 block text-micro text-text-tertiary">
+          {result.message.attachments.length.toLocaleString()} attachment
+          {result.message.attachments.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function CoverageWarning({
+  coverage,
+}: {
+  coverage: SearchMessagesResponse["coverage"];
+}) {
+  // Only bounded scans can truncate; the fts coverage shape is always
+  // complete, so this warning renders for the bounded-scan strategy alone.
+  if (coverage.strategy !== "bounded-scan") {
+    return null;
+  }
+
+  return (
+    <InlineNotice kind="warning">
+      {`Search examined the newest ${coverage.rowBudget.toLocaleString()} of ${coverage.candidateRows.toLocaleString()} candidate messages.`}{" "}
+      Older matches may be omitted.
+    </InlineNotice>
   );
 }
 
@@ -690,18 +1995,21 @@ function MessagesPane({
   className,
   dialog,
   paneRef,
+  testId,
   title,
 }: {
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
   /**
-   * When set, the pane is rendered as a modal dialog (used by the sub-lg
-   * detail overlay): dialog semantics, programmatic focus target, and
-   * Escape-to-dismiss.
+   * When set, the pane is rendered as a modal detail overlay with dialog
+   * semantics and a programmatic focus target. Focus containment and
+   * Escape-to-dismiss are owned by useModalFocusContainment at the
+   * workspace level — a single audited mechanism, not per-pane traps.
    */
-  dialog?: { label: string; onDismiss: () => void };
+  dialog?: { label: string };
   paneRef?: Ref<HTMLElement>;
+  testId?: string;
   title: string;
 }) {
   return (
@@ -709,16 +2017,7 @@ function MessagesPane({
       aria-label={dialog?.label}
       aria-modal={dialog === undefined ? undefined : true}
       className={cn("flex h-[var(--layout-workspace-min)] min-w-0 flex-col bg-surface lg:h-full", className)}
-      onKeyDown={
-        dialog === undefined
-          ? undefined
-          : (event) => {
-              if (event.key === "Escape") {
-                event.stopPropagation();
-                dialog.onDismiss();
-              }
-            }
-      }
+      data-testid={testId}
       ref={paneRef}
       role={dialog === undefined ? undefined : "dialog"}
       tabIndex={dialog === undefined ? undefined : -1}
@@ -820,8 +2119,9 @@ function ConversationRow({
     <button
       aria-current={isSelected ? "true" : undefined}
       className={cn(
-        "relative block w-full border-b border-border px-4 py-3 text-left hover:bg-surface-raised",
-        isSelected && "bg-accent-subtle pl-5 before:absolute before:left-0 before:top-0 before:h-full before:w-[var(--space-2)] before:bg-accent",
+        listRowClass,
+        "px-4",
+        isSelected && cn(listRowSelectedClass, "pl-5"),
       )}
       data-testid={`conversation-${conversation.id}`}
       onClick={onSelect}
@@ -843,8 +2143,11 @@ function ConversationRow({
 }
 
 function TimelinePane({
+  activationRevision,
+  canHandleJump,
   getBackupClient,
   getMediaClient,
+  jumpMessageId,
   onLoadTimelinePage,
   onSelectMessage,
   record,
@@ -853,8 +2156,11 @@ function TimelinePane({
   state,
   timelineRows,
 }: {
+  activationRevision: number;
+  canHandleJump: boolean;
   getBackupClient: () => BackupWorkerClient;
   getMediaClient: () => MediaWorkerClient;
+  jumpMessageId: string | undefined;
   onLoadTimelinePage: (direction: "after" | "before") => void;
   onSelectMessage: (messageId: string, conversationId: string) => void;
   record: RecentBackupRecord;
@@ -863,6 +2169,23 @@ function TimelinePane({
   state: TimelineState;
   timelineRows: TimelineRow[];
 }) {
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const findTimelineIndex = useCallback(
+    (messageId: string) =>
+      timelineRows.findIndex(
+        (row) => row.kind === "message" && row.id === messageId,
+      ),
+    [timelineRows],
+  );
+
+  useVirtuosoJump({
+    activationRevision,
+    canHandleJump: canHandleJump && state.kind === "ready",
+    findIndex: findTimelineIndex,
+    jumpMessageId,
+    virtuosoRef,
+  });
+
   if (state.kind === "idle") {
     return (
       <PaneEmpty icon={<MessageSquareText aria-hidden="true" className="size-6" />}>
@@ -964,6 +2287,7 @@ function TimelinePane({
               />
             )
           }
+          ref={virtuosoRef}
         />
       </div>
     </div>
@@ -1017,6 +2341,7 @@ function MessageRow({
           "block w-full px-6 py-2 text-center",
           isSelected && "bg-accent-subtle",
         )}
+        data-message-id={message.id}
         data-testid={`message-${String(message.sourceRowId)}`}
         onClick={onSelect}
         type="button"
@@ -1036,7 +2361,6 @@ function MessageRow({
         runEnd ? "pb-2" : "pb-0",
         isSelected && "bg-accent-subtle",
       )}
-      data-testid={`message-${String(message.sourceRowId)}`}
     >
       <span className={cn("flex gap-2", isSent ? "justify-end" : "justify-start")}>
         {!isSent && runStart ? <Avatar colorKey={senderKey} label={senderName} /> : null}
@@ -1068,6 +2392,8 @@ function MessageRow({
               // received.
               runEnd && (isSent ? "rounded-br-md" : "rounded-bl-md"),
             )}
+            data-message-id={message.id}
+            data-testid={`message-${String(message.sourceRowId)}`}
             onClick={onSelect}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
@@ -1615,6 +2941,8 @@ function AttachmentDetailCard({
         try {
           await fileHandle.remove();
         } catch {
+          // Best-effort cleanup: a denied or unsupported remove cannot hide
+          // the original extraction failure from the user.
         }
       };
 
@@ -1751,14 +3079,12 @@ function AttachmentDetailCard({
 function DetailPane({
   getBackupClient,
   getMediaClient,
-  navigate,
   record,
   runPreviewTask,
   state,
 }: {
   getBackupClient: () => BackupWorkerClient;
   getMediaClient: () => MediaWorkerClient;
-  navigate: ReturnType<typeof useNavigate>;
   record: RecentBackupRecord;
   runPreviewTask: RunPreviewTask;
   state: DetailState;
@@ -1894,17 +3220,6 @@ function DetailPane({
           )}
         </section>
 
-        <Button
-          onClick={() => {
-            void navigate(
-              `/backup/${encodeURIComponent(record.id)}/search?conversation=${encodeURIComponent(message.conversationId)}`,
-            );
-          }}
-          type="button"
-          variant="secondary"
-        >
-          Search this conversation
-        </Button>
       </div>
     </div>
   );
@@ -1968,6 +3283,148 @@ function stableStringHash(value: string): number {
   }
 
   return hash >>> 0;
+}
+
+function getSearchResponse<TResponse>(
+  state: SearchPaneState<TResponse>,
+): TResponse | undefined {
+  return state.kind === "idle" ? undefined : state.response;
+}
+
+function buildResultsScopeKey(
+  token: number,
+  conversationId: string | undefined,
+): string {
+  return `${String(token)}:${conversationId ?? ""}`;
+}
+
+/**
+ * Sentinel request key held while a replacement search is in flight; it can
+ * never equal a scope key, so stale pagination against the outgoing search
+ * is always detected.
+ */
+function buildReplacementResultsKey(token: number): string {
+  return `replacement:${String(token)}`;
+}
+
+function clearSelectionSearchParams(
+  current: URLSearchParams,
+): URLSearchParams {
+  const next = new URLSearchParams(current);
+
+  next.delete("conversation");
+  next.delete("message");
+
+  return next;
+}
+
+function detailDockMediaQuery(): MediaQueryList {
+  // CSS media queries cannot reference custom properties, so the dock
+  // threshold token is resolved once per query here. Everything that docks
+  // or undocks (grid columns, dialog semantics, focus behavior) derives from
+  // this one media query — never from a stylesheet breakpoint.
+  const dockWidth = getComputedStyle(document.documentElement)
+    .getPropertyValue("--layout-detail-dock")
+    .trim();
+
+  return window.matchMedia(`(min-width: ${dockWidth})`);
+}
+
+/**
+ * The shared load-more state machine for both search panes: guards against
+ * double-loads and exhausted lists, keeps prior pages on failure, and drops
+ * stale responses after a replacement search or scope change.
+ */
+async function loadMoreSearchPage<TResponse>({
+  fetchPage,
+  getItemCount,
+  getTotal,
+  isStale,
+  mergeResponses,
+  setState,
+  state,
+}: {
+  fetchPage: (offset: number) => Promise<WorkerResult<TResponse>>;
+  getItemCount: (response: TResponse) => number;
+  getTotal: (response: TResponse) => number;
+  isStale: () => boolean;
+  mergeResponses: (current: TResponse, next: TResponse) => TResponse;
+  setState: Dispatch<SetStateAction<SearchPaneState<TResponse>>>;
+  state: SearchPaneState<TResponse>;
+}): Promise<void> {
+  if (state.kind !== "ready") {
+    return;
+  }
+
+  const response = state.response;
+
+  if (state.loadingMore || getItemCount(response) >= getTotal(response)) {
+    return;
+  }
+
+  setState({ ...state, loadingMore: true, moreError: undefined });
+
+  try {
+    const result = await fetchPage(getItemCount(response));
+
+    setState((current) => {
+      if (current.kind !== "ready" || isStale()) {
+        return current;
+      }
+
+      if (!result.ok) {
+        return {
+          ...current,
+          loadingMore: false,
+          moreError: formatWorkerResultError(result.error),
+        };
+      }
+
+      return {
+        kind: "ready",
+        loadingMore: false,
+        response: mergeResponses(current.response, result.value),
+      };
+    });
+  } catch (cause) {
+    setState((current) =>
+      current.kind === "ready" && !isStale()
+        ? {
+            ...current,
+            loadingMore: false,
+            moreError: formatError(cause),
+          }
+        : current,
+    );
+  }
+}
+
+function buildSearchFilters(input: {
+  fromDate: string;
+  hasAttachment: boolean;
+  participantQuery: string;
+  toDate: string;
+}): SearchConversationFilters {
+  return {
+    ...(input.participantQuery.trim().length === 0
+      ? {}
+      : { participantQuery: input.participantQuery.trim() }),
+    ...(input.fromDate.trim().length === 0
+      ? {}
+      : { fromUtc: `${input.fromDate}T00:00:00.000Z` }),
+    ...(input.toDate.trim().length === 0
+      ? {}
+      : { toUtcExclusive: nextUtcDate(input.toDate) }),
+    ...(input.hasAttachment ? { hasAttachment: true } : {}),
+  };
+}
+
+function nextUtcDate(dateInput: string): string {
+  const date = new Date(`${dateInput}T00:00:00.000Z`);
+
+  date.setUTCDate(date.getUTCDate() + 1);
+
+  return date.toISOString();
 }
 
 function buildTimelineRows(messages: readonly DbMessageRecord[]): TimelineRow[] {

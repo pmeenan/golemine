@@ -143,6 +143,116 @@ describe("iOS message normalization hardening", () => {
     );
   });
 
+  it("keeps only explicit group names and preserves contact first names", async () => {
+    const smsDb = await createMemoryDatabase();
+    const contactsDb = await createMemoryDatabase();
+
+    smsDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (
+        ROWID INTEGER PRIMARY KEY,
+        guid TEXT,
+        chat_identifier TEXT,
+        service_name TEXT,
+        display_name TEXT,
+        style INTEGER
+      );
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+    `);
+    smsDb.exec(`
+      INSERT INTO handle (ROWID, id) VALUES
+        (1, '+15550101001'),
+        (2, '+15550101002'),
+        (3, '+15550101003');
+      INSERT INTO chat (
+        ROWID,
+        guid,
+        chat_identifier,
+        service_name,
+        display_name,
+        style
+      ) VALUES
+        (1, 'UNNAMED-GROUP', 'chat-opaque-id', 'iMessage', NULL, 43),
+        (2, 'NAMED-GROUP', 'chat-named-id', 'iMessage', 'Project Crew', 43),
+        (3, 'DIRECT-CHAT', '+15550101001', 'iMessage', NULL, 45);
+      INSERT INTO chat_handle_join (chat_id, handle_id) VALUES
+        (1, 1), (1, 2), (1, 3),
+        (2, 1), (2, 2), (2, 3),
+        (3, 1);
+    `);
+    contactsDb.exec(`
+      CREATE TABLE ABPerson (
+        ROWID INTEGER PRIMARY KEY,
+        First TEXT,
+        Last TEXT,
+        Organization TEXT
+      );
+      CREATE TABLE ABMultiValue (
+        UID INTEGER PRIMARY KEY,
+        record_id INTEGER,
+        property INTEGER,
+        value TEXT
+      );
+      INSERT INTO ABPerson (ROWID, First, Last) VALUES
+        (1, 'Brian', 'Meenan'),
+        (2, 'Karin', 'Stone'),
+        (3, 'Sean', 'Parker');
+      INSERT INTO ABMultiValue (UID, record_id, property, value) VALUES
+        (1, 1, 3, '+15550101001'),
+        (2, 2, 3, '+15550101002'),
+        (3, 3, 3, '+15550101003');
+    `);
+
+    const normalized = await normalizeIosMessages({
+      smsDb,
+      contactsDb,
+      manifest: noopManifest,
+      root: noopRoot,
+    });
+    const unnamedGroup = normalized.conversations.find(
+      (conversation) => conversation.providerKey === "UNNAMED-GROUP",
+    );
+    const namedGroup = normalized.conversations.find(
+      (conversation) => conversation.providerKey === "NAMED-GROUP",
+    );
+    const direct = normalized.conversations.find(
+      (conversation) => conversation.providerKey === "DIRECT-CHAT",
+    );
+
+    expect(unnamedGroup).toEqual(
+      expect.objectContaining({
+        kind: "group",
+        participantIds: ["self", "handle:1", "handle:2", "handle:3"],
+      }),
+    );
+    expect(unnamedGroup).not.toHaveProperty("displayName");
+    expect(namedGroup).toEqual(
+      expect.objectContaining({ displayName: "Project Crew", kind: "group" }),
+    );
+    expect(direct).toEqual(
+      expect.objectContaining({ displayName: "Brian Meenan", kind: "direct" }),
+    );
+    expect(normalized.participants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          contactFirstName: "Brian",
+          contactName: "Brian Meenan",
+          id: "handle:1",
+        }),
+        expect.objectContaining({
+          contactFirstName: "Karin",
+          contactName: "Karin Stone",
+          id: "handle:2",
+        }),
+        expect.objectContaining({
+          contactFirstName: "Sean",
+          contactName: "Sean Parker",
+          id: "handle:3",
+        }),
+      ]),
+    );
+  });
+
   it("omits out-of-range Apple timestamps instead of throwing", () => {
     expect(appleTimestampToIso(10n ** 30n)).toBeUndefined();
   });

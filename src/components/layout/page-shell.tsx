@@ -23,7 +23,7 @@ export function PageShell({
   return (
     <main
       className={cn(
-        "mx-auto flex w-full flex-col gap-6 px-6 py-8",
+        "mx-auto flex min-h-[calc(100dvh_-_var(--layout-top-bar))] w-full flex-col gap-6 px-6 py-8 print:min-h-0",
         maxWidth === "text" && "max-w-[var(--layout-content-text)]",
         maxWidth === "wide" && "max-w-[var(--layout-content-wide)]",
         maxWidth === "full" && "max-w-none",

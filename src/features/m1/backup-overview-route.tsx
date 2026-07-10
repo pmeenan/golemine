@@ -1,4 +1,4 @@
-import { Database, FileText, MessageSquareText, Search } from "lucide-react";
+import { Database, FileText, MessageSquareText } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
@@ -428,18 +428,12 @@ export function BackupOverviewRoute() {
         </Panel>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-4">
         <CapabilityLink
-          description="Thread browser route reserved for ingested messages."
+          description="Browse and search extracted message threads."
           icon={<MessageSquareText aria-hidden="true" className="size-5" />}
           label="Messages"
           to={`/backup/${encodeURIComponent(record.id)}/messages`}
-        />
-        <CapabilityLink
-          description="Search route reserved for the derived FTS index."
-          icon={<Search aria-hidden="true" className="size-5" />}
-          label="Search"
-          to={`/backup/${encodeURIComponent(record.id)}/search`}
         />
         <CapabilityLink
           description="Report builder route reserved for selected messages."

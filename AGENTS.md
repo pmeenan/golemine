@@ -129,8 +129,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   probe caused a TDZ crash in production bundles). Worker construction
   (including the probe worker) is centralized in `src/lib/worker-client.ts`.
   One-shot open/detect/ingest UI operations create fresh worker clients per
-  operation and release them in `finally`; M3 browse/search routes intentionally
-  own route-scoped db/backup/media workers where repeated queries or previews would
+  operation and release them in `finally`; the unified M4 messages route
+  intentionally owns route-scoped db/backup/media workers where repeated queries or
+  previews would
   otherwise churn workers or contend for the same OPFS SAH pool (D-029 — the
   per-backup SAH pool is held while the route is mounted; same-backup multi-tab
   browsing is out of scope for now).
@@ -237,7 +238,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   detection/encryption, opens `Manifest.db` with root `Manifest.db-wal`/`-shm`
   sidecars applied when present, reads only the needed
   sms/contact/contact-image databases and sidecars, normalizes
-  Messages/contacts/attachments/tapbacks/avatars (tapback classification is
+  Messages/contacts/attachments/tapbacks/avatars (resolved participants retain both
+  full contact names and contact first names; group `displayName` is emitted only for
+  an explicit `chat.display_name`, D-036; tapback classification is
   open-ended: `associated_message_type` 2000–2999 = reaction adds with unmapped kinds
   folded as `unknown`, 3000–3999 = removals diverted from messages; undecodable
   `attributedBody` with empty `text` emits a `message-body-undecodable` warning, and
@@ -263,11 +266,49 @@ metal and the ore it surfaces; no clay/terracotta styling).
   by actual `File.size`, and capped by a per-ingest eager hash budget; larger,
   unknown-size, deceptive-size, or budget-exhausted media keeps path/domain/GUID
   provenance and is hashed later on demand by extraction/report code.
-- M3 browse/search is implemented in `src/features/m3/` and covered by
-  `e2e/m3.spec.ts`. It requires an `ingested` recent, uses `react-virtuoso` for the
-  conversation list and timeline, renders all backup strings as text nodes, supports
-  load-more pagination for conversations/timelines/search results, and opens search
-  results in thread context via `/backup/:id/messages?conversation=...&message=...`.
+- M4 unified browse/search is implemented in `src/features/m3/messages-route.tsx` and
+  covered by `e2e/m3.spec.ts`; there is no standalone search route. It requires an
+  `ingested` recent, uses `react-virtuoso` for conversation/timeline/result lists,
+  renders all backup strings as text nodes, supports load-more pagination, and opens
+  results in thread context via
+  `/backup/:id/messages?conversation=...&message=...`. Explicit conversation names
+  win; otherwise one-to-one labels use the other participant's full label and unnamed
+  groups list every non-self participant with contact first name/name/handle fallbacks
+  joined as "A, B and C" (D-036). Search always starts across all
+  conversations; selecting a hit-filtered thread scopes only the Results column, and
+  the "All" affordance restores global results. Details is absent until message
+  selection, overlays with dialog/focus containment below the `--layout-detail-dock`
+  (96rem) docking threshold, and docks only when the four-pane layout fits. The dock
+  threshold has one source of truth: `detailDockMediaQuery` resolves the token into a
+  JS `matchMedia` query (lazily initializing the overlay state so cold deep links
+  render the correct mode on the first frame) that drives BOTH the dialog semantics
+  and the grid-template-columns classes — CSS media queries cannot reference custom
+  properties, so never reintroduce a stylesheet breakpoint (e.g. Tailwind `2xl:`)
+  for docking. Crossing the threshold while Details is open keeps the return-focus
+  refs intact and moves focus to the pane in the new mode; focus returns to the
+  activating element only when Details fully closes. Modal focus containment (inert
+  `#root`, focusin backstop, Tab trap, Escape dismiss) lives in the shared
+  `useModalFocusContainment` hook (`src/components/ui/modal-focus.ts`) — reuse it
+  for future overlays instead of per-pane traps. Search draft fields are local to
+  `SearchPanel` (lifted on submit) so keystrokes never re-render the virtualized
+  panes; both search panes share the generic `SearchPaneState`/`loadMoreSearchPage`
+  machinery and the `useVirtuosoJump` hook in `m3-shared.tsx`; results-scope
+  identity is built only via `buildResultsScopeKey`/`buildReplacementResultsKey`.
+  Compact active-search pane tokens
+  (`--pane-search-threads`, `--pane-results`, `--pane-search-timeline-min`) keep the
+  workspace inside the 1024px floor; do not replace them with hardcoded widths.
+  Activated search results are cached per active search, but the effective pin is
+  derived from the URL-selected conversation/message; preserve that split so browser
+  Back/Forward cannot leak a hit into the wrong Results scope. Every explicit result
+  click also increments the Virtuoso jump revision so re-activating the same selected
+  hit recenters it. Replacement searches invalidate in-flight scope/pagination work,
+  keep the prior displayed state coherent on failure, bind the Results title/count
+  to the actually displayed scope (marked "previous scope" while a new scope loads or
+  fails), and a failed thread-scoped fetch shows a Retry affordance. The modal
+  Details portal lives outside inert `#root`; focus return re-finds the activating
+  trigger by message id (`data-search-result-id`/`data-message-id` attributes — not
+  test ids), falling back to the focusable timeline bubble when a virtualized result
+  trigger disappears.
   Keep the UI token-only and Design.md-compliant; sent-bubble background follows the
   normalized `serviceKind` (`sms-family` → `--bubble-sms`; `imessage` and `unknown` →
   `--bubble-imessage`, D-032 — never string-match raw service names in UI), message
@@ -276,16 +317,33 @@ metal and the ore it surfaces; no clay/terracotta styling).
   avatars are chosen from the eight `--avatar-*` tokens by stable participant
   handle/label hash. Do not add hardcoded colors/sizes or custom focus styles in these
   panes.
-- M3 db-worker reads live in `src/workers/db/queries.ts`: `listConversations`
+- M4 db-worker reads live in `src/workers/db/queries.ts`: `listConversations`
   (`listThreads` alias), `getMessageTimelinePage`,
   `getMessageTimelineMessagesPage` (same request shape, messages-only response
   without conversation hydration — use it for load-more), `getMessageDetails`,
-  and `searchMessages`. Extend this query API rather than issuing SQL from
-  React. Search compiles user terms to quoted FTS5 expressions, applies filters
-  in db-worker, and returns structured snippet segments for safe text
-  rendering; hostile bodies containing the U+0001/U+0002 snippet delimiters
-  degrade to a single non-highlighted segment and sentinel chars are always
-  stripped from output (D-030). Last-message previews use a per-conversation correlated
+  `searchMessages`, and `listSearchConversations`. Extend this query API rather than
+  issuing SQL from React. Unquoted terms compile to case-insensitive implicit-AND FTS5
+  prefixes. Quoted literals are Unicode-case-insensitive raw substrings: only ASCII
+  letter/digit/underscore tokens with provably sound internal left boundaries narrow
+  through FTS, then candidate bodies are verified with escaped `/iu` matchers in
+  db-worker. This ASCII restriction prevents JavaScript/SQLite `unicode61` case-table
+  skew from hiding matches. Every quoted-literal verification scan — FTS-narrowed or
+  not — applies the newest-first `boundedSearchRowBudget` (10,000 candidate rows) in
+  a single ordered prepared-statement pass with throttled progress (D-035; never
+  reintroduce LIMIT/OFFSET batches, which re-execute the FTS match per batch).
+  `SearchCoverage` is a discriminated union: `fts` means complete, `bounded-scan`
+  carries `rowBudget` and the UI must disclose truncation — branch on `strategy`,
+  not on field presence. Conversation-scoped no-narrowing-key quotes share the one
+  global bounded corpus (scope filters after the budget; test-locked, D-035).
+  `listSearchConversations` uses identical semantics and
+  returns newest-hit order plus per-thread hit counts. Search returns structured
+  snippet segments for safe text rendering; exact quoted literals are highlighted
+  and, on the verification path, unquoted AND-terms are highlighted as whole
+  prefixed tokens inside the literal-centered window; snippet windows align to code
+  points so emoji never split into lone surrogates. Hostile bodies containing
+  U+0001/U+0002 degrade to a single non-highlighted
+  segment and sentinel chars are always stripped (D-030/D-034). Last-message previews
+  use a per-conversation correlated
   LIMIT-1 lookup (not ROW_NUMBER over all messages) — preserve its ordering
   `COALESCE(sent_at_utc, '') DESC, source_rowid DESC, id DESC` when touching it.
 - M3 attachment source reads use

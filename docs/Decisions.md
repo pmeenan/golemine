@@ -561,7 +561,7 @@ when no thread is selected, thread-scoped when one is, with an "All" affordance 
 unselect), jump-to-message on result click, an on-demand collapsible details pane, and
 a reset control that returns to plain browsing. Search always spans all conversations
 — the conversation filter field is dropped; the results column's thread scoping
-replaces it. The standalone search route is removed once parity lands. Encrypted
+replaces it. M4 removed the standalone search route after parity landed. Encrypted
 backups and later milestones renumber to M5+.
 
 Search text semantics:
@@ -569,11 +569,22 @@ Search text semantics:
 - Case-insensitive throughout.
 - Unquoted space-separated words are an implicit AND, matching in any order anywhere
   in the message, each word as an FTS5 prefix query (`word*`), not whole-word only.
-- Quoted strings are true case-insensitive substring matches: the quoted text's
-  indexable tokens compile to an FTS narrowing query and the db-worker verifies the
-  raw substring against candidate bodies. Quoted strings with no indexable tokens
-  (punctuation/emoji only) fall back to a bounded non-FTS scan with a documented row
-  budget that reports truncation.
+- Quoted strings are true Unicode-case-insensitive substring matches: only ASCII
+  letter/digit/underscore tokens whose boundary is provably inside the literal
+  compile to an FTS narrowing query, and the db-worker verifies the raw substring
+  with escaped `/iu` matchers against candidate bodies. Restricting quoted narrowing
+  keys to ASCII avoids false negatives when JavaScript and SQLite's bundled
+  `unicode61` tables recognize different Unicode case pairs. A quote without a
+  compatible narrowing token (punctuation/emoji-only, non-ASCII-only internal tokens,
+  or a single token that may begin mid-word) falls back to a newest-first non-FTS scan
+  capped at 10,000 filtered rows; the response reports candidate coverage and
+  truncation. (D-035 later extended the same 10,000-row budget to FTS-narrowed
+  verification scans.)
+
+Implementation resolution: active search uses compact tokenized Threads, Results,
+and Timeline widths at the 1024px desktop floor. The on-demand Details pane overlays
+with dialog/focus semantics until the viewport reaches 96rem, where all four panes can
+dock without violating their minima.
 
 Rationale: FTS5 phrase queries match token sequences, so they cannot deliver
 "string match as-is" (no mid-word matches, punctuation ignored); narrowing with FTS
@@ -582,3 +593,56 @@ honoring the user's literal quoted text. Prefix matching for words matches user
 expectations for message search better than whole-word matching at negligible FTS5
 cost. All compilation and verification stay in the db-worker so hostile bodies are
 never interpolated and the D-030 snippet-sentinel rules keep applying.
+
+## D-035 — Every quoted-literal verification scan is budgeted and single-pass (2026-07-09)
+
+The initial M4 implementation verified FTS-narrowed quoted literals against the
+entire candidate set, in `LIMIT/OFFSET` batches that re-executed the FTS match and
+its `ORDER BY` for every batch. On a real backup a quoted phrase whose narrowing
+token is common ("the") could make one search — issued twice per submit, again per
+load-more, and again per thread-scope click — stall the db-worker for minutes with
+no disclosure and no progress.
+
+Decision: `scanVerifiedSearchMatches` always applies the newest-first
+`boundedSearchRowBudget` (10,000 candidate rows), whether or not the literal has an
+FTS narrowing key, and reads candidates with a single ordered prepared statement
+stepped row-by-row (one FTS match, one sort, one row in memory at a time) with
+throttled worker progress. Coverage is a discriminated union: a complete scan keeps
+the `fts` shape (`truncated: false`, no budget field), and any scan that could not
+examine every candidate — or any no-narrowing-key scan, whose budget is its defining
+semantic — reports `bounded-scan` with `rowBudget` so the UI must disclose omitted
+older rows.
+
+Also recorded from D-034's test suite, now explicit: a conversation-scoped quoted
+search without a narrowing key shares the one global bounded corpus (the
+`conversationId` filter applies after the newest-first budget, in the db-worker).
+Scoping therefore cannot resurrect matches older than the newest 10,000 filtered
+rows; global and scoped coverage stay identical by design so hit counts never
+disagree between the Threads and Results panes. Quoted-path snippets highlight the
+verified literals and, within the literal-centered window, unquoted AND-terms as
+whole prefixed tokens (FTS `snippet()` is unavailable on the verification path);
+window boundaries are aligned to code points so emoji are never split into lone
+surrogates.
+
+## D-036 — Unnamed groups derive identity from all non-self participants (2026-07-10)
+
+iOS normalization previously filled every missing conversation `displayName` from the
+first non-self participant. For an unnamed group this erased the distinction between
+an explicit source title and a one-person fallback, so the messages workspace rendered
+many different groups as if each were a duplicate direct thread with that person.
+
+Decision: for `chat.style = 43` groups, normalized `displayName` is populated only from
+an explicit non-empty `chat.display_name`; neither the first participant nor the
+opaque `chat_identifier` is stored as a group title. Normalized participants retain
+`contactFirstName` separately from the full `contactName`, persisted as
+`participants.contact_first_name`. Presentation keeps explicit titles, keeps a full
+participant label for one-to-one threads, and labels unnamed groups from every
+non-self participant: first name when available, otherwise full contact name, then raw
+handle. Two labels use "A and B"; longer lists use "A, B and C". Derived database
+version 2 forces existing cached first-participant titles to be rebuilt from source.
+
+Rationale: group identity is participant-set identity unless the source names it. A
+distinct normalized first-name field avoids guessing name structure in React, while
+full-name and handle fallbacks keep unresolved or organization-only contacts visible.
+The version bump is necessary because the old derived rows do not record whether a
+stored group title was explicit or synthesized.

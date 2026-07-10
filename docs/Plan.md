@@ -4,34 +4,28 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M3 implemented for unencrypted iPhone backups — users can open and
-ingest a synthetic iPhone backup, then browse conversations, inspect a virtualized
-message timeline, view message provenance, search FTS-backed messages with filters and
-snippets, jump from search results into thread context, preview/extract source-backed
-attachments, load additional conversation/timeline/search pages beyond the first
-window, and cache native image thumbnails in OPFS. The fixture carries real
-Manifest/sms/contact SQLite data plus WAL sidecars, and Playwright covers open ->
-ingest -> messages/search. M2 hardening remains in place: SQLite-like WAL end-of-log
-handling for stale/torn WAL tails including root `Manifest.db-wal`, deferred hashing
-for large/unknown/deceptive/budget-exhausted attachment media, preserved attachment
-GUIDs and reaction raw timestamps, direct backup-worker -> db-worker ingest streaming,
-interrupted `ingesting` recents recovery, larger per-backup sqlite-wasm SAH pools
-(D-024), and rollback-journal header forcing for transient source SQLite opens
-(D-025). M3 HEIC thumbnails use isolated same-origin `libheif-js` vendor files loaded
-lazily by `media-worker` (production direct module import; Vite dev fetch-to-Blob
-module shim so public vendor files are not transformed), prefer embedded HEIF
-thumbnails when available, and fall back to full-image decode only inside the
-media-worker's 256 MiB RGBA-surface cap; thumbnail generation is serialized so only
-one decode can hold full-size working surfaces at a time (D-026/D-027/D-033). The
-messages UI has had its post-review Design.md §7/§8 pass for avatar colors/sizing,
-sent-bubble foreground tokens, timestamp affordances, attachment frame caps, and
-below-floor detail overlay behavior, plus a follow-up M3 fix pass: consolidated
-shared worker helper modules, snippet-sentinel search hardening (D-030), a
-messages-only timeline load-more query, route-scoped browse/search workers with
-SAH-pool install retry (D-029), a 1 GiB user-initiated extraction budget (D-031),
-and normalized `serviceKind` bubble styling (D-032). Next is M4 — folding search
-into the messages UI as one unified browse/search workspace (D-034); encrypted
-ingest follows in M5.**
+**Current status: M4 implemented for unencrypted iPhone backups — browsing and search
+now share one messages workspace (D-034). The search panel runs across all
+conversations; active search filters Threads by hit count/newest hit, adds an
+all-or-thread-scoped Results column, opens hits directly in the virtualized timeline,
+and keeps Details hidden until a message is selected. Search terms are
+case-insensitive implicit-AND FTS5 prefixes; quoted literals use Unicode `/iu` raw
+substring verification in a single-pass scan always budgeted to the newest 10,000
+candidate rows with disclosed truncation and throttled progress (D-035), whether or
+not a compatible internal ASCII FTS narrowing term exists. The standalone search
+route is removed, layout minima are tokenized, the wide detail-docking threshold is
+one token-resolved matchMedia source of truth for both layout and dialog semantics,
+modal focus containment is a shared hook, and Playwright covers search -> filtered
+threads/counts -> scoped/all results -> timeline/detail -> reset at the 1024px floor.
+Unnamed group threads now preserve only explicit source titles and otherwise identify
+all non-self participants by contact first name/name/handle; derived database version
+2 forces older first-participant fallback titles to be rebuilt.
+M2/M3 hardening remains in place: stale/torn WAL handling, source provenance and
+deferred media hashing, direct backup-worker -> db-worker ingest, per-backup SAH pools,
+route-scoped browse workers, hostile-safe snippet segments (D-030), normalized
+`serviceKind` styling (D-032), source-backed attachment preview/extraction, and
+isolated serialized HEIC thumbnail decoding (D-026/D-027/D-033). Next is M5 —
+encrypted backup ingest.**
 
 ## M0 — Scaffolding
 
@@ -228,46 +222,54 @@ tracked here so it is not lost).
 Goal: search is part of the messages workspace, not a separate page. Browsing and
 searching are one experience with shared thread/timeline context (D-034).
 
-- [ ] Search panel above the Threads/timeline workspace: the standalone search page's
+- [x] Search panel above the Threads/timeline workspace: the standalone search page's
       fields minus the conversation selector (search always spans all conversations),
       with explicit run and reset controls. Reset returns the workspace to plain
       browse mode.
-- [ ] Search semantics rework in db-worker (`compileUserTextToFtsExpression` +
+- [x] Search semantics rework in db-worker (`compileUserTextToFtsExpression` +
       `searchMessages`), per D-034:
-      - Case-insensitive throughout (FTS5 unicode61 folding for word terms; explicit
-        case folding for substring verification).
+      - Case-insensitive throughout (FTS5 unicode61 folding for word terms; escaped
+        Unicode `/iu` matching for substring verification).
       - Unquoted space-separated words: implicit AND, any order, anywhere in the
         message, each word matched as an FTS5 prefix (`word*`).
-      - Quoted strings: true case-insensitive substring match — compile the quoted
-        text's indexable tokens to an FTS narrowing query, then verify the raw
-        substring against candidate bodies in the db-worker. Quoted strings with no
-        indexable tokens (punctuation/emoji only) use a bounded non-FTS scan with a
-        documented row budget; report when the budget truncates results.
+      - Quoted strings: true Unicode-case-insensitive substring match — compile only
+        compatible ASCII letter/digit/underscore tokens with a sound internal left
+        boundary to an FTS narrowing query, then verify the raw substring against
+        candidate bodies in the db-worker. Quoted strings with no compatible key
+        (including punctuation/emoji-only, non-ASCII-only internal tokens, and
+        single-token mid-word literals) use a bounded non-FTS scan. Every
+        verification scan (narrowed or not) applies the 10,000-row newest-first
+        budget in one ordered single-pass statement and reports when the budget
+        truncates results (D-035).
       - Unit tests for the compiler and the verification path: mixed quoted/unquoted
         input, punctuation-only quotes, case folding, mid-word substring hits,
         hostile bodies (existing D-030 sentinel rules still hold).
-- [ ] Active-search thread list: Threads pane filters to conversations with hits,
+- [x] Active-search thread list: Threads pane filters to conversations with hits,
       ordered by most-recent hit, with per-thread hit-count badges. New/extended
       db-worker query in `src/workers/db/queries.ts` (no SQL from React, bounded and
       paginated like existing queries).
-- [ ] Search-results column to the right of Threads: newest → oldest with snippet
+- [x] Search-results column to the right of Threads: newest → oldest with snippet
       segments, load-more pagination. No thread selected → all results; thread
       selected → only that thread's results (reuse the `conversationId` filter), with
       an "All" affordance in the column header to unselect the thread.
-- [ ] Clicking a result opens that conversation's timeline scrolled to the message
+- [x] Clicking a result opens that conversation's timeline scrolled to the message
       (existing jump-to-context path, without leaving the workspace).
-- [ ] Details pane becomes on-demand: collapsed/hidden until a message is selected,
+- [x] Details pane becomes on-demand: collapsed/hidden until a message is selected,
       dismissible, in both browse and search modes.
-- [ ] Layout/responsive pass: define the four-pane arrangement (Threads | Results |
+- [x] Layout/responsive pass: define the four-pane arrangement (Threads | Results |
       Timeline | Detail-on-demand) with Design.md tokens only; keep the below-floor
       overlay behavior; extend Design.md §7 with the new patterns rather than
       improvising (hard rule 11).
-- [ ] Remove the standalone `/backup/:id/search` route once parity lands; update
+- [x] Remove the standalone `/backup/:id/search` route once parity lands; update
       navigation and any deep links.
-- [ ] e2e coverage: run search → filtered threads with counts → results column
+- [x] e2e coverage: run search → filtered threads with counts → results column
       scoping via thread select/"All" → result click scrolls timeline → details
       on-demand → reset restores plain browse. Update `e2e/m3.spec.ts` expectations
       that assume the standalone search page.
+- [x] Unnamed group identity: keep `chat.display_name` only when the source explicitly
+      names a group, retain normalized contact first names, and render every non-self
+      participant as a natural first-name/name/handle list. Bump `derivedDbVersion` to
+      2 so cached first-participant group titles require re-ingest (D-036).
 
 ## M5 — Encrypted backups
 

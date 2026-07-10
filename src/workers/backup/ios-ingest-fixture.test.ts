@@ -138,6 +138,7 @@ describe("iOS M2 ingest fixture", () => {
         expect.arrayContaining([
           expect.objectContaining({
             handle: "+15550104000",
+            contactFirstName: "Avery",
             contactName: "Avery Cipher",
           }),
         ]),

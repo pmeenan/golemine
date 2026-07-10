@@ -21,6 +21,7 @@ export const dbWorkerApi: DbWorkerApi = {
   getMessageTimelineMessagesPage: queryApi.getMessageTimelineMessagesPage,
   getMessageDetails: queryApi.getMessageDetails,
   searchMessages: queryApi.searchMessages,
+  listSearchConversations: queryApi.listSearchConversations,
 };
 
 expose(dbWorkerApi);

@@ -9,9 +9,12 @@ import {
   type DbMessageRecord,
   type DbParticipantSummary,
   type DbReactionSummary,
+  type DbSearchConversationSummary,
   type DbWorkerApi,
   type ListConversationsRequest,
   type ListConversationsResponse,
+  type ListSearchConversationsRequest,
+  type ListSearchConversationsResponse,
   type MessageDetailsRequest,
   type MessageDetailsResponse,
   type MessageTimelineMessagesPageResponse,
@@ -21,6 +24,8 @@ import {
   type NormalizedParticipantKind,
   type NormalizedReactionKind,
   type SearchMessageResult,
+  type SearchCoverage,
+  type SearchConversationFilters,
   type SearchMessagesFilters,
   type SearchMessagesRequest,
   type SearchMessagesResponse,
@@ -35,7 +40,10 @@ import {
   nativeImageMimeTypes,
   normalizeMimeType,
 } from "../shared/media-mime";
-import { emitWorkerProgress } from "../shared/progress";
+import {
+  createThrottledWorkerProgress,
+  emitWorkerProgress,
+} from "../shared/progress";
 import { classifyServiceKind } from "../shared/service-kind";
 import { classifySqliteWasmError } from "../shared/sqlite-errors";
 import {
@@ -54,10 +62,13 @@ type QueryApi = Pick<
   | "getMessageTimelineMessagesPage"
   | "getMessageDetails"
   | "searchMessages"
+  | "listSearchConversations"
 >;
 
 export interface DbWorkerQueryApiOptions {
   databaseFactory?: DerivedDatabaseFactory;
+  /** Test seam; production uses `boundedSearchRowBudget`. */
+  boundedSearchRowBudget?: number;
 }
 
 interface Pagination {
@@ -80,6 +91,7 @@ interface ParticipantRow extends Record<string, unknown> {
   handle: string;
   kind: string;
   contactName: string | null;
+  contactFirstName: string | null;
   isSelf: number | bigint;
   avatarSha256: string | null;
   avatarMime: string | null;
@@ -143,6 +155,17 @@ interface SearchMessageRow extends MessageRow {
   snippetText: string | null;
 }
 
+interface SearchConversationAggregateRow extends Record<string, unknown> {
+  conversationId: string;
+  hitCount: number | bigint;
+  latestHitAtUtc: string | null;
+}
+
+interface SearchConversationCountsRow extends Record<string, unknown> {
+  candidateRows: number | bigint;
+  total: number | bigint;
+}
+
 const defaultPageLimit = 50;
 const maxListLimit = 100;
 const maxTimelineLimit = 200;
@@ -154,6 +177,18 @@ const snippetHighlightStart = "\u0001";
 const snippetHighlightEnd = "\u0002";
 const snippetEllipsis = "...";
 const ftsTermPattern = /[\p{L}\p{N}_]+/gu;
+const quotedFtsNarrowingTermPattern = /^[A-Za-z0-9_]+$/;
+const definiteFtsSeparatorPattern =
+  /[\p{P}\p{S}\p{Z}\p{Cc}\p{Cf}\p{Cs}\p{Cn}]/u;
+
+/**
+ * Maximum candidate messages examined newest-first by a quoted-literal
+ * verification scan — both when the literal has no sound FTS5 narrowing key
+ * (punctuation-only or a single mid-token substring) and when a narrowing key
+ * matches more candidates than can be verified without stalling the worker.
+ * The response coverage makes any omitted older rows explicit.
+ */
+export const boundedSearchRowBudget = 10_000;
 const nativeImageExtensions = new Set(["jpg", "jpeg", "png", "gif", "webp"]);
 const heicExtensions = new Set(["heic", "heif"]);
 const videoExtensions = new Set([
@@ -221,15 +256,23 @@ export function createDbWorkerQueryApi(
       controller.getMessageDetails(request, progress),
     searchMessages: (request, progress) =>
       controller.searchMessages(request, progress),
+    listSearchConversations: (request, progress) =>
+      controller.listSearchConversations(request, progress),
   };
 }
 
 class DbQueryController {
   private readonly databaseFactory: DerivedDatabaseFactory;
+  private readonly searchRowBudget: number;
 
   constructor(options: DbWorkerQueryApiOptions) {
     this.databaseFactory =
       options.databaseFactory ?? createOpfsDerivedDatabaseFactory();
+    this.searchRowBudget = clampInteger(
+      options.boundedSearchRowBudget ?? boundedSearchRowBudget,
+      1,
+      boundedSearchRowBudget,
+    );
   }
 
   async listConversations(
@@ -479,13 +522,14 @@ class DbQueryController {
         const page = normalizePagination(request, maxSearchLimit);
         const compiled = compileUserTextToFtsExpression(request.text);
 
-        if (compiled.expression.length === 0) {
+        if (!compiled.hasSearchCriteria) {
           return {
             results: [],
             queryTerms: [],
             limit: page.limit,
             offset: page.offset,
             total: 0,
+            coverage: completeSearchCoverage(0),
           };
         }
 
@@ -494,32 +538,15 @@ class DbQueryController {
         const opened = await this.databaseFactory({ backupId: request.backupId });
 
         try {
-          const search = buildSearchSql(request.filters, compiled.expression);
-          const total = readCount(
+          const searchPage = await readSearchMessagePage(
             opened.db,
-            `SELECT COUNT(*) ${search.fromSql} ${search.whereSql};`,
-            search.bind,
+            compiled,
+            request.filters,
+            page,
+            this.searchRowBudget,
+            progress,
           );
-          const rows = selectRows<SearchMessageRow>(
-            opened.db,
-            `
-              SELECT${messageSelectColumns("m.")},
-                snippet(messages_fts, 0, ?, ?, ?, ?) AS snippetText
-              ${search.fromSql}
-              ${search.whereSql}
-              ORDER BY bm25(messages_fts), COALESCE(m.sent_at_utc, ''), m.source_rowid, m.id
-              LIMIT ? OFFSET ?;
-            `,
-            [
-              snippetHighlightStart,
-              snippetHighlightEnd,
-              snippetEllipsis,
-              snippetTokenCount,
-              ...search.bind,
-              page.limit,
-              page.offset,
-            ],
-          );
+          const { rows } = searchPage;
           const messages = rows.map(mapMessageRow);
           const snippetByMessageId = new Map(
             rows.map((row) => [row.id, optionalString(row.snippetText)]),
@@ -548,9 +575,10 @@ class DbQueryController {
               {
                 message,
                 conversation,
-                snippets: buildSnippetSegments(
+                snippets: buildSearchSnippetSegments(
                   snippetByMessageId.get(message.id),
                   message.body,
+                  compiled,
                 ),
               },
             ];
@@ -563,7 +591,78 @@ class DbQueryController {
             queryTerms: compiled.terms,
             limit: page.limit,
             offset: page.offset,
-            total,
+            total: searchPage.total,
+            coverage: searchPage.coverage,
+          };
+        } finally {
+          opened.close();
+        }
+      },
+    );
+  }
+
+  async listSearchConversations(
+    request: ListSearchConversationsRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<ListSearchConversationsResponse>> {
+    return this.runWorkerOperation(
+      "Listing conversations with search hits failed.",
+      { backupId: request.backupId, operation: "listSearchConversations" },
+      async () => {
+        validateBackupId(request.backupId);
+        const page = normalizePagination(request, maxListLimit);
+        const compiled = compileUserTextToFtsExpression(request.text);
+
+        if (!compiled.hasSearchCriteria) {
+          return {
+            conversations: [],
+            queryTerms: [],
+            limit: page.limit,
+            offset: page.offset,
+            total: 0,
+            coverage: completeSearchCoverage(0),
+          };
+        }
+
+        await emitWorkerProgress(
+          "db",
+          progress,
+          "sqlite-query",
+          "Listing conversations with search hits",
+          0,
+          1,
+        );
+
+        const opened = await this.databaseFactory({ backupId: request.backupId });
+
+        try {
+          const searchPage = await readSearchConversationPage(
+            opened.db,
+            compiled,
+            request.filters,
+            page,
+            this.searchRowBudget,
+            progress,
+          );
+
+          hydrateConversations(opened.db, searchPage.conversations);
+
+          await emitWorkerProgress(
+            "db",
+            progress,
+            "complete",
+            "Search conversations listed",
+            1,
+            1,
+          );
+
+          return {
+            conversations: searchPage.conversations,
+            queryTerms: compiled.terms,
+            limit: page.limit,
+            offset: page.offset,
+            total: searchPage.total,
+            coverage: searchPage.coverage,
           };
         } finally {
           opened.close();
@@ -708,6 +807,7 @@ function readParticipantsForConversations(
         p.handle,
         p.kind,
         p.contact_name AS contactName,
+        p.contact_first_name AS contactFirstName,
         p.is_self AS isSelf,
         p.avatar_sha256 AS avatarSha256,
         p.avatar_mime AS avatarMime,
@@ -896,6 +996,7 @@ function readParticipantsByIds(
         handle,
         kind,
         contact_name AS contactName,
+        contact_first_name AS contactFirstName,
         is_self AS isSelf,
         avatar_sha256 AS avatarSha256,
         avatar_mime AS avatarMime,
@@ -1085,40 +1186,149 @@ function readAnchorOffset(
   );
 }
 
-interface CompiledFtsText {
+export interface CompiledFtsText {
   expression: string;
   terms: string[];
+  /** Terms typed outside quotes; snippet builders highlight these too. */
+  unquotedTerms: string[];
+  quotedSubstrings: string[];
+  hasSearchCriteria: boolean;
+  requiresVerification: boolean;
 }
 
 export function compileUserTextToFtsExpression(text: string): CompiledFtsText {
-  const terms = uniqueStrings(
-    Array.from(text.matchAll(ftsTermPattern), (match) => match[0])
-      .map((term) => term.trim())
-      .filter((term) => term.length > 0),
-  );
+  const parts = parseUserSearchText(text);
+  const allTerms: string[] = [];
+  const allUnquotedTerms: string[] = [];
+  const allNarrowingTerms: string[] = [];
+  const quotedSubstrings: string[] = [];
+  let unquotedTermCount = 0;
+
+  for (const part of parts) {
+    const partTerms = readFtsTerms(part.text);
+
+    allTerms.push(...partTerms);
+
+    if (!part.quoted) {
+      allNarrowingTerms.push(...partTerms);
+      allUnquotedTerms.push(...partTerms);
+      unquotedTermCount += partTerms.length;
+      continue;
+    }
+
+    if (part.text.length === 0) {
+      continue;
+    }
+
+    quotedSubstrings.push(part.text);
+    allNarrowingTerms.push(
+      ...Array.from(part.text.matchAll(ftsTermPattern), (match) => ({
+        term: match[0],
+        index: match.index,
+      }))
+        // A token whose left boundary is inside the literal must begin at an
+        // FTS token boundary in every raw substring match. It is therefore a
+        // sound prefix narrowing key. A token with no known separator on its
+        // left may begin mid-token ("rass" in "brass") and must never be used
+        // to exclude candidates. Quoted verification uses JavaScript's newer
+        // Unicode case folding, so only ASCII terms may gate SQLite unicode61
+        // candidates without risking version-skew false negatives.
+        .filter(({ index }) => hasSoundFtsLeftBoundary(part.text, index))
+        .filter(({ term }) => quotedFtsNarrowingTermPattern.test(term))
+        .map(({ term }) => term),
+    );
+  }
+
+  const terms = uniqueCaseFoldedStrings(allTerms);
+  const narrowingTerms = uniqueCaseFoldedStrings(allNarrowingTerms);
 
   return {
-    expression: terms.map(quoteFtsTerm).join(" "),
+    expression: narrowingTerms.map(quoteFtsPrefixTerm).join(" "),
     terms,
+    unquotedTerms: uniqueCaseFoldedStrings(allUnquotedTerms),
+    quotedSubstrings,
+    hasSearchCriteria:
+      unquotedTermCount > 0 || quotedSubstrings.length > 0,
+    requiresVerification: quotedSubstrings.length > 0,
   };
 }
 
-function quoteFtsTerm(term: string): string {
-  return `"${term.replaceAll('"', '""')}"`;
+interface UserSearchTextPart {
+  text: string;
+  quoted: boolean;
+}
+
+function parseUserSearchText(text: string): UserSearchTextPart[] {
+  const parts: UserSearchTextPart[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const quoteStart = text.indexOf('"', cursor);
+
+    if (quoteStart < 0) {
+      parts.push({ text: text.slice(cursor), quoted: false });
+      break;
+    }
+
+    if (quoteStart > cursor) {
+      parts.push({ text: text.slice(cursor, quoteStart), quoted: false });
+    }
+
+    const quoteEnd = text.indexOf('"', quoteStart + 1);
+
+    if (quoteEnd < 0) {
+      parts.push({ text: text.slice(quoteStart + 1), quoted: true });
+      break;
+    }
+
+    parts.push({
+      text: text.slice(quoteStart + 1, quoteEnd),
+      quoted: true,
+    });
+    cursor = quoteEnd + 1;
+  }
+
+  return parts;
+}
+
+function readFtsTerms(text: string): string[] {
+  return Array.from(text.matchAll(ftsTermPattern), (match) => match[0]).filter(
+    (term) => term.length > 0,
+  );
+}
+
+function hasSoundFtsLeftBoundary(literal: string, tokenIndex: number): boolean {
+  const precedingCodePoint = Array.from(literal.slice(0, tokenIndex)).at(-1);
+
+  return (
+    precedingCodePoint !== undefined &&
+    definiteFtsSeparatorPattern.test(precedingCodePoint)
+  );
+}
+
+function quoteFtsPrefixTerm(term: string): string {
+  return `"${term.replaceAll('"', '""')}"*`;
 }
 
 interface SearchSql {
   fromSql: string;
   whereSql: string;
   bind: SqliteBindValue[];
+  usesFts: boolean;
 }
 
 function buildSearchSql(
   filters: SearchMessagesFilters | undefined,
-  ftsExpression: string,
+  ftsExpression?: string,
 ): SearchSql {
-  const predicates = ["messages_fts MATCH ?"];
-  const bind: SqliteBindValue[] = [ftsExpression];
+  const usesFts = ftsExpression !== undefined && ftsExpression.length > 0;
+  const predicates: string[] = [];
+  const bind: SqliteBindValue[] = [];
+
+  if (usesFts) {
+    predicates.push("messages_fts MATCH ?");
+    bind.push(ftsExpression);
+  }
 
   if (filters?.conversationId !== undefined) {
     validateRequiredText(filters.conversationId, "conversationId");
@@ -1192,12 +1402,428 @@ function buildSearchSql(
   }
 
   return {
-    fromSql: `
-      FROM messages_fts
-      JOIN messages m ON m.rowid = messages_fts.rowid
-    `,
-    whereSql: `WHERE ${predicates.join("\n        AND ")}`,
+    fromSql: usesFts
+      ? `
+          FROM messages_fts
+          JOIN messages m ON m.rowid = messages_fts.rowid
+        `
+      : "FROM messages m",
+    whereSql:
+      predicates.length === 0
+        ? ""
+        : `WHERE ${predicates.join("\n        AND ")}`,
     bind,
+    usesFts,
+  };
+}
+
+interface SearchMessagePageResult {
+  rows: SearchMessageRow[];
+  total: number;
+  coverage: SearchCoverage;
+}
+
+interface SearchConversationPageResult {
+  conversations: DbSearchConversationSummary[];
+  total: number;
+  coverage: SearchCoverage;
+}
+
+interface ConversationHitAggregate {
+  conversationId: string;
+  hitCount: number;
+  latestHitAtUtc?: string;
+}
+
+interface VerifiedSearchScan {
+  rows: SearchMessageRow[];
+  total: number;
+  conversationHits: ConversationHitAggregate[];
+  coverage: SearchCoverage;
+}
+
+async function readSearchMessagePage(
+  db: DerivedSqliteDatabase,
+  compiled: CompiledFtsText,
+  filters: SearchMessagesFilters | undefined,
+  page: Pagination,
+  rowBudget: number,
+  progress?: WorkerProgressCallback,
+): Promise<SearchMessagePageResult> {
+  if (compiled.requiresVerification) {
+    return scanVerifiedSearchMatches(
+      db,
+      compiled,
+      filters,
+      page,
+      rowBudget,
+      progress,
+    );
+  }
+
+  const search = buildSearchSql(filters, compiled.expression);
+  const total = readSearchCandidateCount(db, search);
+
+  return {
+    rows: readSearchRows(db, search, page),
+    total,
+    coverage: completeSearchCoverage(total),
+  };
+}
+
+async function readSearchConversationPage(
+  db: DerivedSqliteDatabase,
+  compiled: CompiledFtsText,
+  filters: SearchConversationFilters | undefined,
+  page: Pagination,
+  rowBudget: number,
+  progress?: WorkerProgressCallback,
+): Promise<SearchConversationPageResult> {
+  const messageFilters = withoutConversationFilter(filters);
+
+  if (compiled.requiresVerification) {
+    const scan = await scanVerifiedSearchMatches(
+      db,
+      compiled,
+      messageFilters,
+      undefined,
+      rowBudget,
+      progress,
+    );
+    const pageHits = scan.conversationHits.slice(
+      page.offset,
+      page.offset + page.limit,
+    );
+
+    return {
+      conversations: readSearchConversationSummaries(db, pageHits),
+      total: scan.conversationHits.length,
+      coverage: scan.coverage,
+    };
+  }
+
+  const search = buildSearchSql(messageFilters, compiled.expression);
+  const counts = selectRows<SearchConversationCountsRow>(
+    db,
+    `
+      SELECT
+        COUNT(*) AS candidateRows,
+        COUNT(DISTINCT m.conversation_id) AS total
+      ${search.fromSql}
+      ${search.whereSql};
+    `,
+    search.bind,
+  ).at(0);
+  const candidateRows = toSafeNumber(counts?.candidateRows, "candidateRows");
+  const total = toSafeNumber(counts?.total, "total");
+  const rows = selectRows<SearchConversationAggregateRow>(
+    db,
+    `
+      WITH ranked_hits AS (
+        SELECT
+          m.conversation_id AS conversationId,
+          m.sent_at_utc AS latestHitAtUtc,
+          m.source_rowid AS latestHitSourceRowId,
+          m.id AS latestHitMessageId,
+          COUNT(*) OVER (
+            PARTITION BY m.conversation_id
+          ) AS hitCount,
+          ROW_NUMBER() OVER (
+            PARTITION BY m.conversation_id
+            ORDER BY
+              COALESCE(m.sent_at_utc, '') DESC,
+              m.source_rowid DESC,
+              m.id DESC
+          ) AS hitRank
+        ${search.fromSql}
+        ${search.whereSql}
+      )
+      SELECT
+        conversationId,
+        hitCount,
+        latestHitAtUtc
+      FROM ranked_hits
+      WHERE hitRank = 1
+      ORDER BY
+        COALESCE(latestHitAtUtc, '') DESC,
+        latestHitSourceRowId DESC,
+        latestHitMessageId DESC,
+        conversationId DESC
+      LIMIT ? OFFSET ?;
+    `,
+    [...search.bind, page.limit, page.offset],
+  );
+  const hits = rows.map((row) => ({
+    conversationId: requireString(row.conversationId, "conversationId"),
+    hitCount: toSafeNumber(row.hitCount, "hitCount"),
+    ...(optionalString(row.latestHitAtUtc) === undefined
+      ? {}
+      : { latestHitAtUtc: optionalString(row.latestHitAtUtc) }),
+  }));
+
+  return {
+    conversations: readSearchConversationSummaries(db, hits),
+    total,
+    coverage: completeSearchCoverage(candidateRows),
+  };
+}
+
+async function scanVerifiedSearchMatches(
+  db: DerivedSqliteDatabase,
+  compiled: CompiledFtsText,
+  filters: SearchMessagesFilters | undefined,
+  page: Pagination | undefined,
+  rowBudget: number,
+  progress?: WorkerProgressCallback,
+): Promise<VerifiedSearchScan> {
+  const isBoundedScan = compiled.expression.length === 0;
+  const boundedConversationId = isBoundedScan
+    ? filters?.conversationId
+    : undefined;
+
+  if (boundedConversationId !== undefined) {
+    validateRequiredText(boundedConversationId, "conversationId");
+  }
+
+  const search = buildSearchSql(
+    isBoundedScan ? withoutConversationFilter(filters) : filters,
+    isBoundedScan ? undefined : compiled.expression,
+  );
+  const availableCandidateRows = readSearchCandidateCount(db, search);
+  // The verification budget applies to FTS-narrowed candidates too: a quoted
+  // literal whose narrowing token is common ("the") can otherwise match most
+  // of a real backup and stall the worker. Truncation is disclosed below.
+  const scanLimit = Math.min(availableCandidateRows, rowBudget);
+  const selectedRows: SearchMessageRow[] = [];
+  const conversationHits = new Map<string, ConversationHitAggregate>();
+  const quotedLiteralMatchers = compileQuotedLiteralMatchers(
+    compiled.quotedSubstrings,
+  );
+  const throttledProgress = createThrottledWorkerProgress({
+    worker: "db",
+    progress,
+    phase: "sqlite-query",
+    label: "Verifying quoted matches",
+    totalUnits: scanLimit,
+  });
+  let scannedRows = 0;
+  let total = 0;
+
+  // A single ordered statement stepped row-by-row: one FTS match and one sort
+  // for the whole scan (the previous LIMIT/OFFSET batches re-executed both per
+  // batch), while holding only the current row and the requested page.
+  const statement = db.prepare(`
+    SELECT${messageSelectColumns("m.")},
+      NULL AS snippetText
+    ${search.fromSql}
+    ${search.whereSql}
+    ORDER BY
+      COALESCE(m.sent_at_utc, '') DESC,
+      m.source_rowid DESC,
+      m.id DESC
+    LIMIT ?;
+  `);
+
+  try {
+    statement.bind([...search.bind, scanLimit]);
+
+    while (statement.step()) {
+      const row = statement.get({}) as SearchMessageRow;
+
+      scannedRows += 1;
+
+      const emission = throttledProgress.maybeEmit(scannedRows);
+
+      if (emission !== undefined) {
+        await emission;
+      }
+
+      const body = requireString(row.body, "body");
+      const conversationId = requireString(
+        row.conversationId,
+        "conversationId",
+      );
+
+      if (
+        (boundedConversationId !== undefined &&
+          conversationId !== boundedConversationId) ||
+        !matchesQuotedSubstrings(body, quotedLiteralMatchers)
+      ) {
+        continue;
+      }
+
+      if (
+        page !== undefined &&
+        total >= page.offset &&
+        selectedRows.length < page.limit
+      ) {
+        selectedRows.push(row);
+      }
+
+      total += 1;
+
+      const existing = conversationHits.get(conversationId);
+
+      if (existing === undefined) {
+        const latestHitAtUtc = optionalString(row.sentAtUtc);
+
+        conversationHits.set(conversationId, {
+          conversationId,
+          hitCount: 1,
+          ...(latestHitAtUtc === undefined ? {} : { latestHitAtUtc }),
+        });
+      } else {
+        existing.hitCount += 1;
+      }
+    }
+  } finally {
+    statement.finalize();
+  }
+
+  await throttledProgress.finish(scannedRows);
+
+  const truncated = availableCandidateRows > scannedRows;
+
+  return {
+    rows: selectedRows,
+    total,
+    conversationHits: [...conversationHits.values()],
+    // A complete FTS-narrowed scan keeps the "fts" coverage shape; any scan
+    // that could not examine every candidate reports the bounded-scan shape so
+    // the UI discloses the budget, and the no-narrowing path always reports it
+    // (its newest-first budget is the defining semantic, D-034).
+    coverage:
+      isBoundedScan || truncated
+        ? {
+            strategy: "bounded-scan",
+            candidateRows: availableCandidateRows,
+            truncated,
+            rowBudget,
+          }
+        : completeSearchCoverage(availableCandidateRows),
+  };
+}
+
+function readSearchCandidateCount(
+  db: DerivedSqliteDatabase,
+  search: SearchSql,
+): number {
+  return readCount(
+    db,
+    `SELECT COUNT(*) ${search.fromSql} ${search.whereSql};`,
+    search.bind,
+  );
+}
+
+function readSearchRows(
+  db: DerivedSqliteDatabase,
+  search: SearchSql,
+  page: Pagination,
+): SearchMessageRow[] {
+  const useFtsSnippet = search.usesFts;
+  const snippetSql = useFtsSnippet
+    ? "snippet(messages_fts, 0, ?, ?, ?, ?)"
+    : "NULL";
+  const snippetBind: SqliteBindValue[] = useFtsSnippet
+    ? [
+        snippetHighlightStart,
+        snippetHighlightEnd,
+        snippetEllipsis,
+        snippetTokenCount,
+      ]
+    : [];
+
+  return selectRows<SearchMessageRow>(
+    db,
+    `
+      SELECT${messageSelectColumns("m.")},
+        ${snippetSql} AS snippetText
+      ${search.fromSql}
+      ${search.whereSql}
+      ORDER BY
+        COALESCE(m.sent_at_utc, '') DESC,
+        m.source_rowid DESC,
+        m.id DESC
+      LIMIT ? OFFSET ?;
+    `,
+    [
+      ...snippetBind,
+      ...search.bind,
+      page.limit,
+      page.offset,
+    ],
+  );
+}
+
+function readSearchConversationSummaries(
+  db: DerivedSqliteDatabase,
+  hits: readonly ConversationHitAggregate[],
+): DbSearchConversationSummary[] {
+  const conversations = readConversationsByIds(
+    db,
+    hits.map((hit) => hit.conversationId),
+  );
+  const conversationById = new Map(
+    conversations.map((conversation) => [conversation.id, conversation]),
+  );
+
+  return hits.map((hit) => {
+    const conversation = conversationById.get(hit.conversationId);
+
+    if (conversation === undefined) {
+      throw malformedRow("conversationId");
+    }
+
+    return {
+      ...conversation,
+      hitCount: hit.hitCount,
+      ...(hit.latestHitAtUtc === undefined
+        ? {}
+        : { latestHitAtUtc: hit.latestHitAtUtc }),
+    };
+  });
+}
+
+function withoutConversationFilter(
+  filters: SearchMessagesFilters | SearchConversationFilters | undefined,
+): SearchMessagesFilters | undefined {
+  if (filters === undefined) {
+    return undefined;
+  }
+
+  // Copy everything except the conversation scope so future filter fields
+  // flow through without needing to be enumerated here.
+  const rest: SearchMessagesFilters = { ...filters };
+
+  delete rest.conversationId;
+
+  return rest;
+}
+
+function compileQuotedLiteralMatchers(
+  quotedSubstrings: readonly string[],
+): RegExp[] {
+  return quotedSubstrings.map(
+    (literal) => new RegExp(escapeRegExp(literal), "iu"),
+  );
+}
+
+function matchesQuotedSubstrings(
+  body: string,
+  quotedLiteralMatchers: readonly RegExp[],
+): boolean {
+  return quotedLiteralMatchers.every((matcher) => matcher.test(body));
+}
+
+function foldSearchCase(value: string): string {
+  return value.toLowerCase();
+}
+
+function completeSearchCoverage(candidateRows: number): SearchCoverage {
+  return {
+    strategy: "fts",
+    candidateRows,
+    truncated: false,
   };
 }
 
@@ -1223,6 +1849,159 @@ function fallbackSnippetSegments(fallbackBody: string): SearchSnippetSegment[] {
   }
 
   return [{ text, highlighted: false }];
+}
+
+function buildSearchSnippetSegments(
+  snippetText: string | undefined,
+  fallbackBody: string,
+  compiled: CompiledFtsText,
+): SearchSnippetSegment[] {
+  if (compiled.quotedSubstrings.length > 0) {
+    const literalSegments = buildQuotedLiteralSnippetSegments(
+      fallbackBody,
+      compiled.quotedSubstrings,
+    );
+
+    if (literalSegments.some((segment) => segment.highlighted)) {
+      // Quoted searches skip FTS snippet(), so any unquoted AND-terms that
+      // land inside the literal-centered window must be highlighted here or
+      // the user cannot tell why a mixed query matched.
+      return highlightUnquotedTermTokens(
+        literalSegments,
+        compiled.unquotedTerms,
+      );
+    }
+  }
+
+  return buildSnippetSegments(snippetText, fallbackBody);
+}
+
+/**
+ * Highlights whole tokens whose prefix matches an unquoted search term inside
+ * non-highlighted snippet segments, mirroring FTS5 prefix-token semantics.
+ */
+function highlightUnquotedTermTokens(
+  segments: readonly SearchSnippetSegment[],
+  unquotedTerms: readonly string[],
+): SearchSnippetSegment[] {
+  const terms = unquotedTerms.filter((term) => term.length > 0);
+
+  if (terms.length === 0) {
+    return [...segments];
+  }
+
+  const matcher = new RegExp(
+    `(?<![\\p{L}\\p{N}_])(?:${terms.map(escapeRegExp).join("|")})[\\p{L}\\p{N}_]*`,
+    "giu",
+  );
+  const result: SearchSnippetSegment[] = [];
+
+  for (const segment of segments) {
+    if (segment.highlighted) {
+      pushSnippetSegment(result, segment.text, true);
+      continue;
+    }
+
+    let cursor = 0;
+
+    for (const match of segment.text.matchAll(matcher)) {
+      const index = match.index;
+
+      pushSnippetSegment(result, segment.text.slice(cursor, index), false);
+      pushSnippetSegment(result, match[0], true);
+      cursor = index + match[0].length;
+    }
+
+    pushSnippetSegment(result, segment.text.slice(cursor), false);
+  }
+
+  return result;
+}
+
+/**
+ * Builds hostile-safe highlights for verified quoted literals, including the
+ * bounded non-FTS path where SQLite cannot provide an FTS snippet.
+ */
+export function buildQuotedLiteralSnippetSegments(
+  body: string,
+  quotedSubstrings: readonly string[],
+): SearchSnippetSegment[] {
+  if (containsSnippetSentinels(body)) {
+    return fallbackSnippetSegments(body);
+  }
+
+  const literals = uniqueCaseFoldedStrings(
+    quotedSubstrings.filter((literal) => literal.length > 0),
+  ).sort((left, right) => right.length - left.length);
+
+  if (literals.length === 0) {
+    return fallbackSnippetSegments(body);
+  }
+
+  const literalPattern = literals.map(escapeRegExp).join("|");
+  const firstMatch = new RegExp(literalPattern, "iu").exec(body);
+
+  if (firstMatch?.index === undefined) {
+    return fallbackSnippetSegments(body);
+  }
+
+  const matchedLength = firstMatch[0].length;
+
+  if (matchedLength > maxSnippetLength) {
+    const segments: SearchSnippetSegment[] = [];
+
+    if (firstMatch.index > 0) {
+      pushSnippetSegment(segments, snippetEllipsis, false);
+    }
+
+    // The full literal was already verified against the hostile-safe body.
+    // Preserve the visible part as a real hit even though a bounded snippet
+    // cannot contain enough text for the full-literal regexp to match again.
+    pushSnippetSegment(
+      segments,
+      firstMatch[0].slice(0, alignSliceEnd(firstMatch[0], maxSnippetLength)),
+      true,
+    );
+    pushSnippetSegment(segments, snippetEllipsis, false);
+
+    return segments;
+  }
+
+  const contextLength = Math.max(0, maxSnippetLength - matchedLength);
+  const start = alignSliceStart(
+    body,
+    Math.max(0, firstMatch.index - Math.floor(contextLength / 2)),
+  );
+  const end = alignSliceEnd(
+    body,
+    Math.min(body.length, start + maxSnippetLength),
+  );
+  const windowText = body.slice(start, end);
+  const matcher = new RegExp(literalPattern, "giu");
+  const segments: SearchSnippetSegment[] = [];
+  let cursor = 0;
+
+  if (start > 0) {
+    pushSnippetSegment(segments, snippetEllipsis, false);
+  }
+
+  for (const match of windowText.matchAll(matcher)) {
+    const index = match.index;
+
+    pushSnippetSegment(segments, windowText.slice(cursor, index), false);
+    pushSnippetSegment(segments, match[0], true);
+    cursor = index + match[0].length;
+  }
+
+  pushSnippetSegment(segments, windowText.slice(cursor), false);
+
+  if (end < body.length) {
+    pushSnippetSegment(segments, snippetEllipsis, false);
+  }
+
+  return segments.length === 0
+    ? fallbackSnippetSegments(body)
+    : segments;
 }
 
 /** Exported for unit tests; production callers stay inside searchMessages. */
@@ -1332,6 +2111,9 @@ function mapParticipantRow(row: ParticipantRow): DbParticipantSummary {
     ...(optionalString(row.contactName) === undefined
       ? {}
       : { contactName: optionalString(row.contactName) }),
+    ...(optionalString(row.contactFirstName) === undefined
+      ? {}
+      : { contactFirstName: optionalString(row.contactFirstName) }),
     isSelf: sqlBool(row.isSelf),
     ...(optionalString(row.avatarSha256) === undefined
       ? {}
@@ -1577,6 +2359,24 @@ function uniqueStrings(values: readonly string[]): string[] {
   return Array.from(new Set(values));
 }
 
+function uniqueCaseFoldedStrings(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    const folded = foldSearchCase(value);
+
+    if (seen.has(folded)) {
+      continue;
+    }
+
+    seen.add(folded);
+    result.push(value);
+  }
+
+  return result;
+}
+
 function optionalArray(value: string | undefined): string[] {
   return value === undefined ? [] : [value];
 }
@@ -1586,11 +2386,46 @@ function truncateText(value: string, length: number): string {
     return value;
   }
 
-  return `${value.slice(0, Math.max(0, length - 3))}...`;
+  return `${value.slice(0, alignSliceEnd(value, Math.max(0, length - 3)))}...`;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * Moves a slice boundary off the middle of a surrogate pair so text windows
+ * never split an astral character (emoji are routine in phone messages) into
+ * lone surrogates that render as U+FFFD. Hostile bodies that already contain
+ * lone surrogates are left untouched.
+ */
+function alignSliceStart(text: string, index: number): number {
+  return index > 0 &&
+    isLowSurrogate(text.charCodeAt(index)) &&
+    isHighSurrogate(text.charCodeAt(index - 1))
+    ? index - 1
+    : index;
+}
+
+function alignSliceEnd(text: string, index: number): number {
+  return index > 0 &&
+    index < text.length &&
+    isLowSurrogate(text.charCodeAt(index)) &&
+    isHighSurrogate(text.charCodeAt(index - 1))
+    ? index + 1
+    : index;
 }
 
 function escapeLikePattern(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function requireString(value: unknown, fieldName: string): string {

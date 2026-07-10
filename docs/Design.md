@@ -49,6 +49,7 @@ black — depth comes from stepped surfaces.
 | `--surface` | `oklch(1 0 0)` | `oklch(0.20 0.012 255)` | Panes, cards, list rows |
 | `--surface-raised` | `oklch(1 0 0)` + shadow | `oklch(0.24 0.012 255)` | Popovers, dialogs, hover states |
 | `--surface-sunken` | `oklch(0.955 0.004 255)` | `oklch(0.13 0.010 255)` | Wells, input backgrounds, code/data blocks |
+| `--overlay-scrim` | `oklch(0.1 0.01 255 / 0.5)` | same | Modal backdrop; blocks the underlying app |
 | `--border` | `oklch(0.90 0.006 255)` | `oklch(0.30 0.012 255)` | Hairline borders (1px) |
 | `--border-strong` | `oklch(0.82 0.008 255)` | `oklch(0.38 0.014 255)` | Inputs, focused-adjacent borders |
 | `--text` | `oklch(0.21 0.012 255)` | `oklch(0.93 0.006 255)` | Primary text |
@@ -224,7 +225,7 @@ hover affordances there are CSS-driven.
   accent left bar (not just a tint — must survive screenshots/printing in grayscale).
 - **Badges:** `--type-micro`, `--radius-full`, subtle backgrounds (`*-subtle` +
   `*-text`); filled badges reserved for counts on accent elements.
-- **Dialogs:** max-width 480 (confirm) / 720 (forms); scrim `oklch(0.1 0.01 255/0.5)`;
+- **Dialogs:** max-width 480 (confirm) / 720 (forms); scrim `--overlay-scrim`;
   destructive confirms restate the object name and use a destructive primary.
 - **Toasts:** bottom-right, auto-dismiss 5s, max 3 stacked; never for errors that
   require action (those get inline or dialog treatment).
@@ -259,19 +260,94 @@ hover affordances there are CSS-driven.
   thumb, click → full-screen viewer (glass chrome); non-previewable files get a file
   card (icon, name, size, extract button).
 
+### 7.2 Unified messages and search workspace
+
+Search is a mode of the messages workspace, not a separate destination. The search
+panel sits above the pane group and keeps the same query, participant, date-range,
+and attachment controls used throughout the active search. There is no conversation
+filter in the panel: every search starts across all conversations. "Search" submits
+the complete filter set; "Reset" clears it, exits search mode, restores the ordinary
+recency-sorted Threads list, and leaves the workspace ready to browse. Draft field
+edits must not silently change the displayed result set before submission.
+
+Thread identity uses an explicit source conversation name when present. Otherwise a
+one-to-one thread uses the other participant's full contact name or raw handle; an
+unnamed group lists every non-self participant, using each contact's first name when
+available and falling back to the full contact name or raw handle. Join two names with
+"and" and three or more as "A, B and C" (D-036). Never collapse an unnamed group to
+its first participant.
+
+While search is active:
+
+- **Threads** contains only conversations with hits, ordered by their most-recent
+  matching message. Each row carries an exact in-coverage hit-count badge in addition
+  to its normal identity; bounded-scan truncation is disclosed above the list.
+  Selecting a thread scopes Results; it does not run a different global search.
+- **Results** is newest-first. With no thread selected it shows hits from every
+  matching conversation; with a thread selected it shows only that conversation's
+  hits. The header names the scope and offers an "All" control that clears the thread
+  selection. Result rows use structured snippet segments rendered as text, the
+  search-hit treatment from §7.1, and the normal selection bar for the active hit.
+- Activating a result selects its conversation and message, opens that thread in
+  Timeline, and scrolls the virtualized timeline to the message without navigating
+  away from the workspace. Re-activating the already-selected result repeats the
+  centering action. Browser Back/Forward derives the active hit from the selected URL
+  state, so a cached result must never appear under a different thread scope. The
+  message receives the active-hit treatment so the relationship between Results and
+  Timeline remains visible.
+- Empty, partial, loading-more, and failed result states stay inside their pane. Keep
+  already loaded results visible during subsequent bounded worker queries; never
+  replace useful content with a page-level spinner. During a scope transition, the
+  header continues to name those rows' displayed scope and marks it as previous until
+  the requested scope succeeds; stale rows are never relabelled as the new scope.
+
+Message details are **on demand** in both browse and search modes. The pane is absent,
+not an empty reserved column, until a message is selected. It is dismissible through
+an explicitly labelled control and Escape when presented as an overlay; dismissal
+returns focus to the bubble or result that opened it when that trigger still exists;
+if virtualization removed a result trigger, focus the corresponding timeline bubble.
+The modal overlay is portalled above a full-viewport `--overlay-scrim`; all underlying
+app content is inert while it is open, and pointer plus programmatic focus cannot leave
+the dialog. Docked details remain non-modal and leave the workspace interactive.
+Closing details does not clear the active search or selected conversation. Provenance
+values retain the mono treatment from §2.
+
 ## 8. Layout
 
 - App frame: 48px glass top bar (app name, backup switcher, search, theme toggle) +
   content region. No footer.
-- Messages view: three panes — threads 320px (min 280, resizable), timeline flexible
-  (min 480), detail panel 360px (collapsible). Panes separated by hairline borders,
-  not gaps.
+- Messages view: the search panel spans the workspace above one contiguous pane row.
+  Plain browse mode is **Threads | Timeline**. Active search mode is **Threads |
+  Results | Timeline**. Plain browse uses `--pane-threads` (20rem) and a flexible
+  Timeline with `--pane-timeline-min` (30rem). Active search uses the compact
+  `--pane-search-threads` (15rem), `--pane-results` (16rem), and a flexible Timeline
+  with `--pane-search-timeline-min` (26rem), so all three core panes fit within the
+  responsive floor after shell padding. The on-demand Detail pane uses
+  `--pane-detail` (22.5rem) and docks at the far right only at
+  `--layout-detail-dock` (96rem) and wider, when all four panes fit; below that
+  threshold it overlays Timeline. Because CSS media queries cannot reference custom
+  properties, the dock threshold is resolved from the token into one JS `matchMedia`
+  query that drives both the dialog semantics and the grid columns — never a
+  stylesheet breakpoint, which would silently diverge from the token at non-default
+  browser font sizes. Panes use hairline borders rather than gaps, and a
+  collapsed detail pane consumes no width.
 - Landing/guides: single column, max-width 720px text / 960px content, generous
   (48–64) vertical rhythm.
-- Responsive floor: 1024px width; below that, the detail panel overlays instead of
-  docking. Overlaying panels take dialog semantics: `role="dialog"` + `aria-modal`
-  with a label, focus moves into the panel on open and returns on close, and Escape
-  dismisses. No mobile layout (desktop Chrome tool).
+- Responsive floor: `--layout-responsive-floor` (64rem / 1024px). At the floor,
+  active-search Threads, Results, and Timeline use their compact tokens; they must not
+  stack or introduce page-level horizontal scrolling. Details overlay below the 96rem
+  docking threshold in browse and search modes. Overlaying details take dialog
+  semantics: `role="dialog"` + `aria-modal` with a label, focus moves into the panel
+  on open and returns on close, underlying content is inert, and Escape dismisses.
+  Implement overlay containment with the shared `useModalFocusContainment` hook
+  (`src/components/ui/modal-focus.ts`) rather than per-component focus traps; it owns
+  the inert root, the focusin backstop, the Tab-order trap (with a full focusable
+  selector including contenteditable, media controls, and summary), and Escape.
+  Resizing across the dock threshold with details open keeps them open in the new
+  mode and moves focus to the pane — it never returns focus to the trigger early.
+  Search controls wrap by complete labelled field/action groups using the spacing
+  scale; labels never detach from their controls. No mobile layout (desktop Chrome
+  tool).
 
 ## 9. Print (reports)
 

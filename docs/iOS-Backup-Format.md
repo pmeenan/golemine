@@ -139,6 +139,9 @@ onto their target message; never render them as timeline rows.
 (participant joined/left = 1 w/ `group_action_type`, name change = 2, photo change = 3);
 render as inline system notices. Participants come from `chat_handle_join`, but the
 sender of a specific message is `message.handle_id` (0 + `is_from_me`=1 means self).
+For a group, `chat.display_name` is the explicit user-facing title; do not replace a
+missing value with the first participant or opaque `chat_identifier`. The UI derives
+an unnamed-group label from every non-self participant (D-036).
 
 ### Threads (inline replies, iOS 14+)
 
@@ -154,7 +157,9 @@ ABMultiValue(UID, record_id, property /* 3=phone, 4=email */, value)
 
 Normalize phone numbers before matching `handle.id` (strip punctuation, compare last
 7–10 digits, handle `+<country>` prefixes). Use `libphonenumber-js` (MIT) rather than
-hand-rolling. Unresolved handles display as the raw number/email.
+hand-rolling. Preserve `ABPerson.First` separately from the full resolved contact name
+so unnamed groups can use concise first-name lists; unresolved handles display as the
+raw number/email.
 
 ## 5. Encrypted backups
 

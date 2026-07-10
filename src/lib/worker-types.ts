@@ -155,6 +155,7 @@ export interface NormalizedParticipant {
   handle: string;
   kind: NormalizedParticipantKind;
   contactName?: string;
+  contactFirstName?: string;
   isSelf: boolean;
   avatarSha256?: string;
   avatarMime?: "image/jpeg" | "image/png";
@@ -273,6 +274,7 @@ export interface DbParticipantSummary {
   handle: string;
   kind: NormalizedParticipantKind;
   contactName?: string;
+  contactFirstName?: string;
   isSelf: boolean;
   avatarSha256?: string;
   avatarMime?: "image/jpeg" | "image/png";
@@ -432,6 +434,11 @@ export interface SearchMessagesFilters {
   hasAttachment?: boolean;
 }
 
+export type SearchConversationFilters = Omit<
+  SearchMessagesFilters,
+  "conversationId"
+>;
+
 export interface SearchMessagesRequest extends DbPaginationRequest {
   backupId: string;
   text: string;
@@ -449,12 +456,57 @@ export interface SearchMessageResult {
   snippets: SearchSnippetSegment[];
 }
 
+/**
+ * Describes how completely the worker could evaluate a search. Pure FTS
+ * searches (and quoted searches whose narrowed candidate set fits inside the
+ * verification budget) are complete. Any newest-first bounded verification
+ * scan — a literal with no sound FTS narrowing term, or a narrowed candidate
+ * set larger than the budget — reports the bounded-scan shape so the UI can
+ * disclose omitted older rows.
+ */
+export type SearchCoverage =
+  | {
+      strategy: "fts";
+      /** Rows matching the sound FTS narrowing expression and filters. */
+      candidateRows: number;
+      truncated: false;
+    }
+  | {
+      strategy: "bounded-scan";
+      /** Rows matching the sound FTS narrowing expression and filters. */
+      candidateRows: number;
+      truncated: boolean;
+      /** Maximum newest-first candidate rows the scan verifies. */
+      rowBudget: number;
+    };
+
 export interface SearchMessagesResponse {
   results: SearchMessageResult[];
   queryTerms: string[];
   limit: number;
   offset: number;
   total: number;
+  coverage: SearchCoverage;
+}
+
+export interface DbSearchConversationSummary extends DbConversationSummary {
+  hitCount: number;
+  latestHitAtUtc?: string;
+}
+
+export interface ListSearchConversationsRequest extends DbPaginationRequest {
+  backupId: string;
+  text: string;
+  filters?: SearchConversationFilters;
+}
+
+export interface ListSearchConversationsResponse {
+  conversations: DbSearchConversationSummary[];
+  queryTerms: string[];
+  limit: number;
+  offset: number;
+  total: number;
+  coverage: SearchCoverage;
 }
 
 export interface ReadUnencryptedSourceFileRequest {
@@ -661,6 +713,10 @@ export interface DbWorkerApi {
     request: SearchMessagesRequest,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<SearchMessagesResponse>>;
+  listSearchConversations(
+    request: ListSearchConversationsRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<ListSearchConversationsResponse>>;
 }
 
 export interface MediaWorkerApi {

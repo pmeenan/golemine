@@ -17,8 +17,8 @@ offline after the first load.
 - Open an unencrypted iPhone backup folder today (drag & drop or file picker);
   encrypted backups are planned for M5 and will be decrypted locally in the browser.
 - Browse message threads with attachments in a fast, responsive UI.
-- Full-text search across all messages with filters (person, thread, date range,
-  attachments).
+- Search inside the same messages workspace with participant/date/attachment filters,
+  hit-counted threads, all-or-thread-scoped results, and jump-to-context.
 - Preview native image, HEIC, and video attachments when Chrome/the media worker can
   decode them, and extract original attachment files back to disk.
 - Select messages into a report and export a print-ready, court-exhibit-grade PDF
@@ -37,7 +37,7 @@ offline after the first load.
 
 ## Status
 
-M3 is implemented for unencrypted iPhone backups. The repo contains the strict
+M4 is implemented for unencrypted iPhone backups. The repo contains the strict
 Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
@@ -55,10 +55,15 @@ SQLite data. The unencrypted M2 ingest path reads Manifest.db, applies committed
 frames to source SQLite copies, normalizes iPhone Messages, contacts, tapbacks,
 attachments, and contact thumbnails, then writes a rebuildable OPFS derived database
 with FTS, avatar paths, counts, warnings, and source-file provenance. The backup
-overview can run and rebuild ingest. The M3 UI now adds a virtualized conversation
-list, virtualized message timeline, message detail/provenance panel, FTS-backed search
-with filters and snippets, source-backed attachment preview/extraction, and an OPFS
-JPEG thumbnail cache for native image and HEIC attachments. HEIC thumbnails use
+overview can run and rebuild ingest. The messages UI now unifies a virtualized
+conversation list, FTS-backed search panel, hit-counted filtered threads, scoped
+search results, a virtualized timeline, and on-demand detail/provenance in one
+workspace. Unquoted words use case-insensitive implicit-AND prefix matching; quoted
+literals use case-insensitive substring verification in a single-pass scan bounded
+to the newest 10,000 candidate rows, and the UI explicitly warns whenever that
+budget truncates coverage. Source-backed attachment
+preview/extraction and the OPFS JPEG thumbnail cache remain integrated with the
+timeline and details. HEIC thumbnails use
 isolated same-origin `libheif-js` vendor files loaded lazily in `media-worker`
 (production imports the public vendor module directly; Vite dev uses a fetch-to-Blob
 module shim so the file is not transformed), prefer embedded HEIF thumbnails when
@@ -67,7 +72,12 @@ cap that accommodates 48 MP phone photos. Native video preview uses Chrome's `<v
 support from lazily read source bytes.
 The messages layout follows the Lode message-rendering rules for deterministic
 fallback avatars, sent/received bubble semantics, timestamp affordances, attachment
-preview caps, and a detail overlay below the desktop responsive floor.
+preview caps, compact search panes at the desktop floor, and an on-demand detail
+overlay until the viewport is wide enough to dock all panes. Explicit group names are
+preserved; unnamed group threads list every non-self participant using contact first
+names when available (for example, "Brian, Karin and Sean") instead of looking like a
+duplicate one-to-one thread. Derived database version 2 rebuilds older cached data so
+the corrected explicit-name semantics apply to existing backups.
 Long normalization and write stages now surface throttled item-count progress, so large
 message backups show advancing counts during otherwise long-running steps.
 The M2 path is hardened for real-world backup quirks: stale/torn SQLite WAL tails are
