@@ -31,6 +31,8 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { EmptyState, PageShell } from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { DateRangePicker } from "../../components/ui/date-range-picker";
+import type { DateRangeValue } from "../../components/ui/date-range";
 import { useModalFocusContainment } from "../../components/ui/modal-focus";
 import { cn } from "../../lib/cn";
 import {
@@ -1474,18 +1476,22 @@ function SearchPanel({
   const [query, setQuery] = useState("");
   const [participantQuery, setParticipantQuery] = useState("");
   const [hasAttachment, setHasAttachment] = useState(false);
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [dateRange, setDateRange] = useState<DateRangeValue>({ from: "", to: "" });
   const handleSubmit = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    onSubmit({ fromDate, hasAttachment, participantQuery, query, toDate });
+    onSubmit({
+      fromDate: dateRange.from,
+      hasAttachment,
+      participantQuery,
+      query,
+      toDate: dateRange.to,
+    });
   };
   const handleReset = () => {
     setQuery("");
     setParticipantQuery("");
     setHasAttachment(false);
-    setFromDate("");
-    setToDate("");
+    setDateRange({ from: "", to: "" });
     onReset();
   };
   const isStartingSearch =
@@ -1541,8 +1547,8 @@ function SearchPanel({
               activeSearch === undefined &&
               query.length === 0 &&
               participantQuery.length === 0 &&
-              fromDate.length === 0 &&
-              toDate.length === 0 &&
+              dateRange.from.length === 0 &&
+              dateRange.to.length === 0 &&
               !hasAttachment
             }
             onClick={handleReset}
@@ -1554,7 +1560,7 @@ function SearchPanel({
           </Button>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <label>
             <span className="text-caption text-text-secondary">Participant</span>
             <input
@@ -1567,28 +1573,7 @@ function SearchPanel({
               value={participantQuery}
             />
           </label>
-          <label>
-            <span className="text-caption text-text-secondary">From</span>
-            <input
-              className="mt-1 h-[var(--control-height-md)] w-full rounded-md border border-border-strong bg-surface-sunken px-2 text-body text-text"
-              onChange={(event) => {
-                setFromDate(event.target.value);
-              }}
-              type="date"
-              value={fromDate}
-            />
-          </label>
-          <label>
-            <span className="text-caption text-text-secondary">To</span>
-            <input
-              className="mt-1 h-[var(--control-height-md)] w-full rounded-md border border-border-strong bg-surface-sunken px-2 text-body text-text"
-              onChange={(event) => {
-                setToDate(event.target.value);
-              }}
-              type="date"
-              value={toDate}
-            />
-          </label>
+          <DateRangePicker onChange={setDateRange} value={dateRange} />
           <label className="flex min-h-[var(--control-height-lg)] items-center gap-2 self-end text-body text-text">
             <input
               checked={hasAttachment}

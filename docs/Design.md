@@ -231,6 +231,24 @@ hover affordances there are CSS-driven.
   require action (those get inline or dialog treatment).
 - **Tooltips:** delay 400ms, `--surface-raised`, caption type; every icon-only button
   has one.
+- **Date ranges:** optional date filtering uses one labelled trigger that reads "Any
+  date" when empty and summarizes the applied range when set. It opens a
+  focus-managed Radix popover containing two contiguous, fixed-height calendar months
+  with month/year dropdowns and previous/next controls. Selection is staged: the first
+  date announces that an end date is needed and disables Apply; the second date may be
+  the same day, and Apply commits the range. Cancel/Escape discard the draft and return
+  focus to the trigger; Clear is explicit both inside the popover and beside an applied
+  range. Day cells use 40px hit targets, outside-month days stay subdued unless
+  selected, endpoints use `--accent`/`--accent-foreground`, the span uses
+  `--accent-subtle`, and today uses `--accent-text`. Calendar structure comes from
+  React DayPicker and every visible value is remapped to Lode tokens; navigation icons
+  are lucide. The actual native month/year `select` and `option` elements—not only
+  their visible wrapper—use `--surface-raised`/`--text`, inherit the active
+  `color-scheme`, and retain at least WCAG AA text contrast in both themes. Clickable
+  outside-month dates use `--text-secondary` at full opacity. For the messages filter,
+  month/year navigation and selectable days are bounded to January 2007 through
+  December of the browser's current year, calculated at runtime. Do not use paired
+  native date inputs for this pattern.
 - **Empty states:** icon (24px, tertiary) + one-line explanation + one action. No
   illustrations except landing/guides.
 - **Icons:** `lucide-react` (ISC) only, sizes 16/20/24, stroke-width 1.75, color
@@ -269,6 +287,9 @@ filter in the panel: every search starts across all conversations. "Search" subm
 the complete filter set; "Reset" clears it, exits search mode, restores the ordinary
 recency-sorted Threads list, and leaves the workspace ready to browse. Draft field
 edits must not silently change the displayed result set before submission.
+The date-range control follows §7: opening or editing its calendar changes only the
+search draft, and even an applied date range does not replace displayed results until
+the user submits Search.
 
 Thread identity uses an explicit source conversation name when present. Otherwise a
 one-to-one thread uses the other participant's full contact name or raw handle; an

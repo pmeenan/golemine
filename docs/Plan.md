@@ -20,6 +20,11 @@ threads/counts -> scoped/all results -> timeline/detail -> reset at the 1024px f
 Unnamed group threads now preserve only explicit source titles and otherwise identify
 all non-self participants by contact first name/name/handle; derived database version
 2 forces older first-participant fallback titles to be rebuilt.
+Search date filtering now uses an optional two-month React DayPicker range calendar in
+a focus-managed Radix popover, with month/year navigation, staged apply/cancel, a clear
+path, same-day selection, token-complete light/dark styling, and browser-tested native
+dropdown palettes and contrast. Navigation and selection are bounded from 2007 through
+the browser's current year at runtime (D-037).
 M2/M3 hardening remains in place: stale/torn WAL handling, source provenance and
 deferred media hashing, direct backup-worker -> db-worker ingest, per-backup SAH pools,
 route-scoped browse workers, hostile-safe snippet segments (D-030), normalized
@@ -270,6 +275,14 @@ searching are one experience with shared thread/timeline context (D-034).
       names a group, retain normalized contact first names, and render every non-self
       participant as a natural first-name/name/handle list. Bump `derivedDbVersion` to
       2 so cached first-participant group titles require re-ingest (D-036).
+- [x] Replace the paired native search date inputs with one optional date-range
+      control: React DayPicker range selection inside a Radix popover, two visible
+      months, month/year dropdown navigation, same-day support, staged apply/cancel,
+      explicit clear, accessible status text, and Lode-token styling in both themes
+      (D-037). Playwright covers both themes' native select/option palettes and WCAG AA
+      calendar contrast as well as Escape/focus return, incomplete-range validation,
+      apply, clear, and the runtime 2007–current-year dropdown bounds at the 1024px
+      floor.
 
 ## M5 — Encrypted backups
 

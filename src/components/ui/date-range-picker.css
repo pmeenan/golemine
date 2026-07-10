@@ -1,0 +1,165 @@
+.golemine-date-popover[data-state="open"] {
+  animation: golemine-date-popover-in var(--dur-base) var(--ease-out);
+}
+
+.golemine-date-popover[data-state="closed"] {
+  animation: golemine-date-popover-out var(--dur-fast) var(--ease-in-out);
+}
+
+.golemine-date-calendar {
+  --rdp-accent-color: var(--accent);
+  --rdp-accent-background-color: var(--accent-subtle);
+  --rdp-day-height: var(--control-height-lg);
+  --rdp-day-width: var(--control-height-lg);
+  --rdp-day_button-border-radius: var(--radius-full);
+  --rdp-day_button-border: var(--focus-ring-width) solid transparent;
+  --rdp-day_button-height: var(--control-height-lg);
+  --rdp-day_button-width: var(--control-height-lg);
+  --rdp-selected-border: var(--focus-ring-width) solid var(--accent);
+  --rdp-disabled-opacity: var(--opacity-disabled);
+  --rdp-outside-opacity: var(--opacity-disabled);
+  --rdp-today-color: var(--accent-text);
+  --rdp-dropdown-gap: var(--space-4);
+  --rdp-months-gap: var(--space-16);
+  --rdp-nav_button-disabled-opacity: var(--opacity-disabled);
+  --rdp-nav_button-height: var(--control-height-lg);
+  --rdp-nav_button-width: var(--control-height-lg);
+  --rdp-nav-height: var(--control-height-lg);
+  --rdp-range_middle-background-color: var(--accent-subtle);
+  --rdp-range_middle-color: var(--text);
+  --rdp-range_start-color: var(--accent-foreground);
+  --rdp-range_start-background: var(--accent-subtle);
+  --rdp-range_start-date-background-color: var(--accent);
+  --rdp-range_end-background: var(--accent-subtle);
+  --rdp-range_end-color: var(--accent-foreground);
+  --rdp-range_end-date-background-color: var(--accent);
+  --rdp-weekday-opacity: 1;
+  --rdp-weekday-padding: var(--space-8) 0;
+  --rdp-animation_duration: var(--dur-base);
+  --rdp-animation_timing: var(--ease-out);
+}
+
+.golemine-date-calendar .rdp-month_caption {
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-strong);
+}
+
+.golemine-date-calendar .rdp-dropdown_root {
+  min-height: var(--control-height-md);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text);
+  padding: 0 var(--space-8);
+}
+
+/*
+ * DayPicker positions the real select invisibly over its styled caption. The
+ * native option popup still takes its palette from that select, so style the
+ * select and options themselves rather than only the visible wrapper.
+ */
+.golemine-date-calendar .rdp-dropdown {
+  color-scheme: inherit;
+  background-color: var(--surface-raised);
+  color: var(--text);
+}
+
+.golemine-date-calendar .rdp-dropdown option {
+  background-color: var(--surface-raised);
+  color: var(--text);
+}
+
+.golemine-date-calendar .rdp-dropdown option:checked {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.golemine-date-calendar .rdp-dropdown option:disabled {
+  color: var(--text-tertiary);
+}
+
+.golemine-date-calendar .rdp-dropdown_root:hover,
+.golemine-date-calendar .rdp-button_next:hover,
+.golemine-date-calendar .rdp-button_previous:hover {
+  background: var(--surface-raised);
+}
+
+.golemine-date-calendar
+  .rdp-day:not(.rdp-range_start):not(.rdp-range_end)
+  .rdp-day_button:hover:not(:disabled) {
+  background: var(--surface-raised);
+}
+
+.golemine-date-calendar .rdp-dropdown:focus-visible ~ .rdp-caption_label {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.golemine-date-calendar .rdp-range_start .rdp-day_button,
+.golemine-date-calendar .rdp-range_end .rdp-day_button {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.golemine-date-calendar .rdp-range_middle .rdp-day_button:hover:not(:disabled) {
+  background: var(--accent-subtle);
+}
+
+.golemine-date-calendar .rdp-button_next,
+.golemine-date-calendar .rdp-button_previous {
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+}
+
+.golemine-date-calendar .rdp-chevron {
+  fill: none;
+  color: currentColor;
+}
+
+.golemine-date-calendar .rdp-weekday {
+  color: var(--text-secondary);
+  font-size: var(--font-size-micro);
+  font-weight: var(--font-weight-strong);
+}
+
+.golemine-date-calendar .rdp-selected {
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-strong);
+}
+
+.golemine-date-calendar .rdp-outside:not(.rdp-selected) {
+  color: var(--text-secondary);
+  opacity: initial;
+}
+
+.golemine-date-calendar .rdp-outside.rdp-selected {
+  opacity: 1;
+}
+
+.golemine-date-calendar .rdp-footer {
+  min-height: var(--control-height-md);
+  padding-top: var(--space-12);
+  color: var(--text-secondary);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+@keyframes golemine-date-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-4));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes golemine-date-popover-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}

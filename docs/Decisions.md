@@ -646,3 +646,46 @@ distinct normalized first-name field avoids guessing name structure in React, wh
 full-name and handle fallbacks keep unresolved or organization-only contacts visible.
 The version bump is necessary because the old derived rows do not record whether a
 stored group title was explicit or synthesized.
+
+## D-037 — React DayPicker powers optional search date ranges (2026-07-10)
+
+The paired native Chrome date inputs in the messages search panel were compact but
+made a range feel like two unrelated fields and exposed a limited browser calendar.
+The replacement needs range semantics, long-distance month/year navigation, full
+keyboard operation, local styling in both Lode themes, and a license compatible with
+the Apache-2.0 project.
+
+Decision: use MIT-licensed React DayPicker v10 as the calendar engine inside an
+MIT-licensed Radix Popover. The form exposes one optional "Date range" trigger. The
+popover displays two contiguous fixed-height months, month/year dropdowns, outside
+days, previous/next navigation, an announced selection status, and Lode-token styling
+with lucide navigation icons. Range changes are staged until "Apply dates"; Apply is
+disabled after only a start date, selecting the start again completes a one-day range,
+and Cancel/Escape discard the draft and restore trigger focus. Clear is available in
+the popover and beside an applied range. Calendar dates convert through local
+`YYYY-MM-DD` components, after which the existing search form continues to produce
+inclusive UTC start and exclusive-next-day UTC end query bounds.
+
+React Datepicker was also permissively licensed and popular, but its more opinionated
+input/calendar presentation would require more design-system overrides. React Aria's
+Apache-2.0 DateRangePicker provides a strong accessibility baseline but brings a much
+broader internationalized date/state stack than this filter needs. MUI X's polished
+Date Range Picker was rejected because the range component is a commercially licensed
+Pro feature. React DayPicker fits the existing shadcn/Radix architecture, exposes the
+range and navigation behavior directly, and keeps every visible style under Lode's
+semantic tokens.
+
+Dark-theme follow-up: React DayPicker places a transparent native `select` over each
+styled dropdown label. Styling only the label leaves the browser-owned month/year list
+on its default light palette. The actual `select` and `option` nodes therefore inherit
+the root `color-scheme` and receive Lode surface/text tokens. Clickable outside-month
+dates use full-opacity `--text-secondary`; automated browser coverage checks both
+themes' dropdown palettes and WCAG AA contrast for all calendar text states.
+
+The messages corpus cannot predate the first iPhone release, so the picker explicitly
+bounds navigation and selection to January 2007 through December of the browser's
+current year. The upper year is calculated at runtime rather than maintained as a
+hardcoded release value. DayPicker omits outside-month cells beyond those navigation
+edges, and an explicit disabled matcher provides a second selection guard. Browser
+coverage asserts that both year dropdowns contain exactly the descending inclusive
+2007–current-year range and that no out-of-bounds spillover day is rendered.

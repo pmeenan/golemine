@@ -310,6 +310,59 @@ test("browses and searches ingested messages from the synthetic iPhone backup", 
   await expect(results).toBeVisible();
   await expect(searchBox).toHaveValue("the");
 
+  const dateRangeTrigger = page.getByTestId("date-range-trigger");
+  await expect(dateRangeTrigger).toHaveAccessibleName("Date range Any date");
+  await page.getByRole("button", { name: "Use dark theme" }).click();
+  await dateRangeTrigger.click();
+  const dateRangeDialog = page.getByRole("dialog", {
+    name: "Choose a date range",
+  });
+  await expect(dateRangeDialog).toBeVisible();
+  await expectDatePickerTheme(dateRangeDialog, "dark");
+  await expectDatePickerYearBounds(dateRangeDialog);
+  await page.keyboard.press("Escape");
+  await expect(dateRangeDialog).toHaveCount(0);
+  await expect(dateRangeTrigger).toBeFocused();
+
+  await page.getByRole("button", { name: "Use light theme" }).click();
+  await dateRangeTrigger.click();
+  await expectDatePickerTheme(dateRangeDialog, "light");
+  const applyDatesButton = dateRangeDialog.getByRole("button", {
+    name: "Apply dates",
+  });
+  const rangeStart = dateRangeDialog.locator(
+    '[data-day="2026-06-30"] button',
+  );
+  const rangeEnd = dateRangeDialog.locator(
+    '[data-day="2026-07-01"] button',
+  );
+
+  await rangeStart.click();
+  await expect(dateRangeDialog).toContainText("Select an end date");
+  await expect(applyDatesButton).toBeDisabled();
+  await rangeEnd.click();
+  await expect(applyDatesButton).toBeEnabled();
+  await applyDatesButton.click();
+  await expect(dateRangeTrigger).toHaveAccessibleName(
+    "Date range Jun 30, 2026 – Jul 1, 2026",
+  );
+
+  await dateRangeTrigger.click();
+  const singleDay = dateRangeDialog.locator(
+    '[data-day="2026-06-30"]:not([data-outside]) button',
+  );
+  await singleDay.click();
+  await singleDay.click();
+  await applyDatesButton.click();
+  await expect(dateRangeTrigger).toHaveAccessibleName("Date range Jun 30, 2026");
+  await searchButton.click();
+  await expect(searchThreads).toContainText("No conversations matched this search.");
+
+  await page.getByRole("button", { exact: true, name: "Clear" }).click();
+  await expect(dateRangeTrigger).toHaveAccessibleName("Date range Any date");
+  await searchButton.click();
+  await expect(results.locator('[data-testid^="search-result-"]')).toHaveCount(4);
+
   await searchBox.fill("synthetic");
   await page.getByLabel("Has attachment").check();
   await searchButton.click();
@@ -334,6 +387,182 @@ test("browses and searches ingested messages from the synthetic iPhone backup", 
 
 function titleCase(value: string): string {
   return value.slice(0, 1).toLocaleUpperCase() + value.slice(1);
+}
+
+async function expectDatePickerTheme(
+  dialog: Locator,
+  expectedColorScheme: "dark" | "light",
+): Promise<void> {
+  const dropdowns = dialog.locator("[data-date-picker-dropdown]");
+  await expect(dropdowns).toHaveCount(4);
+  const palette = await dropdowns.first().evaluate((element) => {
+    if (!(element instanceof HTMLSelectElement)) {
+      throw new Error("Date picker dropdown is not a select element.");
+    }
+
+    const firstOption = element.options.item(0);
+    const selectedOption = element.selectedOptions.item(0);
+
+    if (firstOption === null || selectedOption === null) {
+      throw new Error("Date picker dropdown options are missing.");
+    }
+
+    const rootStyle = getComputedStyle(document.documentElement);
+    const selectStyle = getComputedStyle(element);
+    const optionStyle = getComputedStyle(firstOption);
+    const selectedOptionStyle = getComputedStyle(selectedOption);
+    const token = (name: string) => rootStyle.getPropertyValue(name).trim();
+    const normalizeColor = (color: string) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+
+      if (context === null) {
+        throw new Error("Canvas color conversion is unavailable.");
+      }
+
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      return Array.from(context.getImageData(0, 0, 1, 1).data).join(",");
+    };
+    const contrast = (foreground: string, background: string) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+
+      if (context === null) {
+        throw new Error("Canvas color conversion is unavailable.");
+      }
+
+      const luminance = (color: string) => {
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+        const linearize = (channel: number) => {
+          const value = channel / 255;
+          return value <= 0.04045
+            ? value / 12.92
+            : ((value + 0.055) / 1.055) ** 2.4;
+        };
+
+        return (
+          0.2126 * linearize(red) +
+          0.7152 * linearize(green) +
+          0.0722 * linearize(blue)
+        );
+      };
+
+      const foregroundLuminance = luminance(foreground);
+      const backgroundLuminance = luminance(background);
+      return (
+        (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) /
+        (Math.min(foregroundLuminance, backgroundLuminance) + 0.05)
+      );
+    };
+
+    const surfaceRaised = token("--surface-raised");
+    const text = token("--text");
+    const textSecondary = token("--text-secondary");
+    const accent = token("--accent");
+    const accentForeground = token("--accent-foreground");
+    const accentSubtle = token("--accent-subtle");
+    const accentText = token("--accent-text");
+
+    return {
+      colorScheme: selectStyle.colorScheme,
+      contrasts: {
+        endpoint: contrast(accentForeground, accent),
+        primary: contrast(text, surfaceRaised),
+        range: contrast(text, accentSubtle),
+        secondary: contrast(textSecondary, surfaceRaised),
+        today: contrast(accentText, surfaceRaised),
+      },
+      expected: {
+        accent: normalizeColor(accent),
+        accentForeground: normalizeColor(accentForeground),
+        surfaceRaised: normalizeColor(surfaceRaised),
+        text: normalizeColor(text),
+      },
+      option: {
+        background: normalizeColor(optionStyle.backgroundColor),
+        color: normalizeColor(optionStyle.color),
+      },
+      select: {
+        background: normalizeColor(selectStyle.backgroundColor),
+        color: normalizeColor(selectStyle.color),
+      },
+      selectedOption: {
+        background: normalizeColor(selectedOptionStyle.backgroundColor),
+        color: normalizeColor(selectedOptionStyle.color),
+      },
+    };
+  });
+
+  expect(palette.colorScheme).toBe(expectedColorScheme);
+  expect(palette.select).toEqual({
+    background: palette.expected.surfaceRaised,
+    color: palette.expected.text,
+  });
+  expect(palette.option).toEqual({
+    background: palette.expected.surfaceRaised,
+    color: palette.expected.text,
+  });
+  expect(palette.selectedOption).toEqual({
+    background: palette.expected.accent,
+    color: palette.expected.accentForeground,
+  });
+  for (const ratio of Object.values(palette.contrasts)) {
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
+  }
+}
+
+async function expectDatePickerYearBounds(dialog: Locator): Promise<void> {
+  const state = await dialog.evaluate((element) => {
+    const yearDropdowns = Array.from(
+      element.querySelectorAll<HTMLSelectElement>(
+        'select[aria-label="Choose the Year"]',
+      ),
+    );
+
+    return {
+      currentYear: new Date().getFullYear(),
+      yearOptions: yearDropdowns.map((dropdown) =>
+        Array.from(dropdown.options, (option) => option.value),
+      ),
+    };
+  });
+  const expectedYears = Array.from(
+    { length: state.currentYear - 2007 + 1 },
+    (_, index) => String(state.currentYear - index),
+  );
+
+  expect(state.yearOptions).toHaveLength(2);
+  for (const options of state.yearOptions) {
+    expect(options).toEqual(expectedYears);
+  }
+
+  const yearDropdowns = dialog.locator('select[aria-label="Choose the Year"]');
+  const monthDropdowns = dialog.locator('select[aria-label="Choose the Month"]');
+  await expect(yearDropdowns).toHaveCount(2);
+  await expect(monthDropdowns).toHaveCount(2);
+  const firstYearDropdown = yearDropdowns.nth(0);
+  const firstMonthDropdown = monthDropdowns.nth(0);
+
+  await firstYearDropdown.selectOption("2007");
+  await firstMonthDropdown.selectOption("0");
+  await expect(
+    dialog.locator('[data-day="2006-12-31"] button'),
+  ).toHaveCount(0);
+
+  await firstYearDropdown.selectOption(String(state.currentYear));
+  await firstMonthDropdown.selectOption("11");
+  const followingYear = String(state.currentYear + 1);
+  await expect(
+    dialog.locator(`[data-day="${followingYear}-01-01"] button`),
+  ).toHaveCount(0);
 }
 
 async function isVerticalCenterWithin(

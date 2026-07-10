@@ -17,8 +17,9 @@ offline after the first load.
 - Open an unencrypted iPhone backup folder today (drag & drop or file picker);
   encrypted backups are planned for M5 and will be decrypted locally in the browser.
 - Browse message threads with attachments in a fast, responsive UI.
-- Search inside the same messages workspace with participant/date/attachment filters,
-  hit-counted threads, all-or-thread-scoped results, and jump-to-context.
+- Search inside the same messages workspace with participant/attachment filters and
+  an optional two-month calendar date-range picker, plus hit-counted threads,
+  all-or-thread-scoped results, and jump-to-context.
 - Preview native image, HEIC, and video attachments when Chrome/the media worker can
   decode them, and extract original attachment files back to disk.
 - Select messages into a report and export a print-ready, court-exhibit-grade PDF
@@ -61,7 +62,11 @@ search results, a virtualized timeline, and on-demand detail/provenance in one
 workspace. Unquoted words use case-insensitive implicit-AND prefix matching; quoted
 literals use case-insensitive substring verification in a single-pass scan bounded
 to the newest 10,000 candidate rows, and the UI explicitly warns whenever that
-budget truncates coverage. Source-backed attachment
+budget truncates coverage. Date filtering uses a keyboard-accessible, token-styled
+two-month calendar with month/year navigation, staged range selection, same-day
+ranges, explicit apply/clear actions, and theme-aware native dropdown palettes with
+automated light/dark contrast coverage. Its selectable years run from 2007 through
+the browser's current year. Source-backed attachment
 preview/extraction and the OPFS JPEG thumbnail cache remain integrated with the
 timeline and details. HEIC thumbnails use
 isolated same-origin `libheif-js` vendor files loaded lazily in `media-worker`

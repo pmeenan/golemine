@@ -317,6 +317,21 @@ metal and the ore it surfaces; no clay/terracotta styling).
   avatars are chosen from the eight `--avatar-*` tokens by stable participant
   handle/label hash. Do not add hardcoded colors/sizes or custom focus styles in these
   panes.
+- The M4 search date filter is the shared `DateRangePicker` in
+  `src/components/ui/date-range-picker.tsx`, backed by React DayPicker range mode in a
+  Radix popover (D-037). Keep the two-month fixed grid, month/year navigation, staged
+  apply/cancel, same-day completion, announced selection status, explicit clear, and
+  Escape focus return; do not reintroduce paired native `type="date"` inputs. Visible
+  calendar styling is remapped in `date-range-picker.css` to Lode tokens. Keep the
+  actual transparent DayPicker `.rdp-dropdown` select and its options tokenized and
+  inheriting the active `color-scheme`; styling only the visible wrapper makes the
+  native list white in dark mode. Clickable outside-month dates use full-opacity
+  `--text-secondary` for AA contrast; preserve selected-endpoint hover behavior.
+  Navigation and selection are bounded to January 2007 through December of the browser
+  runtime's current year; keep spillover days outside that range unavailable. Date-only
+  parsing/formatting lives in `src/components/ui/date-range.ts` and deliberately uses
+  local calendar components to round-trip `YYYY-MM-DD`; `buildSearchFilters` remains
+  the single conversion to inclusive UTC start/exclusive UTC end query bounds.
 - M4 db-worker reads live in `src/workers/db/queries.ts`: `listConversations`
   (`listThreads` alias), `getMessageTimelinePage`,
   `getMessageTimelineMessagesPage` (same request shape, messages-only response

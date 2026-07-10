@@ -38,7 +38,7 @@ The visual design language (tokens, theming, component rules) lives in [Design.m
 | Worker RPC | Comlink (Apache-2.0) | Typed proxies over `postMessage`; transfer `ArrayBuffer`s, never copy large payloads |
 | State | zustand (MIT) | UI state only; all data lives in the derived SQLite DB |
 | Routing | react-router (MIT) | Client-side only |
-| Styling/components | Tailwind CSS + shadcn/ui (Radix) — all MIT | Governed by the Lode design system: [Design.md](Design.md) |
+| Styling/components | Tailwind CSS + shadcn/ui (Radix) + React DayPicker — all MIT | Governed by the Lode design system: [Design.md](Design.md); DayPicker is used only as the calendar engine inside the token-styled date-range popover (D-037) |
 | Virtualization | react-virtuoso (MIT) | Message lists can be 100k+ rows; nothing unvirtualized |
 | Crypto | WebCrypto (PBKDF2, AES-KW, AES-CBC, SHA-256) | Encrypted-backup decryption and report hashing; no JS crypto libs for primitives |
 
@@ -325,6 +325,9 @@ Routes (react-router, all client-side):
 - `/backup/:id/messages` — unified browse/search workspace for ingested backups.
   Browse mode shows Threads → Timeline. Active search shows hit-filtered Threads →
   newest-first Results → Timeline, with all/thread result scoping and jump-to-message.
+  Its optional date filter is one controlled range picker: a focus-managed Radix
+  popover contains a token-styled two-month React DayPicker calendar, stages a complete
+  or same-day range until apply, and preserves the existing UTC query-boundary model.
   Details is absent until a message is selected, docks only on wide viewports, and is
   an accessible overlay otherwise. Conversation/timeline/search pages are bounded and
   load additional windows. Attachment previews and extraction read source bytes
