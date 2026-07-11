@@ -40,7 +40,7 @@ The visual design language (tokens, theming, component rules) lives in [Design.m
 | Routing | react-router (MIT) | Client-side only |
 | Styling/components | Tailwind CSS + shadcn/ui (Radix) + React DayPicker — all MIT | Governed by the Lode design system: [Design.md](Design.md); DayPicker is used only as the calendar engine inside the token-styled date-range popover (D-037) |
 | Virtualization | react-virtuoso (MIT) | Message lists can be 100k+ rows; nothing unvirtualized |
-| Crypto | WebCrypto (PBKDF2, AES-KW, AES-CBC, SHA-256) | Encrypted-backup decryption and report hashing; no JS crypto libs for primitives |
+| Crypto | WebCrypto (PBKDF2, AES-KW, AES-CBC, one-shot SHA-256) plus dependency-free incremental SHA-256 | Incremental SHA-256 is limited to streaming integrity provenance, not password/key crypto (D-041) |
 
 **COOP/COEP:** we deliberately avoid `SharedArrayBuffer` dependencies (opfs-sahpool VFS,
 single-threaded codecs) so the app can be hosted anywhere static files can be served,
@@ -86,8 +86,9 @@ more than ~16 ms.
 - **backup-worker** — owns the source `FileSystemDirectoryHandle` after the UI obtains
   it through a user gesture and hands it off. Validates the backup, parses
   `Info.plist`/`Manifest.plist`/`Manifest.db`, performs keybag/password key derivation
-  and per-file decryption for encrypted backups, streams file bytes to other workers,
-  computes SHA-256 hashes for provenance. This is the only component that touches the
+  and per-file decryption for encrypted backups, stages source SQLite in transient
+  OPFS, streams extraction to user-selected files, and computes SHA-256 hashes for
+  provenance. This is the only component that touches the
   source folder, and it only ever reads; source access should go through read-only
   wrapper helpers so writable handles never enter provider code.
 - **db-worker** — hosts sqlite-wasm. Owns the per-backup derived database in OPFS
@@ -160,6 +161,12 @@ rather than re-declared per worker.
   - `golemine.sqlite` — the normalized message store + FTS5 index (schema below).
   - `thumbs/` — cached attachment/contact-avatar thumbnails (content-addressed by hash
     or stable source provenance key when a hash is not yet available).
+  - `transient/` — worker-owned plaintext staging for source SQLite
+    (staged mains, workspace sahpool directories) and encrypted WAL/SHM sidecar
+    Blobs; preview reads decrypt in memory and never stage here (D-043). Files are
+    removed on close/lock/eviction, the first transient open in a fresh worker
+    sweeps the whole directory of crash leftovers, and Remove backup wipes the
+    parent directory.
 - Request `navigator.storage.persist()` on first ingest so Chrome doesn't evict data.
 - Derived data is always disposable: deleting a backup from recents deletes its OPFS
   directory through `src/lib/recents.ts`; the source folder is untouched. A
@@ -219,17 +226,30 @@ Manifest decryption, and the transient Manifest SQLite open all complete before 
 worker emits and awaits that progress event immediately ahead of destructive
 `prepareIngest`. A wrong password or malformed keybag therefore leaves an existing
 derived DB/status untouched. After prepare, sms/contact source SQLite WAL files are
-validated and reconstructed by applying the committed valid prefix (D-021/D-022), and
-every copied database is forced to rollback-journal mode before its transient read-
-only sqlite-wasm open (D-025). Each logical database's combined main/WAL/SHM source
-set carries a 1 GiB in-memory budget in the current copy-based pipeline (sized against
-sqlite-wasm's 2 GiB heap ceiling, D-039). The REQUIRED messages set is validated
-against that budget from Manifest metadata before the `prepare` boundary, so an
-over-budget backup fails recoverably without touching the derived DB; read-time
-charging uses plaintext byte lengths.
-The unencrypted root Manifest.db/WAL/SHM open still has the legacy 1 GiB per-file
-bounds rather than one aggregate budget; aggregate/streaming Manifest import is tracked
-as hostile-input hardening because those files are retained together during recovery.
+validated and their committed prefix is written by random access to a staged OPFS main
+file (D-021/D-022); encrypted database mains decrypt-stream directly into that staged
+file with no intermediate copy. WAL replay is single-pass with chunked frame reads
+and a bounded pending-transaction buffer, falling back to a bounded-memory two-phase
+pass for oversized transactions; commit sizes are validated by a hostility cap plus a
+structural bound applied only to the final applied commit, so checkpoint-truncated
+mains replay correctly (D-042). The staged header is forced to rollback-journal mode
+(D-025), then the pinned sqlite-wasm 3.50.4-build1 `opfs-sahpool.importDb()` callback
+pulls bounded chunks into a unique 16-slot transient pool without a full wasm-heap
+copy (D-041).
+Encrypted and unencrypted Manifest.db use the same seam before prepare. The former
+D-039 RAM caps are superseded by generous absolute staged-file/set sanity bounds and
+an OPFS-quota preflight. The REQUIRED messages set still calls
+`assertRequiredSourceDatabaseSetWithinBudget` before the `prepare` boundary;
+missing/malformed required metadata, invalid stored-file shape, and insufficient quota
+fail without touching the derived DB.
+The quota guard reserves a conservative three-copy peak for decrypted staging, WAL
+reconstruction, and callback sahpool import. Required encrypted main/WAL/SHM keys are
+trial-unwrapped and immediately zeroized during this preflight.
+Crash-leftover transient storage is swept before the Manifest quota estimate, so stale
+usage cannot prevent its own recovery. Every encrypted ingest ends by locking the
+worker's session through the shared reset seam (D-043), so a completed overview
+ingest leaves `transient/` empty even though its one-shot worker is simply
+terminated afterwards.
 Plaintext SHA-256/size remain the primary normalized fields. The ingest summary retains
 both plaintext and exact stored ciphertext hash/size plus the encryption flag for its
 Manifest and database inputs. Attachment rows retain the plaintext hash when eager
@@ -243,20 +263,27 @@ route first calls `unlockBackupSession`; the worker retains mutable unwrapped cl
 and a decrypted transient Manifest reader, both keyed by backup id and verified root
 identity with `isSameEntry`. A different id/root or explicit `lockBackupSession`
 invalidates that session and aborts/drains its active source reads before resolving.
-Per-file CBC decryption reads `File` slices in bounded chunks
-and resizes the result to authoritative MBFile `Size`: a longer stored tail is
-truncated and a shorter sparse materialized prefix is zero-extended. Declared logical
-size and actual stored size are both capped before allocation/decryption. The final plaintext is materialized because the current
-RPC returns `Uint8Array`. Exact ciphertext SHA-256 is computed separately with one-shot
-WebCrypto because the platform has no incremental digest API, and only for callers
-that opt in via `includeSourceSha256` (this RPC and ingest database provenance do;
-eager attachment hashing skips the second full read). Responses expose both
-plaintext `sha256` and stored-source `sourceSha256`, enforce caller byte caps, verify
-the optional expected plaintext hash, and transfer the result buffer through Comlink.
-Preview/extraction and future report hashing use this API. The normalized attachment's
+Per-file CBC decryption reads `File` slices in bounded chunks, resizing plaintext to
+authoritative MBFile `Size`: a longer stored tail is truncated and a shorter sparse
+prefix is zero-extended. Bounded preview/report reads decrypt in memory and respond
+with a Blob copy whose intermediate buffer is zeroized immediately; session-owned
+transient OPFS staging is reserved for encrypted WAL/SHM sidecar payloads during
+database opens (D-043). `readSourceFile` returns a structured-cloned Blob instead of
+a transferred full-file array; native media decode consumes that Blob directly.
+`extractSourceFile` owns the save-picker file handle inside backup-worker and writes
+decrypt chunks straight to its writable; its commit point is a successful
+`writable.close()` — pre-commit hash/session failures abort the atomic writable, and
+a session lock landing after the commit can no longer turn the completed extraction
+into a reported failure. The UI never removes a selected handle after failure, so an
+existing destination remains intact.
+Incremental SHA-256 folds
+plaintext and opt-in ciphertext streams. Responses expose both plaintext `sha256` and
+stored-source `sourceSha256`, enforce caller byte caps, and verify the optional expected
+plaintext hash before resolving. Preview and future report hashing use
+`readSourceFile`; extraction uses the streaming sibling RPC. The normalized attachment's
 optional `sha256` is therefore a decrypted-content hash for encrypted backups and stays
 the expected-hash input; it must not be compared with ciphertext `sourceSha256`. User
-extraction retains the explicit 1 GiB cap from D-031.
+extraction materialization and 1 GiB cap from D-031 are superseded by D-041.
 
 `IngestSink` receives normalized entities and is implemented by the db-worker:
 

@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { stableHash } from "./hash";
-import { isSafeOpfsPathSegment } from "./opfs";
+import { getAvailableOpfsQuotaBytes, isSafeOpfsPathSegment } from "./opfs";
 
 describe("isSafeOpfsPathSegment", () => {
   it("accepts plain trimmed segment values", () => {
@@ -15,6 +15,69 @@ describe("isSafeOpfsPathSegment", () => {
     expect(isSafeOpfsPathSegment("a/b")).toBe(false);
     expect(isSafeOpfsPathSegment("a\\b")).toBe(false);
     expect(isSafeOpfsPathSegment("a\0b")).toBe(false);
+  });
+});
+
+describe("getAvailableOpfsQuotaBytes", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubStorageEstimate(estimate: {
+    quota?: unknown;
+    usage?: unknown;
+  }): void {
+    vi.stubGlobal("navigator", {
+      storage: {
+        getDirectory: vi.fn(),
+        estimate: () => Promise.resolve(estimate),
+      },
+    });
+  }
+
+  it("returns undefined when OPFS storage is unavailable", async () => {
+    vi.stubGlobal("navigator", {});
+
+    await expect(getAvailableOpfsQuotaBytes()).resolves.toBeUndefined();
+  });
+
+  it("returns undefined when the estimate probe is unavailable", async () => {
+    vi.stubGlobal("navigator", {
+      storage: { getDirectory: vi.fn() },
+    });
+
+    await expect(getAvailableOpfsQuotaBytes()).resolves.toBeUndefined();
+  });
+
+  it("returns undefined for unusable estimate shapes", async () => {
+    const unusableEstimates = [
+      {},
+      { quota: 1_000 },
+      { usage: 0 },
+      { quota: "1000", usage: 0 },
+      { quota: Number.NaN, usage: 0 },
+      { quota: Number.POSITIVE_INFINITY, usage: 0 },
+      { quota: 1_000.5, usage: 0 },
+      { quota: 1_000, usage: Number.MAX_SAFE_INTEGER + 2 },
+    ];
+
+    for (const estimate of unusableEstimates) {
+      stubStorageEstimate(estimate);
+
+      await expect(getAvailableOpfsQuotaBytes()).resolves.toBeUndefined();
+    }
+  });
+
+  it("returns the available byte budget", async () => {
+    stubStorageEstimate({ quota: 2_000, usage: 500 });
+
+    await expect(getAvailableOpfsQuotaBytes()).resolves.toBe(1_500);
+  });
+
+  it("floors over-quota usage at zero", async () => {
+    stubStorageEstimate({ quota: 2_000, usage: 3_000 });
+
+    await expect(getAvailableOpfsQuotaBytes()).resolves.toBe(0);
   });
 });
 

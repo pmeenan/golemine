@@ -27,10 +27,19 @@ import {
 } from "./ios-backup";
 import {
   ManifestDbReader,
+  type DecryptedPlaintextDestination,
   type ManifestFileRecord,
+  type ReadEncryptedSourceFileBytesOptions,
   type ReadSourceFileBytesOptions,
+  type SourceFileBlob,
   type SourceFileBytes,
+  type SourceFileChunkSink,
+  type SourceFileInfo,
+  decryptSourceFileToDestination,
+  getStoredSourceFile,
   readEncryptedSourceFileBytes,
+  readEncryptedSourceFileBlob,
+  writeEncryptedSourceFileToSink,
   SourceFileDecryptionError,
   SourceFileTooLargeError,
 } from "./manifest-db";
@@ -57,16 +66,79 @@ export interface EncryptedSessionReadOptions
   decryptProgress?: CbcChunkProgressCallback;
 }
 
+/**
+ * Session-lifetime guard passed to a caller-owned tracked operation. It
+ * deliberately exposes no password or key material. `finalize` performs the
+ * last synchronous activity check while the operation is still registered,
+ * immediately before the caller returns its RPC response.
+ */
+export interface EncryptedSessionTrackedOperation {
+  assertActive(): void;
+  finalize<TValue>(value: TValue): TValue;
+}
+
 export interface EncryptedBackupSessionContext {
   readonly backupId: string;
   readonly root: ReadonlySourceDirectoryHandle;
   readonly detection: BackupDetectionResult;
   readonly manifest: ManifestDbReader;
   assertActive(): void;
+  runTrackedOperation<TValue>(
+    operation: (
+      tracked: EncryptedSessionTrackedOperation,
+    ) => Promise<TValue>,
+  ): Promise<TValue>;
+  /**
+   * Bounded in-memory decrypt of one source file (eager hashing, previews).
+   * The returned bytes are the caller's to zeroize; a session lock racing the
+   * read zeroizes them before the tracked promise rejects.
+   */
   readSourceFile(
     record: ManifestFileRecord,
     options?: EncryptedSessionReadOptions,
   ): Promise<SourceFileBytes>;
+  /**
+   * Decrypts one source file into session-owned transient OPFS staging and
+   * returns it as a Blob (WAL/SHM sidecar payloads for database opens, which
+   * can be too large for memory but are consumed as read-only Blobs). The
+   * staged plaintext is retained by the session until the caller's
+   * `cleanup()` or session lock/eviction removes it. Main databases do not
+   * use this path: they decrypt-stream straight into the source-sqlite
+   * workspace through `stageSourceFile`.
+   */
+  readSourceFileBlob(
+    record: ManifestFileRecord,
+    options?: EncryptedSessionReadOptions,
+  ): Promise<SourceFileBlob>;
+  /**
+   * Decrypt-streams one source file into a caller-owned destination (the
+   * source-sqlite workspace's staged main file) inside one tracked session
+   * operation, so an explicit lock drains for the full stage duration. No
+   * session-retained plaintext copy is created; the caller owns the
+   * destination's lifetime. Returns plaintext/stored digests and provenance.
+   */
+  stageSourceFile(
+    record: ManifestFileRecord,
+    destination: DecryptedPlaintextDestination,
+    options?: EncryptedSessionReadOptions,
+  ): Promise<SourceFileInfo>;
+  /**
+   * Streams the decrypted source file into `sink` inside one tracked session
+   * operation. `finalize` runs inside that tracked window, after the full
+   * plaintext has been written and hashed but before the runner's final
+   * activity check: callers place their commit point (e.g. closing an atomic
+   * writable) there. A lock landing after `finalize` succeeded still rejects
+   * the returned promise, so committed callers must capture their result
+   * inside `finalize` and treat that rejection as post-commit.
+   */
+  writeSourceFile(
+    record: ManifestFileRecord,
+    sink: SourceFileChunkSink,
+    options?: EncryptedSessionReadOptions,
+    finalize?: (source: SourceFileInfo) => Promise<void>,
+  ): Promise<SourceFileInfo>;
+  /** Verifies and immediately zeroizes a per-file key before ingest prepare. */
+  verifySourceFileKey(record: ManifestFileRecord): Promise<void>;
 }
 
 interface EncryptedBackupSessionCacheEntry
@@ -74,7 +146,8 @@ interface EncryptedBackupSessionCacheEntry
   readonly rootHandle: FileSystemDirectoryHandle;
   readonly keybag: UnlockedBackupKeybag;
   readonly abortController: AbortController;
-  readonly activeReads: Set<Promise<SourceFileBytes>>;
+  readonly activeReads: Set<Promise<unknown>>;
+  readonly stagedSourceBlobs: Set<SourceFileBlob>;
 }
 
 interface EncryptedManifestMaterial {
@@ -223,7 +296,7 @@ async function openEncryptedBackupSessionLocked(
     );
   }
 
-  await clearActiveEncryptedSession();
+  await evictActiveEncryptedSession();
 
   await emitWorkerProgress(
     "backup",
@@ -268,8 +341,12 @@ async function openEncryptedBackupSessionLocked(
     }
 
     manifest = await ManifestDbReader.open(root, {
-      decryptMain: (encryptedBytes) =>
-        unlockedKeybag.decryptManifestDatabase(encryptedBytes, material.manifestKey),
+      backupId: detection.id,
+      decryptMainChunks: (encryptedFile) =>
+        unlockedKeybag.decryptManifestDatabaseChunks(
+          encryptedFile,
+          material.manifestKey,
+        ),
     });
 
     // A synchronous lock/reset can run while any awaited WebCrypto, progress,
@@ -285,12 +362,90 @@ async function openEncryptedBackupSessionLocked(
       manifest,
       keybag: unlockedKeybag,
       abortController: new AbortController(),
-      activeReads: new Set<Promise<SourceFileBytes>>(),
+      activeReads: new Set<Promise<unknown>>(),
+      stagedSourceBlobs: new Set<SourceFileBlob>(),
       assertActive(): void {
         assertSessionReadActive(this);
       },
+      runTrackedOperation<TValue>(
+        operation: (
+          tracked: EncryptedSessionTrackedOperation,
+        ) => Promise<TValue>,
+      ): Promise<TValue> {
+        const trackedOperation: EncryptedSessionTrackedOperation = {
+          assertActive: () => {
+            assertSessionReadActive(this);
+          },
+          finalize: <TResult>(value: TResult): TResult => {
+            assertSessionReadActive(this);
+            return value;
+          },
+        };
+        return runTrackedSessionOperation(this, () =>
+          operation(trackedOperation),
+        );
+      },
       readSourceFile(record, options): Promise<SourceFileBytes> {
-        return runTrackedSessionRead(this, record, options);
+        return runTrackedSessionOperation(
+          this,
+          () =>
+            readEncryptedSourceFile(
+              this.root,
+              this.keybag,
+              record,
+              options,
+              this.abortController.signal,
+            ),
+          (source) => {
+            source.bytes.fill(0);
+          },
+        );
+      },
+      readSourceFileBlob(record, options): Promise<SourceFileBlob> {
+        return runTrackedSessionOperation(
+          this,
+          () =>
+            readEncryptedSourceFileAsBlob(
+              this.root,
+              this.keybag,
+              this.backupId,
+              record,
+              options,
+              this.abortController.signal,
+            ).then((source) => retainSessionSourceBlob(this, source)),
+          (source) => source.cleanup(),
+        );
+      },
+      stageSourceFile(record, destination, options): Promise<SourceFileInfo> {
+        return runTrackedSessionOperation(this, () =>
+          stageEncryptedSourceFile(
+            this.root,
+            this.keybag,
+            record,
+            destination,
+            options,
+            this.abortController.signal,
+          ),
+        );
+      },
+      writeSourceFile(record, sink, options, finalize): Promise<SourceFileInfo> {
+        return runTrackedSessionOperation(this, async () => {
+          const source = await writeEncryptedSourceFile(
+            this.root,
+            this.keybag,
+            record,
+            sink,
+            options,
+            this.abortController.signal,
+          );
+          await finalize?.(source);
+          return source;
+        });
+      },
+      verifySourceFileKey(record): Promise<void> {
+        return runTrackedSessionOperation(this, () =>
+          verifyEncryptedSourceFileKey(this.keybag, record),
+        );
       },
     };
 
@@ -300,6 +455,7 @@ async function openEncryptedBackupSessionLocked(
   } catch (cause) {
     try {
       manifest?.close();
+      await manifest?.cleanup();
     } catch {
       // Cleanup is best-effort and must not mask the unlock/decrypt failure;
       // SourceSqliteDatabase.close still unlinks in its own finally path.
@@ -401,7 +557,87 @@ async function clearActiveEncryptedSession(): Promise<void> {
   // surface a raw sqlite error instead of the recoverable session code.
   await Promise.allSettled([...session.activeReads]);
 
-  session.manifest.close();
+  // Session-retained staged plaintext comes only from readSourceFileBlob
+  // (encrypted WAL/SHM sidecar staging for ingest database opens); bounded
+  // preview reads decrypt in memory and main databases decrypt-stream into
+  // caller-owned workspaces, so neither registers here. Ingest cleans up its
+  // own staged sidecars, but a lock that races the open window must still
+  // guarantee no staged plaintext survives session teardown, so the sweep
+  // stays.
+  const cleanupFailures: unknown[] = [];
+  const stagedResults = await Promise.allSettled(
+    [...session.stagedSourceBlobs].map((source) => source.cleanup()),
+  );
+  session.stagedSourceBlobs.clear();
+  for (const result of stagedResults) {
+    if (result.status === "rejected") {
+      cleanupFailures.push(result.reason as unknown);
+    }
+  }
+
+  try {
+    session.manifest.close();
+  } catch (cause) {
+    cleanupFailures.push(cause);
+  }
+
+  try {
+    await session.manifest.cleanup();
+  } catch (cause) {
+    cleanupFailures.push(cause);
+  }
+
+  if (cleanupFailures.length === 1) {
+    throw cleanupFailures[0];
+  }
+  if (cleanupFailures.length > 1) {
+    throw new AggregateError(
+      cleanupFailures,
+      "Could not fully remove encrypted-session plaintext staging.",
+    );
+  }
+}
+
+/**
+ * Eviction/replace-unlock variant of {@link clearActiveEncryptedSession}: the
+ * old session's keys are still destroyed and its tracked reads drained before
+ * this resolves, but staging-cleanup failures are logged instead of thrown so
+ * a NEW operation (opening a different backup, or re-verifying a supplied
+ * password) never fails on the OLD session's cleanup problems. The explicit
+ * lock RPC keeps the throwing variant: its caller falls back to terminating
+ * the worker when cleanup cannot be guaranteed.
+ */
+async function evictActiveEncryptedSession(): Promise<void> {
+  try {
+    await clearActiveEncryptedSession();
+  } catch (cause) {
+    console.warn(
+      "Could not fully remove the evicted encrypted session's plaintext staging.",
+      cause,
+    );
+  }
+}
+
+/**
+ * Registers a staged source Blob for the session-teardown sweep. Never throws:
+ * the tracked runner's post-resolve activity check (with its cleanup discard
+ * hook) owns invalidation, so failing here would only orphan the staged file.
+ */
+function retainSessionSourceBlob(
+  session: EncryptedBackupSessionCacheEntry,
+  source: SourceFileBlob,
+): SourceFileBlob {
+  const originalCleanup = source.cleanup.bind(source);
+  let cleanupPromise: Promise<void> | undefined;
+
+  source.cleanup = () => {
+    cleanupPromise ??= originalCleanup().finally(() => {
+      session.stagedSourceBlobs.delete(source);
+    });
+    return cleanupPromise;
+  };
+  session.stagedSourceBlobs.add(source);
+  return source;
 }
 
 async function matchingActiveSessionLocked(
@@ -420,7 +656,7 @@ async function matchingActiveSessionLocked(
   }
 
   if (session.backupId !== backupId) {
-    await clearActiveEncryptedSession();
+    await evictActiveEncryptedSession();
     return undefined;
   }
 
@@ -434,30 +670,35 @@ async function matchingActiveSessionLocked(
   }
 
   if (!sameRoot) {
-    await clearActiveEncryptedSession();
+    await evictActiveEncryptedSession();
     return undefined;
   }
 
   return session;
 }
 
-function runTrackedSessionRead(
+/**
+ * The single session-lifetime mechanism for source-touching work. It
+ * registers the operation in the session's tracked set so an explicit lock or
+ * eviction drains it for its full duration, asserts the session is active
+ * before starting and again after the operation resolves, and maps failures
+ * observed after a lock aborted the session to the recoverable needs-password
+ * error. When the post-resolve activity check fails, the optional `discard`
+ * hook runs first (and is awaited before the drain completes) so resolved
+ * plaintext the caller will never receive — bytes buffers, staged blobs — is
+ * zeroized or removed instead of outliving the lock.
+ */
+function runTrackedSessionOperation<TValue>(
   session: EncryptedBackupSessionCacheEntry,
-  record: ManifestFileRecord,
-  options: EncryptedSessionReadOptions | undefined,
-): Promise<SourceFileBytes> {
-  const operation = (async () => {
+  operation: () => Promise<TValue>,
+  discard?: (value: TValue) => void | Promise<void>,
+): Promise<TValue> {
+  const pending = (async () => {
     assertSessionReadActive(session);
-    let source: SourceFileBytes;
+    let value: TValue;
 
     try {
-      source = await readEncryptedSourceFile(
-        session.root,
-        session.keybag,
-        record,
-        options,
-        session.abortController.signal,
-      );
+      value = await operation();
     } catch (cause) {
       if (session.abortController.signal.aborted) {
         throw new BackupSessionError(
@@ -468,23 +709,21 @@ function runTrackedSessionRead(
           cause,
         );
       }
-
       throw cause;
     }
 
     try {
       assertSessionReadActive(session);
-      return source;
     } catch (cause) {
-      source.bytes.fill(0);
+      await discard?.(value);
       throw cause;
     }
+    return value;
   })();
-  const tracked = operation.finally(() => {
+  const tracked = pending.finally(() => {
     session.activeReads.delete(tracked);
   });
   session.activeReads.add(tracked);
-
   return tracked;
 }
 
@@ -597,6 +836,32 @@ async function readEncryptedManifestMaterial(
   }
 }
 
+/**
+ * Builds the decrypt-chunk stream for one stored file, forwarding the core
+ * reader's optional ciphertext tee into the crypto layer so an opt-in
+ * stored-source hash folds into the single decrypt read pass instead of
+ * costing a second full read of the stored file.
+ */
+function sessionDecryptChunks(
+  keybag: UnlockedBackupKeybag,
+  encryptionKey: Uint8Array,
+  plaintextSize: number,
+  options: EncryptedSessionReadOptions,
+  signal?: AbortSignal,
+): ReadEncryptedSourceFileBytesOptions["decryptChunks"] {
+  return (source, onCiphertextChunk) =>
+    keybag.decryptFileChunks(source, encryptionKey, plaintextSize, {
+      ...(signal === undefined ? {} : { signal }),
+      ...(options.decryptChunkBytes === undefined
+        ? {}
+        : { chunkBytes: options.decryptChunkBytes }),
+      ...(options.decryptProgress === undefined
+        ? {}
+        : { progress: options.decryptProgress }),
+      ...(onCiphertextChunk === undefined ? {} : { onCiphertextChunk }),
+    });
+}
+
 async function readEncryptedSourceFile(
   root: ReadonlySourceDirectoryHandle,
   keybag: UnlockedBackupKeybag,
@@ -604,6 +869,151 @@ async function readEncryptedSourceFile(
   options: EncryptedSessionReadOptions = {},
   signal?: AbortSignal,
 ): Promise<SourceFileBytes> {
+  const { plaintextSize, encryptionKey } = encryptedFileMetadata(record);
+
+  try {
+    return await readEncryptedSourceFileBytes(root, record, {
+      plaintextSize,
+      ...(signal === undefined ? {} : { signal }),
+      ...(options.maxReadBytes === undefined
+        ? {}
+        : { maxReadBytes: options.maxReadBytes }),
+      ...(options.includeSourceSha256 === undefined
+        ? {}
+        : { includeSourceSha256: options.includeSourceSha256 }),
+      decryptChunks: sessionDecryptChunks(
+        keybag,
+        encryptionKey,
+        plaintextSize,
+        options,
+        signal,
+      ),
+    });
+  } catch (cause) {
+    // Preserve source access/size/manifest failures for the established
+    // actionable attachment-read mappings. Only crypto failures are folded
+    // into the M5 crypto error codes.
+    throw mapEncryptedSourceReadCause(cause, record.fileId);
+  }
+}
+
+async function readEncryptedSourceFileAsBlob(
+  root: ReadonlySourceDirectoryHandle,
+  keybag: UnlockedBackupKeybag,
+  backupId: string,
+  record: ManifestFileRecord,
+  options: EncryptedSessionReadOptions = {},
+  signal?: AbortSignal,
+): Promise<SourceFileBlob> {
+  const { plaintextSize, encryptionKey } = encryptedFileMetadata(record);
+
+  try {
+    return await readEncryptedSourceFileBlob(root, record, {
+      backupId,
+      plaintextSize,
+      ...(signal === undefined ? {} : { signal }),
+      ...(options.maxReadBytes === undefined
+        ? {}
+        : { maxReadBytes: options.maxReadBytes }),
+      ...(options.includeSourceSha256 === undefined
+        ? {}
+        : { includeSourceSha256: options.includeSourceSha256 }),
+      decryptChunks: sessionDecryptChunks(
+        keybag,
+        encryptionKey,
+        plaintextSize,
+        options,
+        signal,
+      ),
+    });
+  } catch (cause) {
+    throw mapEncryptedSourceReadCause(cause, record.fileId);
+  }
+}
+
+async function stageEncryptedSourceFile(
+  root: ReadonlySourceDirectoryHandle,
+  keybag: UnlockedBackupKeybag,
+  record: ManifestFileRecord,
+  destination: DecryptedPlaintextDestination,
+  options: EncryptedSessionReadOptions = {},
+  signal?: AbortSignal,
+): Promise<SourceFileInfo> {
+  const { plaintextSize, encryptionKey } = encryptedFileMetadata(record);
+
+  try {
+    signal?.throwIfAborted();
+    const file = await getStoredSourceFile(root, record);
+    const digests = await decryptSourceFileToDestination(record, file, destination, {
+      plaintextSize,
+      ...(signal === undefined ? {} : { signal }),
+      ...(options.maxReadBytes === undefined
+        ? {}
+        : { maxReadBytes: options.maxReadBytes }),
+      ...(options.includeSourceSha256 === undefined
+        ? {}
+        : { includeSourceSha256: options.includeSourceSha256 }),
+      decryptChunks: sessionDecryptChunks(
+        keybag,
+        encryptionKey,
+        plaintextSize,
+        options,
+        signal,
+      ),
+    });
+
+    return {
+      record,
+      sha256: digests.sha256,
+      ...(digests.sourceSha256 === undefined
+        ? {}
+        : { sourceSha256: digests.sourceSha256 }),
+      byteLength: digests.byteLength,
+      sourceByteLength: digests.sourceByteLength,
+      isEncrypted: true,
+    };
+  } catch (cause) {
+    throw mapEncryptedSourceReadCause(cause, record.fileId);
+  }
+}
+
+async function writeEncryptedSourceFile(
+  root: ReadonlySourceDirectoryHandle,
+  keybag: UnlockedBackupKeybag,
+  record: ManifestFileRecord,
+  sink: SourceFileChunkSink,
+  options: EncryptedSessionReadOptions = {},
+  signal?: AbortSignal,
+): Promise<SourceFileInfo> {
+  const { plaintextSize, encryptionKey } = encryptedFileMetadata(record);
+
+  try {
+    return await writeEncryptedSourceFileToSink(root, record, sink, {
+      plaintextSize,
+      ...(signal === undefined ? {} : { signal }),
+      ...(options.maxReadBytes === undefined
+        ? {}
+        : { maxReadBytes: options.maxReadBytes }),
+      ...(options.includeSourceSha256 === undefined
+        ? {}
+        : { includeSourceSha256: options.includeSourceSha256 }),
+      decryptChunks: sessionDecryptChunks(
+        keybag,
+        encryptionKey,
+        plaintextSize,
+        options,
+        signal,
+      ),
+    });
+  } catch (cause) {
+    throw mapEncryptedSourceReadCause(cause, record.fileId);
+  }
+}
+
+function encryptedFileMetadata(record: ManifestFileRecord): {
+  plaintextSize: number;
+  encryptionKey: Uint8Array;
+} {
   const plaintextSize = record.metadata.size;
   const encryptionKey = record.metadata.encryptionKey;
 
@@ -625,47 +1035,36 @@ async function readEncryptedSourceFile(
     );
   }
 
+  return { plaintextSize, encryptionKey };
+}
+
+async function verifyEncryptedSourceFileKey(
+  keybag: UnlockedBackupKeybag,
+  record: ManifestFileRecord,
+): Promise<void> {
+  const { encryptionKey } = encryptedFileMetadata(record);
+
   try {
-    return await readEncryptedSourceFileBytes(root, record, {
-      plaintextSize,
-      ...(signal === undefined ? {} : { signal }),
-      ...(options.maxReadBytes === undefined
-        ? {}
-        : { maxReadBytes: options.maxReadBytes }),
-      ...(options.includeSourceSha256 === undefined
-        ? {}
-        : { includeSourceSha256: options.includeSourceSha256 }),
-      decryptChunks: (source) =>
-        keybag.decryptFileChunks(source, encryptionKey, plaintextSize, {
-          ...(signal === undefined ? {} : { signal }),
-          ...(options.decryptChunkBytes === undefined
-            ? {}
-            : { chunkBytes: options.decryptChunkBytes }),
-          ...(options.decryptProgress === undefined
-            ? {}
-            : { progress: options.decryptProgress }),
-        }),
-    });
+    await keybag.verifyFileKey(encryptionKey);
   } catch (cause) {
-    // Preserve source access/size/manifest failures for the established
-    // actionable attachment-read mappings. Only crypto failures are folded
-    // into the M5 crypto error codes.
-    if (cause instanceof SourceFileDecryptionError) {
-      throw new BackupSessionError(
-        "backup_crypto_malformed",
-        "Decrypted file bytes did not match encrypted backup metadata.",
-        false,
-        { fileId: record.fileId },
-        cause,
-      );
-    }
-
-    if (cause instanceof BackupCryptoError || cause instanceof BackupSessionError) {
-      throw mapCryptoCause(cause, record.fileId);
-    }
-
-    throw cause;
+    throw mapEncryptedSourceReadCause(cause, record.fileId);
   }
+}
+
+function mapEncryptedSourceReadCause(cause: unknown, fileId: string): unknown {
+  if (cause instanceof SourceFileDecryptionError) {
+    return new BackupSessionError(
+      "backup_crypto_malformed",
+      "Decrypted file bytes did not match encrypted backup metadata.",
+      false,
+      { fileId },
+      cause,
+    );
+  }
+  if (cause instanceof BackupCryptoError || cause instanceof BackupSessionError) {
+    return mapCryptoCause(cause, fileId);
+  }
+  return cause;
 }
 
 function assertBackupIdMatches(
@@ -738,7 +1137,7 @@ function mapCryptoCause(cause: unknown, source: string): BackupSessionError {
   if (cause instanceof SourceFileTooLargeError) {
     return new BackupSessionError(
       "backup_crypto_unsupported",
-      "Encrypted Manifest.db exceeds the safe in-memory decrypt limit.",
+      "Encrypted Manifest.db exceeds the staged-file sanity limit or available local storage quota.",
       false,
       { source },
       cause,

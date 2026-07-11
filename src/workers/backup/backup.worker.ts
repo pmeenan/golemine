@@ -1,4 +1,4 @@
-import { expose, releaseProxy, transfer, wrap } from "comlink";
+import { expose, releaseProxy, wrap } from "comlink";
 import type { Remote } from "comlink";
 import type {
   BackupIngestRequest,
@@ -19,6 +19,7 @@ import {
 import {
   readSourceFile,
   readUnencryptedSourceFile,
+  extractSourceFile,
   resetBackupSourceCaches,
 } from "./attachment-read";
 import { unlockBackupSession } from "./encrypted-session";
@@ -33,24 +34,16 @@ export const backupWorkerApi: BackupWorkerApi = {
   unlockBackupSession: (root, request, progress) =>
     unlockBackupSession(root, request, progress),
   lockBackupSession: () => resetBackupSourceCaches(),
-  readSourceFile: async (root, request, progress) => {
-    const result = await readSourceFile(root, request, progress);
-
-    return result.ok
-      ? transfer(result, [result.value.bytes.buffer as ArrayBuffer])
-      : result;
-  },
+  readSourceFile: (root, request, progress) =>
+    readSourceFile(root, request, progress),
+  extractSourceFile: (root, request, destination, progress) =>
+    extractSourceFile(root, request, destination, progress),
   ingestUnencryptedBackup: (root, request, sink, progress) =>
     ingestUnencryptedBackupDirectory(root, request, sink, progress),
   ingestUnencryptedBackupToDb: (root, request, progress) =>
     ingestUnencryptedBackupToDb(root, request, progress),
-  readUnencryptedSourceFile: async (root, request, progress) => {
-    const result = await readUnencryptedSourceFile(root, request, progress);
-
-    return result.ok
-      ? transfer(result, [result.value.bytes.buffer as ArrayBuffer])
-      : result;
-  },
+  readUnencryptedSourceFile: (root, request, progress) =>
+    readUnencryptedSourceFile(root, request, progress),
 };
 
 expose(backupWorkerApi);

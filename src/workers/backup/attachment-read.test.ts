@@ -2,7 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   iosMiniBackupExpectedMetadata,
@@ -12,6 +12,7 @@ import {
   iosMiniEncryptedBackupUdid,
 } from "../../../e2e/fixtures/ios-mini-backup.mjs";
 import {
+  extractSourceFile,
   readSourceFile,
   readUnencryptedSourceFile,
   resetUnencryptedSourceFileCache,
@@ -22,7 +23,15 @@ import {
   unlockBackupSession,
 } from "./encrypted-session";
 import { UnlockedBackupKeybag } from "./crypto";
-import { ManifestDbReader } from "./manifest-db";
+import {
+  ManifestDbReader,
+  resetBackupSourceOverridesForTests,
+  setBackupSourceOverridesForTests,
+} from "./manifest-db";
+import {
+  inMemoryBackupSourceOverridesForTest,
+  stagePlaintextInMemoryForTest,
+} from "./source-sqlite.test-support";
 
 const fixtureRoot = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -36,11 +45,63 @@ const encryptedFixtureRoot = path.join(
 );
 
 beforeEach(async () => {
+  setBackupSourceOverridesForTests(inMemoryBackupSourceOverridesForTest);
   resetUnencryptedSourceFileCache();
   await resetEncryptedBackupSession();
 });
 
+afterEach(() => {
+  resetBackupSourceOverridesForTests();
+});
+
 describe("readUnencryptedSourceFile", () => {
+  it("streams an encrypted attachment directly to the selected destination", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    if (!unlocked.ok) {
+      throw new Error(JSON.stringify(unlocked.error));
+    }
+    expect(unlocked.ok).toBe(true);
+    const attachment =
+      iosMiniEncryptedBackupExpectedMetadata.sourceFiles.attachment;
+    const destination = new MemoryDestinationFileHandle();
+    const result = await extractSourceFile(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        sourceDomain: attachment.domain,
+        sourcePath: attachment.relativePath,
+      },
+      destination as unknown as FileSystemFileHandle,
+    );
+
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.error));
+    }
+    const expected = await readFile(
+      path.join(
+        fixtureRoot,
+        attachment.fileID.slice(0, 2),
+        attachment.fileID,
+      ),
+    );
+    expect(destination.closed).toBe(true);
+    expect(destination.aborted).toBe(false);
+    expect(destination.bytes()).toEqual(new Uint8Array(expected));
+    expect(result.value.byteLength).toBe(expected.byteLength);
+    expect(result.value.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(result.value.sourceSha256).not.toBe(result.value.sha256);
+  });
+
   it("reads and hashes an unencrypted attachment through Manifest.db", async () => {
     const root = new DiskFileSystemDirectory(fixtureRoot, iosMiniBackupUdid);
     const attachment = iosMiniBackupExpectedMetadata.sourceFiles.attachment;
@@ -75,7 +136,7 @@ describe("readUnencryptedSourceFile", () => {
       relativePath: attachment.relativePath,
     });
     expect(result.value.byteLength).toBeGreaterThan(0);
-    expect(result.value.bytes.byteLength).toBe(result.value.byteLength);
+    expect(result.value.blob.size).toBe(result.value.byteLength);
     expect(result.value.sourceByteLength).toBe(result.value.byteLength);
     expect(result.value.sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
@@ -285,16 +346,16 @@ describe("readUnencryptedSourceFile", () => {
       },
     );
 
-    expect(result.ok).toBe(true);
     if (!result.ok) {
-      throw new Error(`${result.error.code}: ${result.error.message}`);
+      throw new Error(JSON.stringify(result.error));
     }
+    expect(result.ok).toBe(true);
     expect(result.value.isEncrypted).toBe(true);
     expect(result.value.sourceByteLength).toBeGreaterThan(0);
     expect(result.value.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(result.value.sha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(result.value.sha256).not.toBe(result.value.sourceSha256);
-    expect(result.value.byteLength).toBe(result.value.bytes.byteLength);
+    expect(result.value.byteLength).toBe(result.value.blob.size);
   });
 
   it("evicts encrypted keys when the same backup id is supplied from a different root handle", async () => {
@@ -582,10 +643,10 @@ describe("readUnencryptedSourceFile", () => {
       throw new Error("Expected the encrypted session to be active.");
     }
     const originalRead = session.readSourceFile.bind(session);
-    let plaintext: Uint8Array | undefined;
+    let plaintextByteLength: number | undefined;
     session.readSourceFile = async (record, options) => {
       const source = await originalRead(record, options);
-      plaintext = source.bytes;
+      plaintextByteLength = source.bytes.byteLength;
       return source;
     };
     const finalProgressStarted = deferredSignal();
@@ -609,19 +670,559 @@ describe("readUnencryptedSourceFile", () => {
     );
 
     await finalProgressStarted.promise;
-    await resetEncryptedBackupSession();
+    const lock = resetEncryptedBackupSession();
+    let lockSettled = false;
+    void lock.then(() => {
+      lockSettled = true;
+    });
+    await Promise.resolve();
+    expect(lockSettled).toBe(false);
     releaseFinalProgress.resolve();
 
     const result = await read;
+    await lock;
     expect(result.ok).toBe(false);
     if (result.ok) {
       throw new Error("Expected the locked read to reject old-session plaintext.");
     }
     expect(result.error.code).toBe("backup_password_required");
-    expect(plaintext).toBeDefined();
-    expect(Array.from(plaintext ?? []).every((byte) => byte === 0)).toBe(true);
+    expect(plaintextByteLength).toBeGreaterThan(0);
+  });
+
+  it("awaits Manifest cleanup even when synchronous close fails", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+    const session = await findEncryptedBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      iosMiniEncryptedBackupUdid,
+    );
+    if (session === undefined) {
+      throw new Error("Expected the encrypted session to be active.");
+    }
+
+    const cleanupStarted = deferredSignal();
+    const releaseCleanup = deferredSignal();
+    const originalCleanup = session.manifest.cleanup.bind(session.manifest);
+    session.manifest.close = vi.fn(() => {
+      throw new Error("synthetic Manifest close failure");
+    });
+    const cleanupManifest = vi.fn(async () => {
+      cleanupStarted.resolve();
+      await releaseCleanup.promise;
+      await originalCleanup();
+    });
+    session.manifest.cleanup = cleanupManifest;
+
+    const lock = resetEncryptedBackupSession();
+    await cleanupStarted.promise;
+    let lockSettled = false;
+    void lock.then(
+      () => {
+        lockSettled = true;
+      },
+      () => {
+        lockSettled = true;
+      },
+    );
+    await Promise.resolve();
+    expect(lockSettled).toBe(false);
+
+    releaseCleanup.resolve();
+    await expect(lock).rejects.toThrow("synthetic Manifest close failure");
+    expect(cleanupManifest).toHaveBeenCalledTimes(1);
+    expect(lockSettled).toBe(true);
+  });
+
+  it("a lock during destination close commits the extraction instead of aborting", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+
+    const closeStarted = deferredSignal();
+    const releaseClose = deferredSignal();
+    const abortStarted = deferredSignal();
+    const releaseAbort = deferredSignal();
+    // Abort must never run after a successful close; leave its gate open so
+    // an incorrect abort would surface as `aborted === true` below instead of
+    // hanging the test.
+    releaseAbort.resolve();
+    const destination = new MemoryDestinationFileHandle({
+      closeStarted,
+      releaseClose,
+      abortStarted,
+      releaseAbort,
+    });
+    const attachment =
+      iosMiniEncryptedBackupExpectedMetadata.sourceFiles.attachment;
+    const extraction = extractSourceFile(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        sourceDomain: attachment.domain,
+        sourcePath: attachment.relativePath,
+      },
+      destination as unknown as FileSystemFileHandle,
+    );
+
+    await closeStarted.promise;
+    const lock = resetEncryptedBackupSession();
+    let lockSettled = false;
+    void lock.then(() => {
+      lockSettled = true;
+    });
+    await Promise.resolve();
+    // The lock drains the tracked extraction for its full duration, including
+    // the in-flight destination close.
+    expect(lockSettled).toBe(false);
+    expect(destination.closed).toBe(false);
+
+    releaseClose.resolve();
+    const result = await extraction;
+    await lock;
+
+    // close() succeeded before the lock assert ran, so the extraction is
+    // committed: the RPC reports success and the written file remains.
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.error));
+    }
+    const expected = await readFile(
+      path.join(
+        fixtureRoot,
+        attachment.fileID.slice(0, 2),
+        attachment.fileID,
+      ),
+    );
+    expect(destination.closed).toBe(true);
+    expect(destination.aborted).toBe(false);
+    expect(destination.bytes()).toEqual(new Uint8Array(expected));
+    expect(result.value.byteLength).toBe(expected.byteLength);
+    expect(result.value.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(lockSettled).toBe(true);
+  });
+
+  it("a lock before destination close still aborts the extraction", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+
+    const destination = new MemoryDestinationFileHandle();
+    const hashingStarted = deferredSignal();
+    const releaseHashing = deferredSignal();
+    const attachment =
+      iosMiniEncryptedBackupExpectedMetadata.sourceFiles.attachment;
+    const extraction = extractSourceFile(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        sourceDomain: attachment.domain,
+        sourcePath: attachment.relativePath,
+      },
+      destination as unknown as FileSystemFileHandle,
+      async (event) => {
+        if (event.phase === "hashing") {
+          hashingStarted.resolve();
+          await releaseHashing.promise;
+        }
+      },
+    );
+
+    // The lock lands while extraction is verifying hashes, before close():
+    // the pre-close activity check must abort the atomic writable and fail
+    // with the recoverable needs-password code.
+    await hashingStarted.promise;
+    const lock = resetEncryptedBackupSession();
+    releaseHashing.resolve();
+
+    const result = await extraction;
+    await lock;
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("Expected the pre-close lock to fail the extraction.");
+    }
+    expect(result.error.code).toBe("backup_password_required");
+    expect(destination.closed).toBe(false);
+    expect(destination.aborted).toBe(true);
+  });
+
+  it("decrypts a bounded preview in memory without staging plaintext", async () => {
+    const stagePlaintextSpy = vi.fn(stagePlaintextInMemoryForTest);
+    setBackupSourceOverridesForTests({
+      ...inMemoryBackupSourceOverridesForTest,
+      stagePlaintext: stagePlaintextSpy,
+    });
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+
+    const attachment =
+      iosMiniEncryptedBackupExpectedMetadata.sourceFiles.attachment;
+    const result = await readSourceFile(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        sourceDomain: attachment.domain,
+        sourcePath: attachment.relativePath,
+        maxReadBytes: 1024 * 1024,
+      },
+    );
+
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.error));
+    }
+    const expected = await readFile(
+      path.join(
+        fixtureRoot,
+        attachment.fileID.slice(0, 2),
+        attachment.fileID,
+      ),
+    );
+    expect(new Uint8Array(await result.value.blob.arrayBuffer())).toEqual(
+      new Uint8Array(expected),
+    );
+    // Bounded preview reads decrypt into memory only: the plaintext staging
+    // seam (which stands in for transient OPFS staging in unit tests) must
+    // never be touched, so no staged plaintext exists to retain or sweep.
+    expect(stagePlaintextSpy).not.toHaveBeenCalled();
+  });
+
+  it("hashes stored ciphertext in the same decrypt read pass on the session path", async () => {
+    const attachment =
+      iosMiniEncryptedBackupExpectedMetadata.sourceFiles.attachment;
+    const counter = { bytes: 0 };
+    const root = new ReadCountingDiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+      counter,
+      attachment.fileID,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+
+    counter.bytes = 0;
+    const result = await readSourceFile(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        sourceDomain: attachment.domain,
+        sourcePath: attachment.relativePath,
+        maxReadBytes: 1024 * 1024,
+      },
+    );
+
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.error));
+    }
+    expect(result.value.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    // includeSourceSha256 must fold into the decrypt pass via the ciphertext
+    // tee: the stored file is read exactly once (a second hashing pass would
+    // double the byte count).
+    expect(counter.bytes).toBe(result.value.sourceByteLength);
+  });
+
+  it("still reports a successful uncached read when manifest cleanup rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const cleanup = vi
+      .spyOn(ManifestDbReader.prototype, "cleanup")
+      .mockRejectedValue(new Error("synthetic manifest cleanup failure"));
+
+    try {
+      const root = new DiskFileSystemDirectory(fixtureRoot, iosMiniBackupUdid);
+      const attachment = iosMiniBackupExpectedMetadata.sourceFiles.attachment;
+      // No backupId: the uncached open/close-per-call path owns close/cleanup.
+      const result = await readUnencryptedSourceFile(
+        root as unknown as FileSystemDirectoryHandle,
+        {
+          sourceDomain: attachment.domain,
+          sourcePath: attachment.relativePath,
+          maxReadBytes: 1024 * 1024,
+        },
+      );
+
+      if (!result.ok) {
+        throw new Error(JSON.stringify(result.error));
+      }
+      expect(result.value.sha256).toMatch(/^[a-f0-9]{64}$/u);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Manifest staging"),
+        expect.any(Error),
+      );
+    } finally {
+      cleanup.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the original read error when manifest cleanup also rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const cleanup = vi
+      .spyOn(ManifestDbReader.prototype, "cleanup")
+      .mockRejectedValue(new Error("synthetic manifest cleanup failure"));
+
+    try {
+      const root = new DiskFileSystemDirectory(fixtureRoot, iosMiniBackupUdid);
+      const result = await readUnencryptedSourceFile(
+        root as unknown as FileSystemDirectoryHandle,
+        {
+          sourceDomain: "MediaDomain",
+          sourcePath: "Library/SMS/Attachments/does-not-exist.png",
+          maxReadBytes: 1024 * 1024,
+        },
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        throw new Error("Expected the missing-file read to fail.");
+      }
+      // The actionable original error surfaces; the cleanup rejection is
+      // downgraded to a logged warning instead of masking it.
+      expect(result.error.code).toBe("backup_file_missing");
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Manifest staging"),
+        expect.any(Error),
+      );
+    } finally {
+      cleanup.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the original extraction error when manifest cleanup also rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const cleanup = vi
+      .spyOn(ManifestDbReader.prototype, "cleanup")
+      .mockRejectedValue(new Error("synthetic manifest cleanup failure"));
+
+    try {
+      const root = new DiskFileSystemDirectory(fixtureRoot, iosMiniBackupUdid);
+      const destination = new MemoryDestinationFileHandle();
+      const result = await extractSourceFile(
+        root as unknown as FileSystemDirectoryHandle,
+        {
+          sourceDomain: "MediaDomain",
+          sourcePath: "Library/SMS/Attachments/does-not-exist.png",
+        },
+        destination as unknown as FileSystemFileHandle,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        throw new Error("Expected the missing-file extraction to fail.");
+      }
+      expect(result.error.code).toBe("backup_file_missing");
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Manifest staging"),
+        expect.any(Error),
+      );
+    } finally {
+      cleanup.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("replace-unlock proceeds when the old session's manifest cleanup rejects", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+    const session = await findEncryptedBackupSession(
+      root as unknown as FileSystemDirectoryHandle,
+      iosMiniEncryptedBackupUdid,
+    );
+    if (session === undefined) {
+      throw new Error("Expected the encrypted session to be active.");
+    }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    session.manifest.cleanup = vi.fn(() =>
+      Promise.reject(new Error("synthetic manifest cleanup failure")),
+    );
+
+    try {
+      // Supplying a password evicts the old session before re-verifying; the
+      // old session's staging-cleanup failure must not fail the new unlock.
+      const reUnlocked = await unlockBackupSession(
+        root as unknown as FileSystemDirectoryHandle,
+        {
+          backupId: iosMiniEncryptedBackupUdid,
+          password: iosMiniEncryptedBackupPassword,
+        },
+      );
+      if (!reUnlocked.ok) {
+        throw new Error(JSON.stringify(reUnlocked.error));
+      }
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("evicted encrypted session"),
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+      await resetEncryptedBackupSession();
+    }
+  });
+
+  it("a different-root eviction proceeds when the old session's manifest cleanup rejects", async () => {
+    const firstRoot = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const secondRoot = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const unlocked = await unlockBackupSession(
+      firstRoot as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMiniEncryptedBackupUdid,
+        password: iosMiniEncryptedBackupPassword,
+      },
+    );
+    expect(unlocked.ok).toBe(true);
+    const session = await findEncryptedBackupSession(
+      firstRoot as unknown as FileSystemDirectoryHandle,
+      iosMiniEncryptedBackupUdid,
+    );
+    if (session === undefined) {
+      throw new Error("Expected the encrypted session to be active.");
+    }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    session.manifest.cleanup = vi.fn(() =>
+      Promise.reject(new Error("synthetic manifest cleanup failure")),
+    );
+
+    try {
+      // Root identity mismatch evicts the old session; the new unlock against
+      // the different root must succeed despite the old cleanup rejection.
+      const replacement = await unlockBackupSession(
+        secondRoot as unknown as FileSystemDirectoryHandle,
+        {
+          backupId: iosMiniEncryptedBackupUdid,
+          password: iosMiniEncryptedBackupPassword,
+        },
+      );
+      if (!replacement.ok) {
+        throw new Error(JSON.stringify(replacement.error));
+      }
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("evicted encrypted session"),
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+      await resetEncryptedBackupSession();
+    }
   });
 });
+
+interface MemoryDestinationGates {
+  closeStarted: DeferredSignal;
+  releaseClose: DeferredSignal;
+  abortStarted: DeferredSignal;
+  releaseAbort: DeferredSignal;
+}
+
+class MemoryDestinationFileHandle {
+  readonly chunks: Uint8Array[] = [];
+  closed = false;
+  aborted = false;
+
+  constructor(private readonly gates?: MemoryDestinationGates) {}
+
+  createWritable(): Promise<FileSystemWritableFileStream> {
+    const writable = {
+      write: (data: FileSystemWriteChunkType) => {
+        if (
+          typeof data === "string" ||
+          data instanceof Blob ||
+          !(data instanceof Uint8Array)
+        ) {
+          throw new Error("Expected extraction to write Uint8Array chunks.");
+        }
+        this.chunks.push(data.slice());
+        return Promise.resolve();
+      },
+      close: async () => {
+        this.gates?.closeStarted.resolve();
+        await this.gates?.releaseClose.promise;
+        this.closed = true;
+      },
+      abort: async () => {
+        this.gates?.abortStarted.resolve();
+        await this.gates?.releaseAbort.promise;
+        this.aborted = true;
+      },
+    };
+
+    return Promise.resolve(writable as unknown as FileSystemWritableFileStream);
+  }
+
+  bytes(): Uint8Array {
+    const byteLength = this.chunks.reduce(
+      (total, chunk) => total + chunk.byteLength,
+      0,
+    );
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of this.chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  }
+}
 
 class DiskFileSystemDirectory {
   readonly kind = "directory";
@@ -683,6 +1284,99 @@ class CountingDiskFileSystemDirectory extends DiskFileSystemDirectory {
 
     return super.getFileHandle(name);
   }
+}
+
+/**
+ * Counts every byte handed out by one stored backup file (by fileID name) so
+ * tests can assert how many read passes touched it.
+ */
+class ReadCountingDiskFileSystemDirectory extends DiskFileSystemDirectory {
+  constructor(
+    private readonly directoryPath: string,
+    name: string,
+    private readonly counter: { bytes: number },
+    private readonly countedFileName: string,
+  ) {
+    super(directoryPath, name);
+  }
+
+  override getDirectoryHandle(
+    name: string,
+  ): Promise<DiskFileSystemDirectory> {
+    return Promise.resolve(
+      new ReadCountingDiskFileSystemDirectory(
+        path.join(this.directoryPath, name),
+        name,
+        this.counter,
+        this.countedFileName,
+      ),
+    );
+  }
+
+  override getFileHandle(name: string): Promise<DiskFileSystemFile> {
+    const file = new DiskFileSystemFile(
+      path.join(this.directoryPath, name),
+      name,
+    );
+
+    return Promise.resolve(
+      name === this.countedFileName
+        ? (new ReadCountingDiskFileSystemFile(
+            file,
+            name,
+            this.counter,
+          ) as unknown as DiskFileSystemFile)
+        : file,
+    );
+  }
+}
+
+class ReadCountingDiskFileSystemFile {
+  readonly kind = "file";
+
+  constructor(
+    private readonly inner: DiskFileSystemFile,
+    readonly name: string,
+    private readonly counter: { bytes: number },
+  ) {}
+
+  async getFile(): Promise<File> {
+    return withByteReadCounting(await this.inner.getFile(), this.counter);
+  }
+}
+
+function withByteReadCounting(
+  file: File,
+  counter: { bytes: number },
+): File {
+  return new Proxy(file, {
+    get(target, property) {
+      if (property === "slice") {
+        return (start?: number, end?: number, contentType?: string) => {
+          const sliced = target.slice(start, end, contentType);
+          counter.bytes += sliced.size;
+          return sliced;
+        };
+      }
+      if (property === "arrayBuffer") {
+        return async () => {
+          counter.bytes += target.size;
+          return target.arrayBuffer();
+        };
+      }
+      if (property === "stream") {
+        return () => {
+          counter.bytes += target.size;
+          return target.stream();
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+
+      return typeof value === "function"
+        ? (value as (...args: unknown[]) => unknown).bind(target)
+        : value;
+    },
+  });
 }
 
 class DeferredIdentityDiskFileSystemDirectory extends DiskFileSystemDirectory {

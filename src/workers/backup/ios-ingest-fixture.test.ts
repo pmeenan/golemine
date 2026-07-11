@@ -2,14 +2,17 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { derivedDbVersion } from "../../lib/constants";
 import {
   type IngestSinkApi,
   type IngestBatch,
+  toWorkerError,
+  workerFail,
   workerOk,
 } from "../../lib/worker-types";
 import {
+  iosMiniBackupDevice,
   iosMiniEncryptedBackupDevice,
   iosMiniEncryptedBackupExpectedMetadata,
   iosMiniEncryptedBackupPassword,
@@ -22,6 +25,8 @@ import {
 import {
   ManifestDbReader,
   readSourceFileBytes,
+  resetBackupSourceOverridesForTests,
+  setBackupSourceOverridesForTests,
 } from "./manifest-db";
 import {
   ingestBackupDirectory,
@@ -33,7 +38,16 @@ import type {
   ReadonlySourceDirectoryHandle,
   ReadonlySourceHandle,
 } from "./read-only-source";
-import { openSourceSqliteDatabase, type SourceSqliteDatabase } from "./source-sqlite";
+import {
+  openSourceSqliteDatabase,
+  type SourceSqliteDatabase,
+} from "./source-sqlite";
+import {
+  type AnySourceSqliteTestInput,
+  inMemoryBackupSourceOverridesForTest,
+  isStagingSourceSqliteInput,
+  openAnySourceSqliteInMemoryForTest,
+} from "./source-sqlite.test-support";
 
 const fixtureRoot = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -46,7 +60,12 @@ const encryptedFixtureRoot = path.join(
   iosMiniEncryptedBackupUdid,
 );
 
+beforeEach(() => {
+  setBackupSourceOverridesForTests(inMemoryBackupSourceOverridesForTest);
+});
+
 afterEach(async () => {
+  resetBackupSourceOverridesForTests();
   await resetEncryptedBackupSession();
 });
 
@@ -289,6 +308,19 @@ describe("iOS M2 ingest fixture", () => {
       passwordAtPrepare = credentials.password;
     });
     const phases: string[] = [];
+    const stagedMainLabels: string[] = [];
+    const openSourceSqlite = (
+      input: AnySourceSqliteTestInput,
+    ): Promise<SourceSqliteDatabase> => {
+      if (isStagingSourceSqliteInput(input)) {
+        stagedMainLabels.push(input.label);
+      }
+      return openAnySourceSqliteInMemoryForTest(input);
+    };
+    setBackupSourceOverridesForTests({
+      ...inMemoryBackupSourceOverridesForTest,
+      openSourceSqlite,
+    });
     const result = await ingestBackupDirectory(
       root as unknown as FileSystemDirectoryHandle,
       encryptedIngestRequest(),
@@ -299,10 +331,10 @@ describe("iOS M2 ingest fixture", () => {
       },
     );
 
-    expect(result.ok).toBe(true);
     if (!result.ok) {
-      throw new Error(`${result.error.code}: ${result.error.message}`);
+      throw new Error(JSON.stringify(result.error));
     }
+    expect(result.ok).toBe(true);
 
     expect(prepareIngest).toHaveBeenCalledTimes(1);
     expect(credentials.password).toBe("");
@@ -326,6 +358,10 @@ describe("iOS M2 ingest fixture", () => {
     expect(manifestSource?.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(messagesSource?.isEncrypted).toBe(true);
     expect(messagesSource?.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    // Encrypted main databases must decrypt-stream directly into the source
+    // opener's staged destination instead of arriving as staged Blob copies.
+    expect(stagedMainLabels).toContain("messages");
+    expect(stagedMainLabels).toContain("contacts");
     const attachments = batches
       .filter((batch): batch is Extract<IngestBatch, { kind: "attachments" }> =>
         batch.kind === "attachments",
@@ -333,7 +369,208 @@ describe("iOS M2 ingest fixture", () => {
       .flatMap((batch) => batch.items);
     expect(attachments[0]?.sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
+
+  it("lock waits for a tracked source open and closes the orphaned database", async () => {
+    const root = new DiskFileSystemDirectory(
+      encryptedFixtureRoot,
+      iosMiniEncryptedBackupUdid,
+    );
+    const { sink } = createCollectingSink();
+    const importStarted = deferredSignal();
+    const releaseImport = deferredSignal();
+    let stagedMainByteLength = 0;
+    let openedDatabaseClosed = false;
+    let openedDatabaseCleaned = false;
+
+    const openSourceSqlite = async (
+      input: AnySourceSqliteTestInput,
+    ): Promise<SourceSqliteDatabase> => {
+      if (input.label !== "messages") {
+        return openAnySourceSqliteInMemoryForTest(input);
+      }
+
+      if (!isStagingSourceSqliteInput(input)) {
+        throw new Error("Expected the encrypted messages main to decrypt-stream.");
+      }
+
+      // Decrypt-stream the main while the session is still active, then pause
+      // so the lock races the tracked open's handoff to the ingest caller.
+      const opened = await openAnySourceSqliteInMemoryForTest(input);
+      stagedMainByteLength = input.main.declaredByteLength;
+      importStarted.resolve();
+      await releaseImport.promise;
+
+      return {
+        db: opened.db,
+        databaseName: opened.databaseName,
+        close: () => {
+          openedDatabaseClosed = true;
+          opened.close();
+        },
+        cleanup: async () => {
+          openedDatabaseCleaned = true;
+          await opened.cleanup();
+        },
+      };
+    };
+
+    setBackupSourceOverridesForTests({
+      ...inMemoryBackupSourceOverridesForTest,
+      openSourceSqlite,
+    });
+    const ingest = ingestBackupDirectory(
+      root as unknown as FileSystemDirectoryHandle,
+      encryptedIngestRequest(),
+      sink,
+      { password: iosMiniEncryptedBackupPassword },
+    );
+
+    await importStarted.promise;
+    const lock = resetEncryptedBackupSession();
+    let lockSettled = false;
+    void lock.then(() => {
+      lockSettled = true;
+    });
+    await Promise.resolve();
+    expect(lockSettled).toBe(false);
+    expect(stagedMainByteLength).toBeGreaterThan(0);
+
+    releaseImport.resolve();
+    const result = await ingest;
+    await lock;
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("Expected the locked source import to fail.");
+    }
+    expect(result.error).toMatchObject({
+      code: "backup_password_required",
+      recoverable: true,
+    });
+    expect(openedDatabaseClosed).toBe(true);
+    expect(openedDatabaseCleaned).toBe(true);
+    expect(lockSettled).toBe(true);
+  });
+
+  it("returns success with a report warning when staging cleanup fails after finalize", async () => {
+    const root = new DiskFileSystemDirectory(fixtureRoot, iosMiniBackupUdid);
+    const { sink } = createCollectingSink();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      const openSourceSqlite = async (
+        input: AnySourceSqliteTestInput,
+      ): Promise<SourceSqliteDatabase> => {
+        const opened = await openAnySourceSqliteInMemoryForTest(input);
+
+        return {
+          ...opened,
+          cleanup: async () => {
+            await opened.cleanup();
+            throw new Error("Simulated staging cleanup failure.");
+          },
+        };
+      };
+      setBackupSourceOverridesForTests({
+        ...inMemoryBackupSourceOverridesForTest,
+        openSourceSqlite,
+      });
+      const result = await ingestUnencryptedBackupDirectory(
+        root as unknown as FileSystemDirectoryHandle,
+        unencryptedIngestRequest(),
+        sink,
+      );
+
+      if (!result.ok) {
+        throw new Error(JSON.stringify(result.error));
+      }
+      expect(result.value.warnings).toContainEqual(
+        expect.objectContaining({ code: "source-staging-cleanup-failed" }),
+      );
+      expect(result.value.counts.warnings).toBe(result.value.warnings.length);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("keeps the original ingest error when staging cleanup also fails", async () => {
+    const root = new DiskFileSystemDirectory(fixtureRoot, iosMiniBackupUdid);
+    const { sink } = createCollectingSink();
+    const failingSink: IngestSinkApi = {
+      ...sink,
+      finalizeIngest: () =>
+        Promise.resolve(
+          workerFail(
+            toWorkerError({
+              worker: "db",
+              code: "db_ingest_failed",
+              message: "Simulated finalize failure.",
+            }),
+          ),
+        ),
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      const openSourceSqlite = async (
+        input: AnySourceSqliteTestInput,
+      ): Promise<SourceSqliteDatabase> => {
+        const opened = await openAnySourceSqliteInMemoryForTest(input);
+
+        return {
+          ...opened,
+          close: () => {
+            opened.close();
+            throw new Error("Simulated staging close failure.");
+          },
+          cleanup: async () => {
+            await opened.cleanup();
+            throw new Error("Simulated staging cleanup failure.");
+          },
+        };
+      };
+      setBackupSourceOverridesForTests({
+        ...inMemoryBackupSourceOverridesForTest,
+        openSourceSqlite,
+      });
+      const result = await ingestUnencryptedBackupDirectory(
+        root as unknown as FileSystemDirectoryHandle,
+        unencryptedIngestRequest(),
+        failingSink,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        throw new Error("Expected the failed finalize to surface.");
+      }
+      expect(result.error.code).toBe("db_ingest_failed");
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
+
+function unencryptedIngestRequest() {
+  return {
+    backupId: iosMiniBackupUdid,
+    provider: "ios-itunes" as const,
+    sourceKind: "itunes-finder" as const,
+    sourceFolderName: iosMiniBackupUdid,
+    friendlyName: iosMiniBackupDevice.displayName,
+    deviceInfo: {
+      udid: iosMiniBackupUdid,
+      name: iosMiniBackupDevice.deviceName,
+      model: iosMiniBackupDevice.productType,
+      osVersion: iosMiniBackupDevice.productVersion,
+      serialNumber: iosMiniBackupDevice.serialNumber,
+      phoneNumber: iosMiniBackupDevice.phoneNumber,
+    },
+    isEncrypted: false,
+    derivedDbVersion,
+  };
+}
 
 function encryptedIngestRequest() {
   return {
@@ -516,4 +753,18 @@ class DiskFileSystemFile {
 
     return new File([bytes], this.name);
   }
+}
+
+interface DeferredSignal {
+  promise: Promise<void>;
+  resolve(): void;
+}
+
+function deferredSignal(): DeferredSignal {
+  let resolvePromise = (): void => undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  return { promise, resolve: resolvePromise };
 }

@@ -12,7 +12,6 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { transfer } from "comlink";
 import {
   type Dispatch,
   type SetStateAction,
@@ -70,7 +69,6 @@ import type {
 } from "../../lib/worker-types";
 import {
   defaultThumbnailMaxPixelSize,
-  extractMaxReadBytes,
   previewImageMaxBytes,
   previewVideoMaxBytes,
 } from "../../workers/shared/media-limits";
@@ -2944,7 +2942,7 @@ function useAttachmentPreview({
               requestId,
               createOriginalMediaPreviewState(
                 "video",
-                sourceResult.value.bytes,
+                sourceResult.value.blob,
                 sourceResult.value.mime ?? attachment.mime,
               ),
             );
@@ -2955,7 +2953,7 @@ function useAttachmentPreview({
           const originalPreview = attachment.mediaKind === "image"
             ? createOriginalMediaPreviewState(
                 "image",
-                sourceResult.value.bytes,
+                sourceResult.value.blob,
                 sourceResult.value.mime ?? attachment.mime,
               )
             : undefined;
@@ -2989,17 +2987,14 @@ function useAttachmentPreview({
 
           try {
             const thumbnailResult = await mediaClient.api.createAttachmentThumbnail(
-              transfer(
-                {
-                  backupId: record.id,
-                  bytes: sourceResult.value.bytes,
-                  cacheKey: attachment.thumbnailCacheKey,
-                  mediaKind: attachment.mediaKind,
-                  mime: attachment.mime,
-                  maxPixelSize: defaultThumbnailMaxPixelSize,
-                },
-                [sourceResult.value.bytes.buffer as ArrayBuffer],
-              ),
+              {
+                backupId: record.id,
+                blob: sourceResult.value.blob,
+                cacheKey: attachment.thumbnailCacheKey,
+                mediaKind: attachment.mediaKind,
+                mime: attachment.mime,
+                maxPixelSize: defaultThumbnailMaxPixelSize,
+              },
             );
 
             if (!thumbnailResult.ok) {
@@ -3214,7 +3209,6 @@ function AttachmentDetailCard({
   >({ kind: "idle" });
   
   const mountedRef = useRef(true);
-  const extractStubCleanupRef = useRef<(() => void) | undefined>(undefined);
   const canReadSource = attachment.sourceDomain !== undefined && attachment.sourcePath !== undefined;
 
   const setExtractStateIfMounted = useCallback(
@@ -3230,8 +3224,6 @@ function AttachmentDetailCard({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      extractStubCleanupRef.current?.();
-      extractStubCleanupRef.current = undefined;
     };
   }, []);
 
@@ -3294,68 +3286,35 @@ function AttachmentDetailCard({
               ],
       });
 
-      let stubPending = true;
-      const removeStub = async () => {
-        if (!stubPending) {
-          return;
+      const backupClient = getBackupClient();
+      const sourceResult = await backupClient.api.extractSourceFile(
+        record.directoryHandle,
+        {
+          backupId: record.id,
+          expectedSha256: attachment.sha256,
+          filename: attachment.filename,
+          mime: attachment.mime,
+          sourceDomain: attachment.sourceDomain ?? "",
+          sourceGuid: attachment.sourceGuid,
+          sourcePath: attachment.sourcePath ?? "",
+        },
+        fileHandle,
+      );
+
+      if (!sourceResult.ok) {
+        if (sourceResult.error.code === "backup_password_required") {
+          encryptedSession.requireUnlock();
         }
-
-        stubPending = false;
-        extractStubCleanupRef.current = undefined;
-
-        try {
-          await fileHandle.remove();
-        } catch {
-          // Best-effort cleanup: a denied or unsupported remove cannot hide
-          // the original extraction failure from the user.
-        }
-      };
-
-      extractStubCleanupRef.current = () => {
-        void removeStub();
-      };
-
-      try {
-        const backupClient = getBackupClient();
-        const sourceResult = await backupClient.api.readSourceFile(
-          record.directoryHandle,
-          {
-            backupId: record.id,
-            expectedSha256: attachment.sha256,
-            filename: attachment.filename,
-            maxReadBytes: extractMaxReadBytes,
-            mime: attachment.mime,
-            sourceDomain: attachment.sourceDomain ?? "",
-            sourceGuid: attachment.sourceGuid,
-            sourcePath: attachment.sourcePath ?? "",
-          },
-        );
-
-        if (!sourceResult.ok) {
-          if (sourceResult.error.code === "backup_password_required") {
-            encryptedSession.requireUnlock();
-          }
-          setExtractStateIfMounted({
-            kind: "error",
-            message: formatWorkerResultError(sourceResult.error),
-          });
-          return;
-        }
-
-        const writable = await fileHandle.createWritable();
-
-        try {
-          await writable.write(sourceResult.value.bytes as Uint8Array<ArrayBuffer>);
-        } finally {
-          await writable.close();
-        }
-
-        stubPending = false;
-        extractStubCleanupRef.current = undefined;
-        setExtractStateIfMounted({ kind: "success" });
-      } finally {
-        await removeStub();
+        // The worker aborts its atomic writable on failure. Never remove the
+        // selected handle here because the user may have chosen an existing file.
+        setExtractStateIfMounted({
+          kind: "error",
+          message: formatWorkerResultError(sourceResult.error),
+        });
+        return;
       }
+
+      setExtractStateIfMounted({ kind: "success" });
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") {
         setExtractStateIfMounted({ kind: "idle" });
@@ -3929,23 +3888,24 @@ type OriginalMediaPreviewState =
 
 function createOriginalMediaPreviewState(
   kind: "image",
-  bytes: Uint8Array,
+  blob: Blob,
   mime: string | undefined,
 ): { kind: "image"; caption?: string; url: string };
 function createOriginalMediaPreviewState(
   kind: "video",
-  bytes: Uint8Array,
+  blob: Blob,
   mime: string | undefined,
 ): { kind: "video"; url: string };
 function createOriginalMediaPreviewState(
   kind: "image" | "video",
-  bytes: Uint8Array,
+  blob: Blob,
   mime: string | undefined,
 ): OriginalMediaPreviewState {
-  const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], {
-    type: mime ?? "application/octet-stream",
-  });
-  const url = URL.createObjectURL(blob);
+  const typedBlob =
+    mime === undefined || blob.type === mime
+      ? blob
+      : blob.slice(0, blob.size, mime);
+  const url = URL.createObjectURL(typedBlob);
 
   return kind === "image" ? { kind: "image", url } : { kind: "video", url };
 }

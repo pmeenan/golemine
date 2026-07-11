@@ -2,6 +2,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
+import { appName } from "../src/lib/constants";
+import {
+  derivedDataOpfsAppDirectoryName,
+  derivedDataOpfsBackupsDirectoryName,
+} from "../src/lib/recents";
 
 import {
   iosMiniEncryptedBackupExpectedMetadata,
@@ -23,6 +28,8 @@ const iosMiniEncryptedBackupRoot = path.join(
   "ios-mini-encrypted-backup",
   iosMiniEncryptedBackupUdid,
 );
+const existingExtractionContents = "existing destination must survive";
+const extractionDestinationName = "existing-ore-map.png";
 
 interface M5TestWindow extends Window {
   __m5BackupWorkerCount: number;
@@ -76,6 +83,15 @@ test("retries a wrong encrypted-backup password, ingests with the correct passwo
   );
   await expect(passwordInput).toHaveValue("");
   await expect(ingestPanel.getByText("Ingested", { exact: true })).toBeVisible();
+
+  // A completed overview ingest must leave no decrypted plaintext staged under
+  // transient/ (the session's decrypted Manifest sahpool included), even though
+  // the one-shot ingest worker is terminated without an explicit lock RPC.
+  // Checked here, before the messages route runs, because a later fresh
+  // worker's first staging open sweeps crash leftovers and would mask them.
+  await expect
+    .poll(() => transientEntries(page, iosMiniEncryptedBackupUdid))
+    .toEqual([]);
 
   const persistedSessionText = await page.evaluate(async (backupId) => {
     function storageEntries(storage: Storage): Record<string, string> {
@@ -174,9 +190,65 @@ test("retries a wrong encrypted-backup password, ingests with the correct passwo
     }),
   ).toBeVisible({ timeout: 15_000 });
 
+  await page.evaluate(
+    async ({ attachmentFileId, backupId, destinationContents, destinationName }) => {
+      const root = await navigator.storage.getDirectory();
+      const sourceBackups = await root.getDirectoryHandle("e2e-source-backups");
+      const sourceBackup = await sourceBackups.getDirectoryHandle(backupId);
+      const shard = await sourceBackup.getDirectoryHandle(attachmentFileId.slice(0, 2));
+      const sourceHandle = await shard.getFileHandle(attachmentFileId);
+      const sourceFile = await sourceHandle.getFile();
+      const corruptedCiphertext = new Uint8Array(await sourceFile.arrayBuffer());
+
+      corruptedCiphertext[0] ^= 0xff;
+      const sourceWritable = await sourceHandle.createWritable();
+      await sourceWritable.write(corruptedCiphertext);
+      await sourceWritable.close();
+
+      const destinations = await root.getDirectoryHandle("e2e-extractions", {
+        create: true,
+      });
+      const destination = await destinations.getFileHandle(destinationName, {
+        create: true,
+      });
+      const destinationWritable = await destination.createWritable();
+      await destinationWritable.write(destinationContents);
+      await destinationWritable.close();
+
+      Object.defineProperty(window, "showSaveFilePicker", {
+        configurable: true,
+        value: () => Promise.resolve(destination),
+      });
+    },
+    {
+      attachmentFileId:
+        iosMiniEncryptedBackupExpectedMetadata.sourceFiles.attachment.fileID,
+      backupId: iosMiniEncryptedBackupUdid,
+      destinationContents: existingExtractionContents,
+      destinationName: extractionDestinationName,
+    },
+  );
+
+  await timeline.getByText("Attaching the synthetic ore map.").click();
+  await expect(detailsOverlay).toBeVisible();
+  await detailsOverlay.getByRole("button", { name: "Extract original" }).click();
+  await expect(detailsOverlay.getByText(/hash no longer matches/iu)).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect
+    .poll(() => readExtractionDestination(page, extractionDestinationName))
+    .toBe(existingExtractionContents);
+  await detailsOverlay
+    .getByRole("button", { name: "Close message details" })
+    .click();
+  await expect(detailsOverlay).toHaveCount(0);
+
   await page.getByRole("button", { name: "Lock attachments" }).click();
   await expect(attachmentPasswordInput).toBeVisible();
   await expect(attachmentPasswordInput).toBeFocused();
+  await expect
+    .poll(() => transientEntries(page, iosMiniEncryptedBackupUdid))
+    .toEqual([]);
 
   await page.evaluate(() => {
     const testWindow = window as unknown as M5TestWindow;
@@ -243,4 +315,96 @@ test("retries a wrong encrypted-backup password, ingests with the correct passwo
       () => (window as unknown as M5TestWindow).__m5BackupWorkerCount,
     ),
   ).toBe(0);
+
+  await page.getByRole("link", { name: appName }).click();
+  await page.getByRole("button", { name: "Remove recent backup" }).click();
+  await page
+    .getByRole("button", { name: "Remove Mina's encrypted iPhone backup" })
+    .click();
+  await expect(page.getByText("No recent backups are stored.")).toBeVisible();
+  await expect
+    .poll(() => transientDirectoryExists(page, iosMiniEncryptedBackupUdid))
+    .toBe(false);
 });
+
+async function transientEntries(
+  page: import("@playwright/test").Page,
+  backupId: string,
+): Promise<string[]> {
+  return page.evaluate(
+    async ({ appDirectoryName, backupsDirectoryName, id }) => {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const app = await root.getDirectoryHandle(appDirectoryName);
+        const backups = await app.getDirectoryHandle(backupsDirectoryName);
+        const backup = await backups.getDirectoryHandle(id);
+        const transient = await backup.getDirectoryHandle("transient");
+        const names: string[] = [];
+        const entries = transient as FileSystemDirectoryHandle & {
+          entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+        };
+        for await (const [name] of entries.entries()) {
+          names.push(name);
+        }
+        return names.sort();
+      } catch (cause) {
+        if (cause instanceof Error && cause.name === "NotFoundError") {
+          return [];
+        }
+        throw cause;
+      }
+    },
+    {
+      appDirectoryName: derivedDataOpfsAppDirectoryName,
+      backupsDirectoryName: derivedDataOpfsBackupsDirectoryName,
+      id: backupId,
+    },
+  );
+}
+
+async function readExtractionDestination(
+  page: import("@playwright/test").Page,
+  destinationName: string,
+): Promise<string | undefined> {
+  return page.evaluate(async (name) => {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const destinations = await root.getDirectoryHandle("e2e-extractions");
+      const destination = await destinations.getFileHandle(name);
+      return await (await destination.getFile()).text();
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "NotFoundError") {
+        return undefined;
+      }
+      throw cause;
+    }
+  }, destinationName);
+}
+
+async function transientDirectoryExists(
+  page: import("@playwright/test").Page,
+  backupId: string,
+): Promise<boolean> {
+  return page.evaluate(
+    async ({ appDirectoryName, backupsDirectoryName, id }) => {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const app = await root.getDirectoryHandle(appDirectoryName);
+        const backups = await app.getDirectoryHandle(backupsDirectoryName);
+        const backup = await backups.getDirectoryHandle(id);
+        await backup.getDirectoryHandle("transient");
+        return true;
+      } catch (cause) {
+        if (cause instanceof Error && cause.name === "NotFoundError") {
+          return false;
+        }
+        throw cause;
+      }
+    },
+    {
+      appDirectoryName: derivedDataOpfsAppDirectoryName,
+      backupsDirectoryName: derivedDataOpfsBackupsDirectoryName,
+      id: backupId,
+    },
+  );
+}

@@ -20,6 +20,15 @@ export interface CbcChunkDecryptOptions {
   readonly chunkBytes?: number;
   readonly progress?: CbcChunkProgressCallback;
   readonly signal?: AbortSignal;
+  /**
+   * Receives each sliced ciphertext chunk, in order from byte 0, before it is
+   * decrypted, so stored-source hashing can fold into the decrypt read pass.
+   * The chunk is a borrowed buffer that is zeroized once the generator moves
+   * on; copy it if the bytes must outlive the callback. Only the block-aligned
+   * prefix the decrypt pass actually reads is teed (see the read bound below);
+   * callers hashing the complete stored file own the unread tail.
+   */
+  readonly onCiphertextChunk?: (chunk: Uint8Array) => void;
 }
 
 /** The subset of Blob/File used by the bounded random-access decrypt path. */
@@ -30,9 +39,11 @@ export interface CbcEncryptedBlob {
 
 /**
  * Decrypts a file-sized Blob in bounded, independently processed CBC chunks.
- * It never materializes the whole encrypted source. Each yielded array is a
- * borrowed chunk valid until the generator resumes; consumers must copy it if
- * they retain it. Temporary ciphertext and plaintext buffers are cleared.
+ * It never materializes the whole encrypted source, and reads only the
+ * block-aligned ciphertext prefix needed for the materialized plaintext. Each
+ * yielded array is a borrowed chunk valid until the generator resumes;
+ * consumers must copy it if they retain it. Temporary ciphertext and
+ * plaintext buffers are cleared.
  */
 export async function* decryptAes256CbcBlobChunks(
   source: CbcEncryptedBlob,
@@ -62,15 +73,24 @@ export async function* decryptAes256CbcBlobChunks(
   let iv = zeroIv.slice();
   let emittedPlaintextBytes = 0;
   const materializedPlaintextBytes = Math.min(plaintextSize, source.size);
+  // Decrypt work is bounded by the materialized plaintext: only the
+  // block-aligned ciphertext prefix that can contribute emitted bytes is read
+  // and decrypted. A hostile stored tail beyond MBFile.Size therefore costs
+  // no AES work; callers that need a hash of the complete stored file fold
+  // the unread tail in separately.
+  const ciphertextReadBytes = Math.min(
+    source.size,
+    Math.ceil(materializedPlaintextBytes / aesBlockBytes) * aesBlockBytes,
+  );
   // One reusable ciphertext scratch (chunk plus the synthetic padding block)
   // for the whole file, instead of a fresh allocation and copy per chunk. It
   // only ever holds ciphertext-derived bytes and is zeroized when done.
   let scratch: Uint8Array<ArrayBuffer> | undefined;
 
   try {
-    for (let offset = 0; offset < source.size; offset += chunkBytes) {
+    for (let offset = 0; offset < ciphertextReadBytes; offset += chunkBytes) {
       options.signal?.throwIfAborted();
-      const end = Math.min(source.size, offset + chunkBytes);
+      const end = Math.min(ciphertextReadBytes, offset + chunkBytes);
       const encrypted = new Uint8Array(
         await source.slice(offset, end).arrayBuffer(),
       );
@@ -83,6 +103,8 @@ export async function* decryptAes256CbcBlobChunks(
       }
       try {
         options.signal?.throwIfAborted();
+        // Borrowed view: the buffer is zeroized in this chunk's finally below.
+        options.onCiphertextChunk?.(encrypted);
       } catch (cause) {
         encrypted.fill(0);
         throw cause;

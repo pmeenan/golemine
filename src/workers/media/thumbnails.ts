@@ -480,12 +480,11 @@ async function renderNativeImageThumbnail(
   }
 
   const sourceMime = normalizeMimeType(request.mime);
-  // The app avoids SharedArrayBuffer entirely (D-008), so worker bytes are
-  // ArrayBuffer-backed even though DOM typings keep Uint8Array generic.
-  const blob = new Blob([request.bytes as Uint8Array<ArrayBuffer>], {
-    type: sourceMime,
-  });
-  const bitmap = await createImageBitmap(blob);
+  const sourceBlob =
+    request.blob.type === sourceMime
+      ? request.blob
+      : request.blob.slice(0, request.blob.size, sourceMime);
+  const bitmap = await createImageBitmap(sourceBlob);
 
   try {
     const dimensions = fitWithin(
@@ -527,9 +526,10 @@ async function renderHeicThumbnail(
   const libheif = await loadLibheif();
   const decoder = new libheif.HeifDecoder();
   let images: HeifImage[] = [];
+  const sourceBytes = new Uint8Array(await request.blob.arrayBuffer());
 
   try {
-    images = decoder.decode(request.bytes);
+    images = decoder.decode(sourceBytes);
 
     if (images.length === 0) {
       throw new MediaThumbnailError("The HEIC file did not contain a decodable image.");
@@ -574,6 +574,7 @@ async function renderHeicThumbnail(
   } finally {
     releaseHeifImages(images);
     releaseHeifDecoder(libheif, decoder);
+    sourceBytes.fill(0);
   }
 }
 

@@ -371,6 +371,10 @@ stays deterministic in backup-worker. Forcing rollback mode on the transient cop
 prevents sqlite-wasm from making filesystem assumptions about sidecars we deliberately
 do not create.
 
+Note (2026-07-10): the copy-based helper became the staged-file pipeline's
+`prepareStagedSourceSqliteForReadOnlyOpen` (D-041/D-042); the rollback-header
+forcing rule is unchanged and applies to the staged OPFS (or in-memory) main file.
+
 ## D-026 — Isolate LGPL codec packages when no better option exists (2026-07-08)
 
 M3 needs attachment previews, and HEIC support may require LGPL code. D-005 keeps the
@@ -512,6 +516,11 @@ per-file decrypt path is the natural time to revisit it.
 Rationale: 1 GiB covers realistic phone attachments while keeping the read path
 simple and transferable over Comlink. An unbounded in-memory read would trade a clear
 error for an opaque tab crash on pathological files.
+
+Successor note (2026-07-10): D-041 replaces this materialized extraction path with a
+worker-owned direct stream to the save-picker writable, removing the 1 GiB cap. Its
+atomic writable is aborted on failure; the UI never deletes the selected handle,
+because it may be an existing user file rather than a newly created picker stub.
 
 ## D-032 — Normalized serviceKind drives message presentation (2026-07-08)
 
@@ -795,6 +804,10 @@ makes the budget a pre-flight check rather than a post-destruction landmine. The
 streaming transient-VFS/OPFS import (D-038) remains the path to lift the caps
 entirely; do not raise these numbers again without re-deriving the 2 GiB budget.
 
+Successor note (2026-07-10): D-041 implements that streaming OPFS/sahpool path. The
+512 MiB/1 GiB values no longer constrain production source databases; pre-prepare
+disk-quota and absolute hostile-metadata sanity checks replace them.
+
 ## D-040 — Keep one active backup snapshot per detected device ID (2026-07-10)
 
 iPhone backup detection normally uses the device UDID as both the recent-record key
@@ -821,3 +834,135 @@ record is first marked `needs-reingest`, so a partial wipe cannot leave it brows
 either. True
 side-by-side historical snapshots remain a future schema/product feature; they will
 need a snapshot identity distinct from the device UDID.
+
+## D-041 — Stream source plaintext through transient OPFS and callback sahpool import (2026-07-10)
+
+M5 proved encrypted ingest but retained three full-file pressure points: decrypted
+database destinations in JavaScript, `sqlite3_js_posix_create_file` copies in the wasm
+heap, and transferred attachment arrays. Those copies made D-039's 512 MiB Manifest /
+1 GiB source-set limits necessary even though AES-CBC input was already chunked.
+
+Decision: all production Manifest and source-database opens now converge on transient
+plaintext under `golemine/backups/<id>/transient/`. A sync access handle receives
+bounded source/decrypt chunks; committed WAL frames apply by random-access writes to
+that staged main file; D-025 rollback header forcing remains mandatory. Each database
+then opens from its own 16-slot transient `opfs-sahpool`, separate from the persistent
+derived-DB pool. The pool imports through an async callback and is unlinked/removed on
+close. A fresh worker sweeps crash leftovers before its first open, explicit lock and
+session eviction drain reads and await staging/pool deletion, and Remove backup wipes
+the parent derived-data directory. Worker termination may leave only crash residue,
+which the next open sweeps before measuring Manifest staging quota. Cleanup always
+awaits pool removal even when synchronous close reports an error.
+
+The VFS choice is **sahpool callback import**, not a custom read-only VFS. Evidence:
+the pinned `@sqlite.org/sqlite-wasm` **3.50.4-build1** declarations define
+`SAHPoolUtil.importDb(name, callback)` where the callback may asynchronously return
+`Uint8Array`/`ArrayBuffer` chunks until `undefined`; the shipped
+`sqlite3-bundler-friendly.mjs` implements that path as `importDbChunked`. It writes
+each callback chunk straight through the pool's sync access handle and rewrites header
+bytes 18/19. Therefore a custom xOpen/xRead/xFileSize/xClose VFS would duplicate
+supported upstream behavior. This remains `opfs-sahpool`, not sqlite's SAB-dependent
+`opfs` VFS, so D-008 and the no-COOP/COEP hosting posture remain unchanged.
+
+`BackupWorkerApi.readSourceFile` now returns a Blob so preview payload does not cross
+Comlink as a full transferred array; native media decode accepts that Blob directly.
+The sibling `extractSourceFile` RPC receives the save-picker file handle and streams
+plain/decrypted chunks into its writable, aborting before commit on hash or session
+failure. This supersedes D-031's 1 GiB extraction materialization. Small eager ingest
+hash reads may retain a bounded in-memory compatibility path; databases and large
+attachments do not.
+
+Streaming hashes use a dependency-free incremental SHA-256 implementation in
+`src/workers/shared/incremental-sha256.ts`, covered by FIPS 180-4 and NIST vectors.
+This is the sole exception to D-038's WebCrypto-only primitive rule: SHA-256 here is
+integrity provenance over public source/plaintext bytes, not password derivation,
+encryption, key wrapping, or authentication key material. WebCrypto remains the only
+implementation for PBKDF2, AES-KW, and AES-CBC.
+
+D-039's in-memory caps are superseded. `assertRequiredSourceDatabaseSetWithinBudget`
+keeps its pre-prepare call site and now validates required-record presence, encrypted
+size/key/alignment metadata, a generous 8 TiB staged-set sanity bound (4 TiB per
+file), and available OPFS quota with headroom for staging plus import. Manifest quota
+and source-set quota conservatively reserve three times the logical bytes for the
+overlap between decrypted staging, WAL reconstruction, and callback sahpool import.
+Crypto-shape failures likewise occur before `prepare`, including a trial unwrap and
+immediate zeroization of each required file key. The absolute bounds defend
+safe-integer offsets and hostile metadata; they are not expected phone-backup RAM
+limits. Plaintext size/hash and opt-in exact ciphertext source size/hash continue to
+flow unchanged into ingest and source-read provenance.
+
+Note (2026-07-10): the post-M5.5 review-hardening pass consolidated the streaming
+internals. Every decrypt destination now flows through one core streamer
+(`decryptSourceFileToDestination` with `DecryptedPlaintextDestination` in
+manifest-db), and encrypted database mains decrypt-stream directly into the
+source-sqlite workspace's staged file with no intermediate session-staged copy (the
+OPFS quota preflight keeps its conservative 3x reserve because sidecar staging, WAL
+reconstruction, and the sahpool import can still each hold a copy). The opt-in
+ciphertext `sourceSha256` no longer costs a second full read on session paths: it
+folds single-pass into the decrypt read through the CBC generator's
+ciphertext-chunk tee (opt-in is retained because it still costs hashing work).
+`sha256BlobHex` uses one native `crypto.subtle.digest` for un-teed Blobs at or
+below 64 MiB and the incremental hasher otherwise. Manifest staging hashes during
+the write with a 16-byte pad hold-back so no re-read is needed for the normalized
+content hash. Encrypted read caps bind the plaintext size with a `maxReadBytes + 16`
+stored-ciphertext tolerance, and present zero-byte root Manifest sidecars are
+tolerated as absent. The WAL replay validation policy and the encrypted-session
+lifecycle decisions from the same pass are recorded separately (D-042, D-043).
+
+## D-042 — WAL replay: final-commit structural bound, hostility cap, bounded buffering (2026-07-10)
+
+The initial M5.5 streaming WAL replay validated every commit record against a
+structural bound (main-file size plus frames seen so far). That per-commit bound is
+unsound: a checkpoint can backfill and truncate the main database without resetting
+the WAL, leaving earlier commit records that legitimately declare the old, larger
+database size — real checkpoint-truncated backups failed replay. The replay also
+needed a defined memory strategy for hostile or degenerate WALs.
+
+Decision: the D-022 end-of-log frame validation (salt continuity, cumulative
+checksums, stop at the first invalid/stale/torn frame) is unchanged and lives in one
+shared validation core. Commit-size validation is now two rules: a pure-hostility
+4 TiB per-commit cap (mirroring the absolute staged-file sanity bound), and the
+whole-WAL structural bound (main size plus all complete frames) applied ONLY to the
+final applied commit. Pages beyond their own commit's declared database size are
+skipped rather than written — provably safe, because regrowth past such a page must
+emit fresh frames for it and the ending truncate removes everything past the final
+committed size. Replay is single-pass with frame-aligned multi-MiB chunked reads,
+buffering one transaction's pending pages up to a 64 MiB budget; a transaction that
+would exceed the budget abandons buffering and the replay restarts as a
+bounded-memory two-phase scan+apply (phase 1 locates the last valid commit with
+constant memory, phase 2 writes pages straight to the staged file). In-memory byte
+inputs run through the identical staged pipeline via `MemoryRandomAccessFile`.
+
+Rationale: checkpoint-truncated real backups replay correctly, hostile WALs can
+neither claim multi-terabyte databases nor force memory to grow with WAL size, and
+one pipeline means the memory and OPFS paths cannot diverge. Do not reintroduce a
+per-commit structural bound or a second WAL implementation.
+
+## D-043 — Encrypted ingest always ends locked; eviction is best-effort; previews decrypt in memory (2026-07-10)
+
+Three session-lifecycle rules from the same hardening pass, recorded so they are not
+relitigated:
+
+- **Ingest-end lock.** `ingestBackupDirectory` always ends an encrypted ingest by
+  locking the worker's session through the single `resetBackupSourceCaches()` seam.
+  No production caller needs the session after ingest — the overview route ingests
+  on a one-shot worker it terminates (termination cannot clean OPFS staging), and
+  the messages route never ingests on its route-scoped worker — so the
+  no-plaintext-after-ingest guarantee must not depend on route discipline. The lock
+  runs in a `finally`, and its own failure is logged, never replacing the
+  already-decided ingest outcome. `e2e/m5.spec.ts` asserts `transient/` is empty
+  immediately after an encrypted overview ingest.
+- **Eviction best-effort vs. explicit lock propagates.** Session eviction (different
+  backup id/root, replace-unlock with a supplied password) is best-effort on cleanup
+  failure: a fresh unlock or a wrong-password retry never fails because the OLD
+  session's plaintext staging could not be fully removed. The explicit
+  `lockBackupSession` RPC keeps the throwing variant so the messages route can fall
+  back to terminating the worker when cleanup cannot be guaranteed.
+- **In-memory preview decrypts.** Bounded preview/report reads decrypt in memory and
+  respond with a Blob copy whose intermediate buffer is zeroized immediately —
+  no transient OPFS plaintext is created or retained for that path, removing the
+  staged-Blob retention race. Session-retained transient staging
+  (`readSourceFileBlob`) exists only for encrypted WAL/SHM sidecar payloads during
+  database opens, which can exceed memory budgets but are consumed as read-only
+  Blobs; main databases decrypt-stream through `stageSourceFile` into the
+  source-sqlite workspace instead.

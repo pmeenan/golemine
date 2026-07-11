@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   chooseHeicThumbnailCandidateIndex,
@@ -12,6 +12,10 @@ import {
 import type { CreateAttachmentThumbnailRequest } from "../../lib/worker-types";
 
 describe("attachment thumbnail helpers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("uses the backup derived-data segment and sanitizes cache keys before constructing OPFS paths", () => {
     const path = getAttachmentThumbnailCachePath({
       backupId: "backup-id",
@@ -213,6 +217,50 @@ describe("attachment thumbnail helpers", () => {
     ).toBeUndefined();
   });
 
+  it("passes native attachment Blobs directly to createImageBitmap without materializing source bytes", async () => {
+    installThumbnailRuntime();
+    const sourceBlob = new Blob([new Uint8Array([1, 2, 3])], {
+      type: "image/png",
+    });
+    const sourceArrayBuffer = vi.spyOn(sourceBlob, "arrayBuffer");
+    const close = vi.fn();
+    const createImageBitmapMock = vi.fn((_blob: Blob) =>
+      Promise.resolve({ close, height: 240, width: 320 }),
+    );
+    vi.stubGlobal("createImageBitmap", createImageBitmapMock);
+
+    const result = await createAttachmentThumbnail(
+      thumbnailRequest({ blob: sourceBlob }),
+    );
+    const cachedResult = await createAttachmentThumbnail(
+      thumbnailRequest({ blob: new Blob([], { type: "image/png" }) }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(createImageBitmapMock).toHaveBeenCalledOnce();
+    expect(createImageBitmapMock).toHaveBeenCalledWith(sourceBlob);
+    expect(sourceArrayBuffer).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+
+    if (result.ok) {
+      expect(result.value).toMatchObject({
+        status: "ok",
+        cacheHit: false,
+      });
+
+      if (result.value.status === "ok") {
+        expect(result.value.bytes).toBeInstanceOf(Uint8Array);
+      }
+    }
+
+    expect(cachedResult.ok).toBe(true);
+
+    if (cachedResult.ok && cachedResult.value.status === "ok") {
+      expect(cachedResult.value.cacheHit).toBe(true);
+      expect(cachedResult.value.bytes).toBeInstanceOf(Uint8Array);
+    }
+  });
+
   it("parses JPEG dimensions from cached thumbnail bytes", () => {
     const jpeg = new Uint8Array([
       0xff, 0xd8,
@@ -242,9 +290,77 @@ function thumbnailRequest(
     cacheKey: "attachment-cache-key",
     mediaKind: "image",
     mime: "image/png",
-    bytes: new Uint8Array([1, 2, 3]),
+    blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }),
     ...overrides,
   };
+}
+
+function installThumbnailRuntime(): void {
+  const files = new Map<string, Blob>();
+  const attachmentsDirectory = {
+    getFileHandle: (name: string, options?: FileSystemGetFileOptions) => {
+      if (options?.create !== true && !files.has(name)) {
+        throw Object.assign(new Error("Missing thumbnail"), {
+          name: "NotFoundError",
+        });
+      }
+
+      return Promise.resolve({
+        createWritable: () => Promise.resolve({
+          close: () => Promise.resolve(),
+          write: (data: FileSystemWriteChunkType) => {
+            if (!(data instanceof Uint8Array)) {
+              throw new Error("Expected thumbnail bytes.");
+            }
+
+            files.set(name, new Blob([data as Uint8Array<ArrayBuffer>]));
+            return Promise.resolve();
+          },
+        }),
+        getFile: () => Promise.resolve(files.get(name) ?? new Blob()),
+      } as unknown as FileSystemFileHandle);
+    },
+  } as unknown as FileSystemDirectoryHandle;
+  const directory = {
+    getDirectoryHandle: (name: string) =>
+      Promise.resolve(name === "attachments" ? attachmentsDirectory : directory),
+  } as unknown as FileSystemDirectoryHandle;
+
+  vi.stubGlobal("navigator", {
+    storage: {
+      getDirectory: () => Promise.resolve(directory),
+    },
+  });
+  vi.stubGlobal(
+    "OffscreenCanvas",
+    class FakeOffscreenCanvas {
+      readonly context = {
+        drawImage: vi.fn(),
+        fillRect: vi.fn(),
+        fillStyle: "",
+        imageSmoothingEnabled: false,
+        imageSmoothingQuality: "low",
+      };
+
+      constructor(
+        readonly width: number,
+        readonly height: number,
+      ) {}
+
+      getContext(): typeof this.context {
+        return this.context;
+      }
+
+      convertToBlob(): Promise<Blob> {
+        return Promise.resolve(new Blob([
+          new Uint8Array([
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0xf0, 0x01,
+            0x40, 0x01, 0x11, 0x00, 0x00,
+          ]),
+        ], { type: "image/jpeg" }));
+      }
+    },
+  );
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

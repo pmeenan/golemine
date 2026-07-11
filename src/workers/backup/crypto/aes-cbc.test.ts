@@ -37,6 +37,13 @@ async function encryptRawBlocks(
   return withWebCryptoPadding.slice(0, -16);
 }
 
+async function* toAsyncIterable(
+  chunks: readonly Uint8Array[],
+): AsyncGenerator<Uint8Array, void, void> {
+  await Promise.resolve();
+  yield* chunks;
+}
+
 async function collect(
   chunks: AsyncIterable<Uint8Array>,
 ): Promise<Uint8Array> {
@@ -172,6 +179,73 @@ describe("AES-256-CBC backup decryption", () => {
       [128, 144],
     ]);
     expect(progress).toEqual([32, 64, 96, 128, 144]);
+  });
+
+  it("tees each sliced ciphertext chunk in order from byte 0", async () => {
+    const expected = Uint8Array.from(
+      { length: 90 },
+      (_, index) => (index * 23 + 9) & 0xff,
+    );
+    const padded = new Uint8Array(96).fill(0x31);
+    padded.set(expected);
+    const encrypted = await encryptRawBlocks(padded, key);
+    const teed: Uint8Array[] = [];
+
+    const result = await collect(
+      decryptAes256CbcBlobChunks(new Blob([encrypted]), key, expected.byteLength, {
+        chunkBytes: 32,
+        onCiphertextChunk: (chunk) => {
+          teed.push(chunk.slice());
+        },
+      }),
+    );
+
+    expect(result).toEqual(expected);
+    expect(teed.map((chunk) => chunk.byteLength)).toEqual([32, 32, 32]);
+    expect(await collect(toAsyncIterable(teed))).toEqual(encrypted);
+  });
+
+  it("reads only the block-aligned prefix needed for the materialized plaintext", async () => {
+    const expected = Uint8Array.from(
+      { length: 100 },
+      (_, index) => (index * 41 + 13) & 0xff,
+    );
+    const storedPlaintext = new Uint8Array(176).fill(0x2d);
+    storedPlaintext.set(expected);
+    const encrypted = await encryptRawBlocks(storedPlaintext, key);
+    const reads: [number | undefined, number | undefined][] = [];
+    const blob = new Blob([encrypted]);
+    const source: CbcEncryptedBlob = {
+      size: blob.size,
+      slice(start, end) {
+        reads.push([start, end]);
+        return blob.slice(start, end);
+      },
+    };
+    const teed: Uint8Array[] = [];
+    const progress: [number, number][] = [];
+
+    const result = await collect(
+      decryptAes256CbcBlobChunks(source, key, expected.byteLength, {
+        onCiphertextChunk: (chunk) => {
+          teed.push(chunk.slice());
+        },
+        progress(event) {
+          progress.push([
+            event.processedEncryptedBytes,
+            event.totalEncryptedBytes,
+          ]);
+        },
+      }),
+    );
+
+    expect(result).toEqual(expected);
+    // ceil(100 / 16) * 16 = 112 of the 176 stored bytes.
+    expect(reads).toEqual([[0, 112]]);
+    expect(await collect(toAsyncIterable(teed))).toEqual(
+      encrypted.subarray(0, 112),
+    );
+    expect(progress).toEqual([[112, 176]]);
   });
 
   it("handles a one-block chunk boundary and rejects malformed shapes", async () => {

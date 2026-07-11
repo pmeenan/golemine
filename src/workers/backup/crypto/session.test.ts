@@ -124,6 +124,53 @@ async function collectFileChunks(
   return result;
 }
 
+async function collectChunksWithTee(
+  session: UnlockedBackupKeybag,
+  encrypted: Uint8Array<ArrayBuffer>,
+  encryptionKeyBlob: Uint8Array,
+  plaintextSize: number,
+  teed: Uint8Array[],
+): Promise<Uint8Array> {
+  const result = new Uint8Array(plaintextSize);
+  let offset = 0;
+  for await (const chunk of session.decryptFileChunks(
+    new Blob([encrypted]),
+    encryptionKeyBlob,
+    plaintextSize,
+    {
+      onCiphertextChunk: (ciphertextChunk) => {
+        // Borrowed buffer: copy before the generator moves on.
+        teed.push(ciphertextChunk.slice());
+      },
+    },
+  )) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  expect(offset).toBe(plaintextSize);
+  return result;
+}
+
+async function collectManifestChunks(
+  session: UnlockedBackupKeybag,
+  encrypted: Uint8Array,
+  manifestKeyBlob: Uint8Array,
+): Promise<Uint8Array> {
+  const result = new Uint8Array(encrypted.byteLength);
+  let offset = 0;
+
+  for await (const chunk of session.decryptManifestDatabaseChunks(
+    new Blob([encrypted as Uint8Array<ArrayBuffer>]),
+    manifestKeyBlob,
+  )) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  expect(offset).toBe(encrypted.byteLength);
+  return result;
+}
+
 describe("UnlockedBackupKeybag", () => {
   it("unlocks the static fixture keybag and decrypts manifest/file keys", async () => {
     const session = await unlockBackupKeybag(
@@ -142,7 +189,8 @@ describe("UnlockedBackupKeybag", () => {
       ),
     );
     await expect(
-      session.decryptManifestDatabase(
+      collectManifestChunks(
+        session,
         manifestEncrypted,
         wrappedBlob(
           "8aacfb98579bd07c79487bb2b5d36a48b250bf6bab553ec166cdb65226a4de91fb3b147cb98728f4",
@@ -158,13 +206,16 @@ describe("UnlockedBackupKeybag", () => {
     );
     expect(manifestPkcs7.byteLength).toBe(manifest.byteLength + 16);
     await expect(
-      session.decryptManifestDatabase(
+      collectManifestChunks(
+        session,
         manifestPkcs7,
         wrappedBlob(
           "8aacfb98579bd07c79487bb2b5d36a48b250bf6bab553ec166cdb65226a4de91fb3b147cb98728f4",
         ),
       ),
-    ).resolves.toEqual(manifest);
+    ).resolves.toEqual(
+      new Uint8Array([...manifest, ...new Uint8Array(16).fill(16)]),
+    );
 
     const filePlaintext = Uint8Array.from(
       { length: 31 },
@@ -189,6 +240,17 @@ describe("UnlockedBackupKeybag", () => {
       ),
     ).resolves.toEqual(filePlaintext);
 
+    const validFileKey = wrappedBlob(
+      "70625b4fa8313bf4902bb9dbd00b8766e4a58300c89bce51bff676047b8fd926d4244d096647e524",
+    );
+    await expect(session.verifyFileKey(validFileKey)).resolves.toBeUndefined();
+
+    const corruptFileKey = validFileKey.slice();
+    corruptFileKey[corruptFileKey.byteLength - 1] ^= 0xff;
+    await expect(session.verifyFileKey(corruptFileKey)).rejects.toMatchObject({
+      code: "key-unwrap-failed",
+    });
+
     session.destroy();
     await expect(
       collectFileChunks(
@@ -202,6 +264,42 @@ describe("UnlockedBackupKeybag", () => {
     ).rejects.toMatchObject({
       code: "malformed-key-material",
     });
+  });
+
+  it("tees stored ciphertext chunks through decryptFileChunks", async () => {
+    const session = await unlockBackupKeybag(
+      fixtureKeybag(),
+      "G0lemine-M5!",
+    );
+    const fileKey = hex(
+      "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+    );
+    const wrappedFileKey = wrappedBlob(
+      "70625b4fa8313bf4902bb9dbd00b8766e4a58300c89bce51bff676047b8fd926d4244d096647e524",
+    );
+    const storedPlaintext = Uint8Array.from(
+      { length: 48 },
+      (_, index) => (index * 3 + 1) & 0xff,
+    );
+    const encrypted = await encryptRawBlocks(storedPlaintext, fileKey);
+    expect(encrypted.byteLength).toBe(48);
+
+    // Full logical size: the tee sees the complete stored ciphertext.
+    const fullTee: Uint8Array[] = [];
+    await expect(
+      collectChunksWithTee(session, encrypted, wrappedFileKey, 48, fullTee),
+    ).resolves.toEqual(storedPlaintext);
+    expect(join(...fullTee)).toEqual(encrypted);
+
+    // Stored tail beyond MBFile.Size: decrypt reads (and tees) only the
+    // block-aligned prefix needed for the materialized plaintext.
+    const boundedTee: Uint8Array[] = [];
+    await expect(
+      collectChunksWithTee(session, encrypted, wrappedFileKey, 10, boundedTee),
+    ).resolves.toEqual(storedPlaintext.subarray(0, 10));
+    expect(join(...boundedTee)).toEqual(encrypted.subarray(0, 16));
+
+    session.destroy();
   });
 
   it("reports a wrong password distinctly and does not return a session", async () => {

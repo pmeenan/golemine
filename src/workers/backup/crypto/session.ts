@@ -30,49 +30,24 @@ export class UnlockedBackupKeybag {
     readonly warnings: readonly UnlockedKeybagWarning[] = [],
   ) {}
 
-  async decryptManifestDatabase(
-    encrypted: Uint8Array,
+  async *decryptManifestDatabaseChunks(
+    encrypted: CbcEncryptedBlob,
     manifestKeyBlob: Uint8Array,
-  ): Promise<Uint8Array> {
+    options?: CbcChunkDecryptOptions,
+  ): AsyncGenerator<Uint8Array, void, void> {
     this.assertUsable();
     const key = await unwrapClassWrappedKey(this.classKeys, manifestKeyBlob);
     // Manifest.db is raw, page-aligned CBC in iOS backups. It has no
     // MBFile.Size field. Some producers append PKCS#7 while others emit the
     // exact page-aligned raw ciphertext, so decrypt every raw block and
     // normalize only against SQLite's own page-size invariant afterwards.
-    // Chunked decryption bounds the transient WebCrypto input instead of
-    // duplicating a potentially hundreds-of-MiB ciphertext buffer.
-    const plaintext = new Uint8Array(encrypted.byteLength);
-    let offset = 0;
-
     try {
-      const source: CbcEncryptedBlob = {
-        size: encrypted.byteLength,
-        slice: (start?: number, end?: number) =>
-          // The view is only ever chunk-sized; Blob copies it internally. The
-          // narrowing cast is safe because this project never allocates
-          // SharedArrayBuffer-backed views (D-008).
-          new Blob([
-            encrypted.subarray(
-              start ?? 0,
-              end ?? encrypted.byteLength,
-            ) as Uint8Array<ArrayBuffer>,
-          ]),
-      };
-
-      for await (const chunk of decryptAes256CbcBlobChunks(
-        source,
+      yield* decryptAes256CbcBlobChunks(
+        encrypted,
         key,
-        encrypted.byteLength,
-      )) {
-        plaintext.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-
-      return normalizeManifestDatabaseLength(plaintext);
-    } catch (cause) {
-      plaintext.fill(0);
-      throw cause;
+        encrypted.size,
+        options,
+      );
     } finally {
       key.fill(0);
     }
@@ -101,6 +76,18 @@ export class UnlockedBackupKeybag {
     }
   }
 
+  /**
+   * Verifies a Manifest MBFile wrapped key without retaining the resulting
+   * per-file key. Required source databases call this before the destructive
+   * ingest boundary so corrupt main/WAL/SHM keys cannot fail after prepare.
+   */
+  async verifyFileKey(encryptionKeyBlob: Uint8Array): Promise<void> {
+    this.assertUsable();
+    const key = await unwrapClassWrappedKey(this.classKeys, encryptionKeyBlob);
+
+    key.fill(0);
+  }
+
   destroy(): void {
     if (!this.destroyed) {
       zeroizeClassKeys(this.classKeys);
@@ -116,61 +103,6 @@ export class UnlockedBackupKeybag {
       );
     }
   }
-}
-
-const sqliteHeader = new TextEncoder().encode("SQLite format 3\u0000");
-
-function normalizeManifestDatabaseLength(decrypted: Uint8Array): Uint8Array {
-  if (
-    decrypted.byteLength < 100 ||
-    !sqliteHeader.every((byte, index) => decrypted[index] === byte)
-  ) {
-    decrypted.fill(0);
-    throw new BackupCryptoError(
-      "malformed-ciphertext",
-      "Decrypted Manifest database does not have a valid SQLite header.",
-    );
-  }
-
-  const encodedPageSize = new DataView(
-    decrypted.buffer,
-    decrypted.byteOffset,
-    decrypted.byteLength,
-  ).getUint16(16, false);
-  const pageSize = encodedPageSize === 1 ? 65_536 : encodedPageSize;
-  if (
-    pageSize < 512 ||
-    pageSize > 65_536 ||
-    (pageSize & (pageSize - 1)) !== 0
-  ) {
-    decrypted.fill(0);
-    throw new BackupCryptoError(
-      "malformed-ciphertext",
-      "Decrypted Manifest database has an invalid SQLite page size.",
-    );
-  }
-
-  const trailingBytes = decrypted.byteLength % pageSize;
-  if (trailingBytes === 0) {
-    return decrypted;
-  }
-  if (
-    trailingBytes > 16 ||
-    !decrypted
-      .subarray(decrypted.byteLength - trailingBytes)
-      .every((byte) => byte === trailingBytes)
-  ) {
-    decrypted.fill(0);
-    throw new BackupCryptoError(
-      "malformed-ciphertext",
-      "Decrypted Manifest database has invalid trailing bytes.",
-    );
-  }
-
-  // Borrowed view instead of a full copy: dropping 1-16 PKCS#7 pad-count
-  // bytes must not duplicate a potentially hundreds-of-MiB plaintext. Callers
-  // zeroize the returned view; the excluded pad bytes carry no plaintext.
-  return decrypted.subarray(0, decrypted.byteLength - trailingBytes);
 }
 
 /**

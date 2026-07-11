@@ -39,7 +39,7 @@ offline after the first load.
 
 ## Status
 
-M5 is implemented for encrypted and unencrypted iPhone backups. The repo contains the strict
+M5.5 is implemented for encrypted and unencrypted iPhone backups. The repo contains the strict
 Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
@@ -79,7 +79,7 @@ isolated same-origin `libheif-js` vendor files loaded lazily in `media-worker`
 module shim so the file is not transformed), prefer embedded HEIF thumbnails when
 available, and fall back to serialized full-image decode with a 256 MiB RGBA-surface
 cap that accommodates 48 MP phone photos. Native video preview uses Chrome's `<video>`
-support from lazily read source bytes.
+support from a lazily staged source Blob.
 The messages layout follows the Lode message-rendering rules for deterministic
 fallback avatars, sent/received bubble semantics, timestamp affordances, attachment
 preview caps, compact search panes at the desktop floor, and an on-demand detail
@@ -97,20 +97,26 @@ recover as needing re-ingest. Per-backup sqlite-wasm `opfs-sahpool` storage now
 reserves extra SAH slots and the overview releases its summary reader during rebuilds
 so repeated real-backup ingests do not fail on stale journal/temp pool slots. Source
 SQLite copies are forced out of WAL mode before their transient read-only opens.
-The current copy-based source-SQLite pipeline rejects a logical message/contact
-database whose combined main/WAL/SHM source set exceeds 1 GiB, and the check runs
-against Manifest metadata before the derived database is touched, so an over-limit
-backup can never wipe a previously ingested workspace (D-039). This bounds hostile
-worker-memory growth under sqlite-wasm's 2 GiB heap ceiling; streaming source-SQLite
-import is a tracked follow-up for unusually large long-lived backups.
+Manifest and message/contact source databases now stream into per-backup transient
+OPFS, apply WAL pages by random access, and enter a dedicated 16-slot
+`opfs-sahpool` through its chunk callback without a full JavaScript or wasm-heap copy
+(D-041). The required messages set is still validated before the destructive prepare
+boundary: missing/malformed encrypted metadata, implausible multi-terabyte sizes, and
+insufficient local OPFS quota fail without touching a previously ingested workspace.
+Quota preflight reserves the three-copy staging/reconstruction/import peak, and every
+required encrypted database key is trial-unwrapped and zeroized before that boundary.
+Transient plaintext is deleted on close/lock/eviction, every encrypted ingest ends by
+locking its worker session so no staged plaintext outlives a completed ingest, a
+fresh worker sweeps crash leftovers, and Remove backup wipes the containing
+derived-data directory.
 
 Encrypted backups now use a defensive keybag TLV parser, the modern two-stage or
 legacy PBKDF2 password derivation, AES-KW class/file key unwrapping, and zero-IV
 AES-CBC decryption entirely in `backup-worker`. Wrong passwords fail before the
 derived database is prepared, so a retry cannot invalidate a previously ingested
-workspace. Source database files and WAL sidecars are decrypted before the same
-normalization pipeline runs; attachment reads decrypt in bounded chunks while
-preserving both plaintext and encrypted-source SHA-256 provenance. The password is
+workspace. Source database files and WAL sidecars decrypt into the same streaming
+pipeline; attachment reads decrypt in bounded chunks while an incremental hasher
+preserves both plaintext and encrypted-source SHA-256 provenance. The password is
 cleared from the UI immediately after dispatch; only unwrapped class keys and the
 transient decrypted Manifest reader remain in the worker session. A new messages-route
 worker asks once more before it can read original encrypted attachments, and its
@@ -121,8 +127,10 @@ database and generated media previews can contain decrypted content, and that re
 the recent backup wipes that local derived data.
 Per-file reads treat Manifest `MBFile.Size` as the authoritative plaintext length and
 resize decrypted storage to match it: longer block-aligned stored tails are truncated,
-and shorter sparse prefixes are zero-extended. Both stored and logical sizes remain
-subject to the existing read and in-memory byte caps.
+and shorter sparse prefixes are zero-extended. Previews cross the worker boundary as
+Blobs, while extraction writes decrypt chunks directly to the user-selected file
+instead of materializing the former 1 GiB array. Failed extraction aborts atomically
+without deleting a destination file that may already have existed.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

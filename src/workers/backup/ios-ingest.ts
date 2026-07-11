@@ -20,11 +20,13 @@ import {
   emitWorkerProgress,
   type ThrottledWorkerProgress,
 } from "../shared/progress";
+import { getAvailableOpfsQuotaBytes } from "../shared/opfs";
 import {
   asReadonlySourceDirectory,
   type ReadonlySourceDirectoryHandle,
 } from "./read-only-source";
 import { detectIosBackup } from "./ios-backup";
+import { resetBackupSourceCaches } from "./attachment-read";
 import {
   BackupSessionError,
   captureEncryptedSessionEpoch,
@@ -33,17 +35,22 @@ import {
   toBackupSessionWorkerError,
 } from "./encrypted-session";
 import {
+  getBackupSourceOverridesForTests,
   getStoredSourceFile,
   ManifestDbError,
   ManifestDbReader,
+  readSourceFileBlob,
   readSourceFileBytes,
+  maxStagedSourceFileBytes,
   SourceFileTooLargeError,
+  type DecryptedPlaintextDestination,
   type RootSourceFileInfo,
   type SourceFileBytes,
+  type SourceFileBlob,
+  type SourceFileInfo,
   type ReadSourceFileBytesOptions,
   type ManifestFileRecord,
 } from "./manifest-db";
-import { zeroizeBuffers } from "../shared/zeroize";
 import { normalizeIosMessages, type IosNormalizedData } from "./ios-normalize";
 import {
   openSourceSqliteDatabase,
@@ -52,16 +59,12 @@ import {
 } from "./source-sqlite";
 
 const batchSize = 500;
-// Source SQLite sets are reconstructed in worker memory and copied into
-// sqlite-wasm's transient VFS, whose imported wasm memory maxes out at 2 GiB
-// and is shared by the open Manifest copy and every concurrently open source
-// set (D-039). 1 GiB per logical main/WAL/SHM set keeps the worst realistic
-// case (decrypted Manifest + messages set + small contact sets) inside that
-// ceiling while still bounding hostile sidecar combinations; a future
-// streaming SQLite import can lift it further. The budget is validated
-// against Manifest metadata BEFORE the destructive prepare boundary and
-// charged with plaintext byte lengths at read time.
-export const maxInMemorySourceDatabaseBytes = 1024 * 1024 * 1024;
+// Streaming OPFS staging removes the sqlite-wasm heap from the source-size
+// ceiling. This generous absolute set limit remains as a hostile-metadata
+// sanity bound; the required set is also checked against remaining OPFS quota
+// before the single destructive prepare boundary (D-041).
+export const maxStagedSourceDatabaseSetBytes = 8 * 1024 * 1024 * 1024 * 1024;
+const stagingQuotaReserveBytes = 64 * 1024 * 1024;
 
 type DatabaseRole = "messages" | "contacts" | "contact-images";
 
@@ -79,6 +82,22 @@ type BackupSourceReader = (
   record: ManifestFileRecord,
   options?: ReadSourceFileBytesOptions,
 ) => Promise<SourceFileBytes>;
+
+type BackupSourceBlobReader = (
+  record: ManifestFileRecord,
+  options?: ReadSourceFileBytesOptions,
+) => Promise<SourceFileBlob>;
+
+/**
+ * Decrypt-streams one encrypted source file into a caller-owned destination
+ * (the source-sqlite workspace's staged main file) and returns its digests
+ * and provenance. Present only when an encrypted session is active.
+ */
+type BackupSourceStager = (
+  record: ManifestFileRecord,
+  destination: DecryptedPlaintextDestination,
+  options?: ReadSourceFileBytesOptions,
+) => Promise<SourceFileInfo>;
 
 export class BackupIngestError extends Error {
   constructor(
@@ -98,6 +117,9 @@ export interface IngestBackupDirectoryOptions {
   /**
    * Test seam: overrides the aggregate per-set source budget so the
    * pre-prepare enforcement path can be exercised with fixture-sized data.
+   * The in-memory staging/open replacements used by non-OPFS test runs are
+   * NOT options — they register once through manifest-db's
+   * `setBackupSourceOverridesForTests`.
    */
   sourceDatabaseBudgetBytes?: number;
 }
@@ -107,10 +129,16 @@ export async function ingestUnencryptedBackupDirectory(
   request: BackupIngestRequest,
   sink: IngestSinkApi,
   progress?: WorkerProgressCallback,
+  options: Omit<IngestBackupDirectoryOptions, "unencryptedOnly"> = {},
 ): Promise<WorkerResult<BackupIngestReport>> {
-  return ingestBackupDirectory(rootHandle, request, sink, undefined, progress, {
-    unencryptedOnly: true,
-  });
+  return ingestBackupDirectory(
+    rootHandle,
+    request,
+    sink,
+    undefined,
+    progress,
+    { ...options, unencryptedOnly: true },
+  );
 }
 
 export async function ingestBackupDirectory(
@@ -123,7 +151,7 @@ export async function ingestBackupDirectory(
 ): Promise<WorkerResult<BackupIngestReport>> {
   const unencryptedOnly = options.unencryptedOnly === true;
   const sourceDatabaseBudgetBytes =
-    options.sourceDatabaseBudgetBytes ?? maxInMemorySourceDatabaseBytes;
+    options.sourceDatabaseBudgetBytes ?? maxStagedSourceDatabaseSetBytes;
   const startedAt = new Date().toISOString();
   const encryptedSessionEpoch = captureEncryptedSessionEpoch();
   let password = credentials?.password;
@@ -174,19 +202,59 @@ export async function ingestBackupDirectory(
     password = undefined;
     const encryptedSession = await encryptedSessionPromise;
     const manifest =
-      encryptedSession?.manifest ?? (await ManifestDbReader.open(root));
+      encryptedSession?.manifest ??
+      (await ManifestDbReader.open(root, { backupId: detection.id }));
     const readBackupSourceFile: BackupSourceReader =
       encryptedSession === undefined
         ? (record, options) => readSourceFileBytes(root, record, options)
         : (record, options) => encryptedSession.readSourceFile(record, options);
+    const readBackupSourceBlob: BackupSourceBlobReader =
+      encryptedSession === undefined
+        ? (record, options) => readSourceFileBlob(root, record, options)
+        : (record, options) => encryptedSession.readSourceFileBlob(record, options);
+    const stageBackupSourceFile: BackupSourceStager | undefined =
+      encryptedSession === undefined
+        ? undefined
+        : (record, destination, options) =>
+            encryptedSession.stageSourceFile(record, destination, options);
     const closeManifestAfterIngest = encryptedSession === undefined;
 
+    const runTrackedSourceOpen = <
+      TValue extends OpenedBackupDatabase | undefined,
+    >(
+      operation: () => Promise<TValue>,
+    ): Promise<TValue> =>
+      encryptedSession === undefined
+        ? operation()
+        : encryptedSession.runTrackedOperation(async (tracked) => {
+            const opened = await operation();
+            try {
+              return tracked.finalize(opened);
+            } catch (cause) {
+              // A lock can invalidate the session after sahpool import has
+              // returned but before this handoff. The caller never receives
+              // that database, so close it here instead of orphaning an OPFS
+              // pool slot and its imported plaintext. The lock failure owns
+              // the outcome; a cleanup failure must not replace it.
+              if (opened !== undefined) {
+                const cleanupFailure = await cleanupSourceDatabases(opened.source);
+
+                if (cleanupFailure !== undefined) {
+                  console.warn(
+                    "Could not remove an orphaned source database after a session lock.",
+                    cleanupFailure,
+                  );
+                }
+              }
+              throw cause;
+            }
+          });
+
     try {
-      // The required source set must fit the in-memory budget BEFORE the
-      // destructive prepare boundary: its sizes are knowable from Manifest
-      // metadata and stored file handles, and a post-prepare budget failure
-      // would wipe a previously good derived database that this version can
-      // never rebuild.
+      // The required source set must pass staged-disk sanity, crypto-key, and
+      // quota checks BEFORE the destructive prepare boundary. Those failures
+      // are knowable from Manifest metadata and stored file handles; finding
+      // one after prepare would wipe a previously good derived database.
       await assertRequiredSourceDatabaseSetWithinBudget({
         manifest,
         root,
@@ -194,6 +262,10 @@ export async function ingestBackupDirectory(
         relativePath: "Library/SMS/sms.db",
         isEncrypted: detection.isEncrypted,
         budgetBytes: sourceDatabaseBudgetBytes,
+        ...(encryptedSession === undefined
+          ? {}
+          : { verifyEncryptedFileKey: (record) =>
+              encryptedSession.verifySourceFileKey(record) }),
       });
 
       // This is the single ordered boundary immediately before destructive
@@ -210,45 +282,67 @@ export async function ingestBackupDirectory(
       );
 
       await emitWorkerProgress("backup", progress, "extracting", "Opening source message database", 3, 9);
-      const messagesDb = await openBackupDatabase({
-        manifest,
-        role: "messages",
-        domain: "HomeDomain",
-        relativePath: "Library/SMS/sms.db",
-        readSourceFile: readBackupSourceFile,
-        budgetBytes: sourceDatabaseBudgetBytes,
-      });
-      sourceFiles.push(...messagesDb.sourceFiles);
-
-      await emitWorkerProgress("backup", progress, "extracting", "Opening optional contacts databases", 4, 9);
-      const optionalWarnings: IngestWarning[] = [];
-      const contactsDb = await openOptionalBackupDatabase({
-        manifest,
-        role: "contacts",
-        domain: "HomeDomain",
-        relativePath: "Library/AddressBook/AddressBook.sqlitedb",
-        warnings: optionalWarnings,
-        readSourceFile: readBackupSourceFile,
-        budgetBytes: sourceDatabaseBudgetBytes,
-      });
-      const contactImagesDb = await openOptionalBackupDatabase({
-        manifest,
-        role: "contact-images",
-        domain: "HomeDomain",
-        relativePath: "Library/AddressBook/AddressBookImages.sqlitedb",
-        warnings: optionalWarnings,
-        readSourceFile: readBackupSourceFile,
-        budgetBytes: sourceDatabaseBudgetBytes,
-      });
-
-      if (contactsDb !== undefined) {
-        sourceFiles.push(...contactsDb.sourceFiles);
-      }
-      if (contactImagesDb !== undefined) {
-        sourceFiles.push(...contactImagesDb.sourceFiles);
-      }
+      const messagesDb = await runTrackedSourceOpen(() =>
+        openBackupDatabase({
+          backupId: request.backupId,
+          manifest,
+          role: "messages",
+          domain: "HomeDomain",
+          relativePath: "Library/SMS/sms.db",
+          readSourceFile: readBackupSourceBlob,
+          budgetBytes: sourceDatabaseBudgetBytes,
+          ...(stageBackupSourceFile === undefined
+            ? {}
+            : { stageSourceFile: stageBackupSourceFile }),
+        }),
+      );
+      let contactsDb: OpenedBackupDatabase | undefined;
+      let contactImagesDb: OpenedBackupDatabase | undefined;
+      let report: BackupIngestReport;
 
       try {
+        sourceFiles.push(...messagesDb.sourceFiles);
+
+        await emitWorkerProgress("backup", progress, "extracting", "Opening optional contacts databases", 4, 9);
+        const optionalWarnings: IngestWarning[] = [];
+        contactsDb = await runTrackedSourceOpen(() =>
+          openOptionalBackupDatabase({
+            backupId: request.backupId,
+            manifest,
+            role: "contacts",
+            domain: "HomeDomain",
+            relativePath: "Library/AddressBook/AddressBook.sqlitedb",
+            warnings: optionalWarnings,
+            readSourceFile: readBackupSourceBlob,
+            budgetBytes: sourceDatabaseBudgetBytes,
+            ...(stageBackupSourceFile === undefined
+              ? {}
+              : { stageSourceFile: stageBackupSourceFile }),
+          }),
+        );
+        contactImagesDb = await runTrackedSourceOpen(() =>
+          openOptionalBackupDatabase({
+            backupId: request.backupId,
+            manifest,
+            role: "contact-images",
+            domain: "HomeDomain",
+            relativePath: "Library/AddressBook/AddressBookImages.sqlitedb",
+            warnings: optionalWarnings,
+            readSourceFile: readBackupSourceBlob,
+            budgetBytes: sourceDatabaseBudgetBytes,
+            ...(stageBackupSourceFile === undefined
+              ? {}
+              : { stageSourceFile: stageBackupSourceFile }),
+          }),
+        );
+
+        if (contactsDb !== undefined) {
+          sourceFiles.push(...contactsDb.sourceFiles);
+        }
+        if (contactImagesDb !== undefined) {
+          sourceFiles.push(...contactImagesDb.sourceFiles);
+        }
+
         await emitWorkerProgress("backup", progress, "normalizing", "Normalizing messages, contacts, and attachments", 5, 9);
         const normalized = await normalizeIosMessages({
           smsDb: messagesDb.source.db,
@@ -325,7 +419,7 @@ export async function ingestBackupDirectory(
         await relatedWriteProgress.ticker.finish(relatedWriteProgress.completedUnits);
 
         await emitWorkerProgress("backup", progress, "writing", "Finalizing ingest metadata", 8, 9);
-        const report = buildReport({
+        report = buildReport({
           backupId: request.backupId,
           provider: request.provider,
           startedAt,
@@ -335,16 +429,79 @@ export async function ingestBackupDirectory(
 
         await assertSinkOk(sink.finalizeIngest(report), "finalize");
         await emitWorkerProgress("backup", progress, "complete", "Message ingest complete", 9, 9);
+      } catch (cause) {
+        // The original ingest error owns this outcome; a staging cleanup
+        // failure here is secondary and must never mask it.
+        const cleanupFailure = await cleanupSourceDatabases(
+          messagesDb.source,
+          contactsDb?.source,
+          contactImagesDb?.source,
+        );
 
-        return workerOk(report);
-      } finally {
-        messagesDb.source.close();
-        contactsDb?.source.close();
-        contactImagesDb?.source.close();
+        if (cleanupFailure !== undefined) {
+          console.warn(
+            "Could not remove transient source database staging after a failed ingest.",
+            cleanupFailure,
+          );
+        }
+        throw cause;
       }
+
+      // The derived database is already finalized: the ingest succeeded, so a
+      // cleanup failure downgrades to a report warning instead of replacing
+      // the successful outcome. Leftover transient staging is swept when the
+      // backup is next opened.
+      const cleanupFailure = await cleanupSourceDatabases(
+        messagesDb.source,
+        contactsDb?.source,
+        contactImagesDb?.source,
+      );
+
+      if (cleanupFailure !== undefined) {
+        console.warn(
+          "Could not remove transient source database staging after ingest.",
+          cleanupFailure,
+        );
+        report = appendReportWarning(report, {
+          code: "source-staging-cleanup-failed",
+          message:
+            "Ingest succeeded, but transient source database staging could not be fully removed. Leftovers are swept the next time this backup is opened.",
+        });
+      }
+
+      return workerOk(report);
     } finally {
       if (closeManifestAfterIngest) {
-        manifest.close();
+        // The ingest outcome (success report or original error) is already
+        // decided; a Manifest staging cleanup failure must never replace it.
+        try {
+          manifest.close();
+          await manifest.cleanup();
+        } catch (cause) {
+          console.warn(
+            "Could not remove transient Manifest staging after ingest.",
+            cause,
+          );
+        }
+      } else {
+        // Encrypted path: the Manifest reader belongs to the worker-global
+        // session, whose staged plaintext lives under the backup's transient/
+        // directory. No production caller needs that session after this call
+        // — the overview route ingests on a one-shot worker it terminates
+        // (which cannot clean OPFS staging), and the messages route never
+        // ingests on its route-scoped worker — so lock the session here, at
+        // the ingest layer, so the no-plaintext-after-ingest guarantee does
+        // not depend on route discipline. Goes through the single
+        // resetBackupSourceCaches seam (manifest cache + session in tandem)
+        // and must never replace the already-decided ingest outcome.
+        try {
+          await resetBackupSourceCaches();
+        } catch (cause) {
+          console.warn(
+            "Could not fully remove encrypted-session plaintext staging after ingest.",
+            cause,
+          );
+        }
       }
     }
   } catch (cause) {
@@ -352,6 +509,61 @@ export async function ingestBackupDirectory(
   } finally {
     password = undefined;
   }
+}
+
+/**
+ * Closes and removes staged source databases. Deliberately never throws:
+ * every caller runs this while an outcome (success report or original error)
+ * is already decided, so the combined failure is returned for the caller to
+ * report as a warning or log without replacing that outcome.
+ */
+async function cleanupSourceDatabases(
+  ...sources: (SourceSqliteDatabase | undefined)[]
+): Promise<unknown> {
+  const active = sources.filter(
+    (source): source is SourceSqliteDatabase => source !== undefined,
+  );
+  const closeFailures: unknown[] = [];
+
+  for (const source of active) {
+    try {
+      source.close();
+    } catch (cause) {
+      closeFailures.push(cause);
+    }
+  }
+
+  const cleanupResults = await Promise.allSettled(
+    active.map((source) => source.cleanup()),
+  );
+  for (const result of cleanupResults) {
+    if (result.status === "rejected") {
+      closeFailures.push(result.reason as unknown);
+    }
+  }
+
+  if (closeFailures.length === 1) {
+    return closeFailures[0];
+  }
+  if (closeFailures.length > 1) {
+    return new AggregateError(
+      closeFailures,
+      "Could not remove transient source database staging.",
+    );
+  }
+
+  return undefined;
+}
+
+function appendReportWarning(
+  report: BackupIngestReport,
+  warning: IngestWarning,
+): BackupIngestReport {
+  return {
+    ...report,
+    counts: { ...report.counts, warnings: report.counts.warnings + 1 },
+    warnings: [...report.warnings, warning],
+  };
 }
 
 function manifestSourceFileEntry(
@@ -374,13 +586,33 @@ function manifestSourceFileEntry(
   };
 }
 
+type OpenBackupDatabaseMainSource =
+  | { kind: "blob"; blob: SourceFileBlob }
+  | {
+      kind: "staged";
+      record: ManifestFileRecord;
+      declaredByteLength: number;
+      stage: BackupSourceStager;
+    };
+
 async function openBackupDatabase(input: {
+  backupId: string;
   manifest: ManifestDbReader;
   role: DatabaseRole;
   domain: string;
   relativePath: string;
-  readSourceFile: BackupSourceReader;
+  readSourceFile: BackupSourceBlobReader;
+  /** Present only for encrypted sessions; the main database decrypt-streams. */
+  stageSourceFile?: BackupSourceStager;
   budgetBytes: number;
+  /**
+   * Optional sets bound every read/stage by the remaining set budget so a
+   * hostile declared Size is rejected before any decrypt or staging I/O. The
+   * required set keeps the independent absolute per-file cap: it was already
+   * charged pre-prepare, and an aligned ciphertext tail may be larger than
+   * its logical Size without defeating the set accounting.
+   */
+  boundReadsToBudget?: boolean;
 }): Promise<OpenedBackupDatabase> {
   // Distinguish "file genuinely absent from the manifest" (backup_file_missing)
   // from ManifestDbError, which findFile throws for malformed/unreadable
@@ -395,34 +627,65 @@ async function openBackupDatabase(input: {
     );
   }
 
-  const main = await input.readSourceFile(mainRecord, {
-    maxReadBytes: input.budgetBytes,
-    includeSourceSha256: true,
-  });
-  let wal: SourceFileBytes | undefined;
-  let shm: SourceFileBytes | undefined;
+  const boundToBudget = input.boundReadsToBudget === true;
+  const mainReadCap = boundToBudget
+    ? Math.min(input.budgetBytes, maxStagedSourceFileBytes)
+    : maxStagedSourceFileBytes;
+  // Encrypted main databases decrypt-stream directly into the source-sqlite
+  // workspace (no intermediate staged plaintext copy); unencrypted mains stay
+  // read-only Blobs over the stored source file, which the opener copies.
+  const mainSource: OpenBackupDatabaseMainSource =
+    input.stageSourceFile === undefined
+      ? {
+          kind: "blob",
+          blob: await input.readSourceFile(mainRecord, {
+            maxReadBytes: mainReadCap,
+            includeSourceSha256: true,
+          }),
+        }
+      : {
+          kind: "staged",
+          record: mainRecord,
+          declaredByteLength: declaredEncryptedPlaintextByteLength(mainRecord),
+          stage: input.stageSourceFile,
+        };
+
+  let wal: SourceFileBlob | undefined;
+  let shm: SourceFileBlob | undefined;
 
   try {
-    // The budget bounds in-memory reconstruction, so it is charged with the
-    // plaintext byte lengths actually held (the per-read maxReadBytes guard
-    // above already rejected any single over-budget file before allocation).
-    // Charging ciphertext sizes here would re-reject encrypted sets whose
-    // plaintext fits but whose PKCS#7 padding straddles the budget.
+    // The set budget bounds staged logical plaintext, so charge the plaintext
+    // byte lengths — for a streamed main the declared logical size, BEFORE
+    // any decrypt or staging work runs. Charging ciphertext sizes here would
+    // re-reject encrypted sets whose plaintext fits but whose PKCS#7 padding
+    // straddles the budget.
+    if (
+      mainSource.kind === "staged" &&
+      mainSource.declaredByteLength > mainReadCap
+    ) {
+      throw new SourceFileTooLargeError(
+        `Source file ${input.domain}/${input.relativePath} is larger than the read limit.`,
+      );
+    }
     let remainingSourceBytes = consumeSourceDatabaseBudget(
       input.budgetBytes,
-      main.bytes.byteLength,
+      mainSource.kind === "blob"
+        ? mainSource.blob.byteLength
+        : mainSource.declaredByteLength,
     );
     wal = await readOptionalSidecar(
       input.manifest,
       input.domain,
       `${input.relativePath}-wal`,
       input.readSourceFile,
-      remainingSourceBytes,
+      boundToBudget
+        ? Math.min(remainingSourceBytes, maxStagedSourceFileBytes)
+        : maxStagedSourceFileBytes,
     );
     if (wal !== undefined) {
       remainingSourceBytes = consumeSourceDatabaseBudget(
         remainingSourceBytes,
-        wal.bytes.byteLength,
+        wal.byteLength,
       );
     }
     shm = await readOptionalSidecar(
@@ -430,33 +693,107 @@ async function openBackupDatabase(input: {
       input.domain,
       `${input.relativePath}-shm`,
       input.readSourceFile,
-      remainingSourceBytes,
+      boundToBudget
+        ? Math.min(remainingSourceBytes, maxStagedSourceFileBytes)
+        : maxStagedSourceFileBytes,
     );
     if (shm !== undefined) {
       consumeSourceDatabaseBudget(
         remainingSourceBytes,
-        shm.bytes.byteLength,
+        shm.byteLength,
       );
     }
+
+    const openSourceSqlite =
+      getBackupSourceOverridesForTests().openSourceSqlite ??
+      openSourceSqliteDatabase;
+    let main: SourceFileInfo;
+    let source: SourceSqliteDatabase;
+
+    if (mainSource.kind === "blob") {
+      main = mainSource.blob;
+      source = await openSourceSqlite({
+        backupId: input.backupId,
+        label: input.role,
+        main: mainSource.blob.blob,
+        ...(wal === undefined ? {} : { wal: wal.blob }),
+        ...(shm === undefined ? {} : { shm: shm.blob }),
+      });
+    } else {
+      let stagedMain: SourceFileInfo | undefined;
+      source = await openSourceSqlite({
+        backupId: input.backupId,
+        label: input.role,
+        main: {
+          declaredByteLength: mainSource.declaredByteLength,
+          stage: async (destination) => {
+            stagedMain = await mainSource.stage(mainSource.record, destination, {
+              maxReadBytes: mainReadCap,
+              includeSourceSha256: true,
+            });
+          },
+        },
+        ...(wal === undefined ? {} : { wal: wal.blob }),
+        ...(shm === undefined ? {} : { shm: shm.blob }),
+      });
+
+      if (stagedMain === undefined) {
+        // Defensive invariant: the opener must run the stage callback exactly
+        // once before returning a usable database.
+        const cleanupFailure = await cleanupSourceDatabases(source);
+
+        if (cleanupFailure !== undefined) {
+          console.warn(
+            "Could not remove an unstaged source database.",
+            cleanupFailure,
+          );
+        }
+        throw new BackupIngestError(
+          "backup_ingest_failed",
+          `The source SQLite opener did not stage the ${input.role} main database.`,
+          { domain: input.domain, relativePath: input.relativePath },
+        );
+      }
+      main = stagedMain;
+    }
+
     const sourceFiles = sourceFileEntries(input.role, main, wal, shm);
-    const source = await openSourceSqliteDatabase({
-      label: input.role,
-      main: main.bytes,
-      ...(wal === undefined ? {} : { wal: wal.bytes }),
-      ...(shm === undefined ? {} : { shm: shm.bytes }),
-    });
 
     return { source, sourceFiles };
   } finally {
-    zeroizeBuffers(main.bytes, wal?.bytes, shm?.bytes);
+    await Promise.all([
+      ...(mainSource.kind === "blob" ? [mainSource.blob.cleanup()] : []),
+      ...(wal === undefined ? [] : [wal.cleanup()]),
+      ...(shm === undefined ? [] : [shm.cleanup()]),
+    ]);
   }
 }
 
+function declaredEncryptedPlaintextByteLength(
+  record: ManifestFileRecord,
+): number {
+  const size = record.metadata.size;
+
+  if (size === undefined || !Number.isSafeInteger(size) || size < 0) {
+    throw new BackupSessionError(
+      "backup_crypto_malformed",
+      "An encrypted source database has malformed size metadata.",
+      false,
+      {
+        fileId: record.fileId,
+        domain: record.domain,
+        relativePath: record.relativePath,
+      },
+    );
+  }
+
+  return size;
+}
+
 /**
- * Pre-prepare budget guard for a REQUIRED database set. Missing records and
- * sidecars are skipped (the reads decide their own error surface later);
- * only a provably over-budget set fails here, before any destructive
- * db-worker call.
+ * Pre-prepare guard for a REQUIRED database set. The main record is required;
+ * absent sidecars are allowed. Every present file is shape/budget checked and
+ * encrypted keys are trial-unwrapped before any destructive db-worker call.
  */
 export async function assertRequiredSourceDatabaseSetWithinBudget(input: {
   manifest: ManifestDbReader;
@@ -465,8 +802,10 @@ export async function assertRequiredSourceDatabaseSetWithinBudget(input: {
   relativePath: string;
   isEncrypted: boolean;
   budgetBytes?: number;
+  verifyEncryptedFileKey?: (record: ManifestFileRecord) => Promise<void>;
 }): Promise<void> {
-  let remaining = input.budgetBytes ?? maxInMemorySourceDatabaseBytes;
+  const budget = input.budgetBytes ?? maxStagedSourceDatabaseSetBytes;
+  let remaining = budget;
 
   for (const relativePath of [
     input.relativePath,
@@ -476,14 +815,43 @@ export async function assertRequiredSourceDatabaseSetWithinBudget(input: {
     const record = input.manifest.findFile(input.domain, relativePath);
 
     if (record === undefined) {
+      if (relativePath === input.relativePath) {
+        throw new BackupIngestError(
+          "backup_file_missing",
+          `The backup's Manifest.db does not list ${input.domain}/${input.relativePath}.`,
+          { domain: input.domain, relativePath: input.relativePath },
+        );
+      }
       continue;
     }
 
-    remaining = consumeSourceDatabaseBudget(
-      remaining,
-      await estimatePlaintextByteLength(input.root, record, input.isEncrypted),
+    const byteLength = await estimatePlaintextByteLength(
+      input.root,
+      record,
+      input.isEncrypted,
     );
+
+    if (input.isEncrypted) {
+      if (input.verifyEncryptedFileKey === undefined) {
+        throw new BackupSessionError(
+          "backup_crypto_malformed",
+          "The encrypted source database key verifier is unavailable.",
+          false,
+          {
+            fileId: record.fileId,
+            domain: record.domain,
+            relativePath: record.relativePath,
+          },
+        );
+      }
+
+      await input.verifyEncryptedFileKey(record);
+    }
+
+    remaining = consumeSourceDatabaseBudget(remaining, byteLength);
   }
+
+  await assertOpfsQuotaForSourceSet(budget - remaining);
 }
 
 async function estimatePlaintextByteLength(
@@ -491,6 +859,7 @@ async function estimatePlaintextByteLength(
   record: ManifestFileRecord,
   isEncrypted: boolean,
 ): Promise<number> {
+  const file = await getStoredSourceFile(root, record);
   const metadataSize = record.metadata.size;
   const validMetadataSize =
     metadataSize !== undefined &&
@@ -499,16 +868,38 @@ async function estimatePlaintextByteLength(
       ? metadataSize
       : undefined;
 
-  if (isEncrypted && validMetadataSize !== undefined) {
+  if (isEncrypted) {
+    if (
+      validMetadataSize === undefined ||
+      validMetadataSize > maxStagedSourceFileBytes ||
+      record.metadata.encryptionKey === undefined ||
+      file.size % 16 !== 0 ||
+      file.size > maxStagedSourceFileBytes
+    ) {
+      throw new BackupSessionError(
+        "backup_crypto_malformed",
+        "A required encrypted source database has malformed size or key metadata.",
+        false,
+        {
+          fileId: record.fileId,
+          domain: record.domain,
+          relativePath: record.relativePath,
+        },
+      );
+    }
     return validMetadataSize;
+  }
+
+  if (file.size > maxStagedSourceFileBytes) {
+    throw new SourceFileTooLargeError(
+      "A required source database exceeds the staged per-file sanity limit.",
+    );
   }
 
   // Size probe only; no bytes are read. CBC never shrinks below plaintext
   // and unencrypted reads are truncated to a valid declared size, so the
   // stored size (capped by any valid metadata size) bounds what the read
   // will charge.
-  const file = await getStoredSourceFile(root, record);
-
   return validMetadataSize === undefined
     ? file.size
     : Math.min(validMetadataSize, file.size);
@@ -526,20 +917,45 @@ export function consumeSourceDatabaseBudget(
     sourceByteLength > remainingBytes
   ) {
     throw new SourceFileTooLargeError(
-      "The combined source database main/WAL/SHM set exceeds the in-memory ingest limit.",
+      "The combined source database main/WAL/SHM set exceeds the staged ingest sanity limit.",
     );
   }
 
   return remainingBytes - sourceByteLength;
 }
 
-async function openOptionalBackupDatabase(input: {
+async function assertOpfsQuotaForSourceSet(sourceSetBytes: number): Promise<void> {
+  const availableBytes = await getAvailableOpfsQuotaBytes();
+
+  // An unknown quota (no OPFS or estimate in this runtime) must never block.
+  if (availableBytes === undefined) {
+    return;
+  }
+
+  // Peak staging: encrypted WAL/SHM sidecars stage to transient OPFS while
+  // the main database decrypt-streams directly into the source-sqlite
+  // workspace file, which WAL reconstruction then grows (bounded by main +
+  // WAL) before the sahpool import copies it once more. Sidecar-dominated
+  // sets still approach 3x the logical set size, so the conservative 3x
+  // reserve stays.
+  const stagedBytes = sourceSetBytes * 3 + stagingQuotaReserveBytes;
+  if (!Number.isSafeInteger(stagedBytes) || stagedBytes > availableBytes) {
+    throw new SourceFileTooLargeError(
+      "There is not enough local OPFS quota to stage the required source database before ingest.",
+    );
+  }
+}
+
+/** Exported for unit tests of the pre-staging optional-set bound. */
+export async function openOptionalBackupDatabase(input: {
+  backupId: string;
   manifest: ManifestDbReader;
   role: DatabaseRole;
   domain: string;
   relativePath: string;
   warnings: IngestWarning[];
-  readSourceFile: BackupSourceReader;
+  readSourceFile: BackupSourceBlobReader;
+  stageSourceFile?: BackupSourceStager;
   budgetBytes: number;
 }): Promise<OpenedBackupDatabase | undefined> {
   try {
@@ -547,7 +963,10 @@ async function openOptionalBackupDatabase(input: {
       return undefined;
     }
 
-    return await openBackupDatabase(input);
+    // Optional sets get no pre-prepare preflight, so every read and stage is
+    // bounded by the remaining set budget before decrypt/staging I/O starts;
+    // an over-budget or hostile declared Size degrades to the warning below.
+    return await openBackupDatabase({ ...input, boundReadsToBudget: true });
   } catch (cause) {
     input.warnings.push({
       code: `${input.role}-database-unreadable`,
@@ -564,9 +983,9 @@ async function readOptionalSidecar(
   manifest: ManifestDbReader,
   domain: string,
   relativePath: string,
-  readSourceFile: BackupSourceReader,
+  readSourceFile: BackupSourceBlobReader,
   maxReadBytes: number,
-): Promise<SourceFileBytes | undefined> {
+): Promise<SourceFileBlob | undefined> {
   const record = manifest.findFile(domain, relativePath);
 
   return record === undefined
@@ -579,9 +998,9 @@ async function readOptionalSidecar(
 
 function sourceFileEntries(
   role: DatabaseRole,
-  main: SourceFileBytes,
-  wal: SourceFileBytes | undefined,
-  shm: SourceFileBytes | undefined,
+  main: SourceFileInfo,
+  wal: SourceFileBlob | undefined,
+  shm: SourceFileBlob | undefined,
 ): IngestSourceFile[] {
   return [
     sourceFileEntry(main, sourceRole(role, "db")),
@@ -591,7 +1010,7 @@ function sourceFileEntries(
 }
 
 function sourceFileEntry(
-  source: SourceFileBytes,
+  source: SourceFileInfo,
   role: IngestSourceFile["role"],
 ): IngestSourceFile {
   return {
@@ -600,7 +1019,7 @@ function sourceFileEntry(
     domain: source.record.domain,
     relativePath: source.record.relativePath,
     sha256: source.sha256,
-    bytes: source.bytes.byteLength,
+    bytes: source.byteLength,
     // Database reads always request the stored-source hash (provenance rule
     // 9); the guard is only absent for reads that opted out.
     ...(source.sourceSha256 === undefined
@@ -782,10 +1201,10 @@ function toBackupIngestWorkerError(cause: unknown) {
       worker: "backup",
       code: "backup_ingest_failed",
       message:
-        "A source database exceeds the safe in-memory ingest limit for this version.",
-      recoverable: false,
+        "A source database exceeds the staged-file sanity limit or available local storage quota.",
+      recoverable: true,
       cause,
-      details: { maxReadBytes: maxInMemorySourceDatabaseBytes },
+      details: { maxStagedSetBytes: maxStagedSourceDatabaseSetBytes },
     });
   }
 

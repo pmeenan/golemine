@@ -15,9 +15,3 @@ export const previewVideoMaxBytes = 128 * 1024 * 1024;
 
 /** Default longest-edge pixel size for generated attachment thumbnails. */
 export const defaultThumbnailMaxPixelSize = 512;
-
-/**
- * Byte budget for user-initiated extraction (the user explicitly chose a
- * destination, so a much larger read is acceptable).
- */
-export const extractMaxReadBytes = 1024 * 1024 * 1024;

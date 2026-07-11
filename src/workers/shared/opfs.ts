@@ -69,3 +69,63 @@ export async function getOpfsBackupDirectoryHandle(
 
   return backupsDirectory.getDirectoryHandle(safeDirectoryName, { create });
 }
+
+/**
+ * Probes the OPFS storage estimate and returns the available byte budget
+ * (`quota - usage`, floored at zero). Returns `undefined` when this runtime
+ * has no OPFS storage, no `navigator.storage.estimate`, or the estimate
+ * reports an unusable shape (non-number, non-finite, or unsafe-integer
+ * values). This helper only probes: callers own the error policy and must
+ * treat an unknown budget as "do not block".
+ */
+export async function getAvailableOpfsQuotaBytes(): Promise<number | undefined> {
+  if (!hasOpfsStorage()) {
+    return undefined;
+  }
+
+  const storage = navigator.storage;
+  if (typeof storage.estimate !== "function") {
+    return undefined;
+  }
+
+  const estimate = await storage.estimate();
+  if (
+    !isUsableQuotaByteValue(estimate.quota) ||
+    !isUsableQuotaByteValue(estimate.usage)
+  ) {
+    return undefined;
+  }
+
+  return Math.max(0, estimate.quota - estimate.usage);
+}
+
+function isUsableQuotaByteValue(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isSafeInteger(value)
+  );
+}
+
+/**
+ * Removes an OPFS entry when it exists. Missing entries are an expected part
+ * of idempotent staging cleanup, while all other storage failures still reach
+ * the caller.
+ */
+export async function removeOpfsEntryIfFound(
+  directory: Pick<FileSystemDirectoryHandle, "removeEntry">,
+  name: string,
+  options?: FileSystemRemoveOptions,
+): Promise<void> {
+  try {
+    await directory.removeEntry(name, options);
+  } catch (cause) {
+    if (!isNotFoundError(cause)) {
+      throw cause;
+    }
+  }
+}
+
+function isNotFoundError(cause: unknown): boolean {
+  return isObjectRecord(cause) && cause.name === "NotFoundError";
+}

@@ -208,21 +208,38 @@ metal and the ore it surfaces; no clay/terracotta styling).
   backup.worker is named `golemine-db-worker-nested`). Worker options objects must
   stay literal at each construction site because Vite statically parses
   `new Worker(new URL(...), { type: "module" })`. Additional shared modules:
-  `src/workers/shared/guards.ts` (`isObjectRecord`; `src/lib/recents.ts`
-  deliberately keeps its own UI-thread copy), `src/workers/shared/hash.ts`
-  (`stableHash` FNV-1a), `src/workers/shared/opfs.ts` (`hasOpfsStorage`,
-  `isSafeOpfsPathSegment`, `getOpfsBackupDirectoryHandle` — the single
-  `golemine/backups/<id>` walk with safe-segment assertion),
+  `src/workers/shared/guards.ts` (`isObjectRecord`, `assertPositiveSafeInteger`;
+  `src/lib/recents.ts` deliberately keeps its own UI-thread copy),
+  `src/workers/shared/hash.ts` (`stableHash` FNV-1a), `src/workers/shared/opfs.ts`
+  (`hasOpfsStorage`, `isSafeOpfsPathSegment`, `getOpfsBackupDirectoryHandle` — the
+  single `golemine/backups/<id>` walk with safe-segment assertion — and
+  `getAvailableOpfsQuotaBytes`, the single OPFS quota probe shared by manifest-db
+  and ios-ingest),
   `src/workers/shared/sqlite-errors.ts` (`classifySqliteWasmError(cause,
   fallback)` used by both db-worker ingest and query error paths),
   `src/workers/shared/media-mime.ts` (native-image + HEIC MIME sets),
-  `src/workers/shared/media-limits.ts` (named read/preview/extract/thumbnail
+  `src/workers/shared/media-limits.ts` (named small-read/preview/thumbnail
   budget constants, import-safe from UI code),
+  `src/workers/shared/incremental-sha256.ts` (dependency-free streaming integrity
+  hasher with FIPS/NIST vectors; D-041 — `sha256BlobHex` accepts an optional
+  `onChunk` tee and uses one native `crypto.subtle.digest` for un-teed Blobs at or
+  below `nativeSha256MaxBlobBytes` (64 MiB); `updateSha256WithZeros` has a matching
+  `onChunk` overload),
   `src/workers/shared/service-kind.ts` (`classifyServiceKind` populating the
   optional `serviceKind` field on message records/previews so UI never
   string-matches raw service names), and `src/workers/shared/retry.ts`
   (`retryAsyncOperation`, used to retry transient `installOpfsSAHPoolVfs`
   failures during route switches).
+  Backup-worker transient file ownership lives in
+  `src/workers/backup/transient-staging.ts`: `openTransientStagingArea` (staged
+  files with one idempotent `close()`), `ensureTransientSweep(backupId)` (the only
+  sweep entry point), and `createTransientWorkspaceDirectory` (uniquely named
+  caller-owned workspace directories — source-sqlite consumes it, so all
+  `transient/` layout knowledge stays in this module). The once-per-backup-per-worker
+  sweep removes the whole `transient/` directory and assumes at most one worker uses
+  a backup's transient directory at a time (single-tab flows, D-029). Extend this
+  module rather than opening ad hoc OPFS sync handles for future streaming
+  consumers.
 - Production iOS ingest is provider-neutral:
   `BackupWorkerApi.ingestBackupToDb(root, request, credentials?, progress?)` in
   `src/workers/backup/ios-ingest.ts` plus the backup-worker/db-worker bridge. The
@@ -261,14 +278,40 @@ metal and the ore it surfaces; no clay/terracotta styling).
   a release ref, not just React effect-cleanup timing) and stays released while ingest
   runs so rebuilds cannot contend with prepare for the same per-backup SAH pool
   (D-024). `src/workers/backup/source-sqlite.ts` applies committed SQLite WAL frames to a
-  copy of source bytes before opening a transient read-only DB (D-021, D-022); it
-  rejects invalid WAL headers/impossible committed sizes, but for frames it follows
+  staged OPFS source file before callback-importing it into a dedicated transient
+  `opfs-sahpool` read-only DB (D-021, D-022, D-041, D-042). There is ONE WAL
+  pipeline: in-memory byte inputs adapt through `MemoryRandomAccessFile`,
+  `SourceSqliteStagingInput` lets callers (encrypted sessions) decrypt-stream the
+  main database directly into the workspace's staged file, workspace directories
+  come from transient-staging's `createTransientWorkspaceDirectory`, and errors
+  thrown by the caller's stage callback propagate unwrapped so crypto error codes
+  reach the UI. WAL replay is single-pass with frame-aligned multi-MiB chunked
+  reads and a 64 MiB pending-transaction buffer budget, falling back to a
+  bounded-memory two-phase scan+apply when one transaction exceeds it. It rejects
+  invalid WAL headers; commit-size validation is a 4 TiB per-commit hostility cap
+  plus a whole-WAL structural bound applied ONLY to the final applied commit
+  (checkpoint-truncated mains legitimately carry larger earlier commit records —
+  never reintroduce a per-commit structural bound, D-042), and pages beyond their
+  own commit's declared size are skipped. For frames it follows
   SQLite end-of-log behavior: apply the valid committed prefix and stop at the first
-  invalid/stale/torn frame. It always forces copied source DB header bytes 18/19 to
+  invalid/stale/torn frame. It always forces staged source DB header bytes 18/19 to
   rollback-journal mode before the read-only transient sqlite-wasm open, including
   no-sidecar and no-committed-frame cases; otherwise sqlite may try to open missing
   transient sidecars and throw `SQLITE_CANTOPEN` (D-025). Do not try to make
-  sqlite-wasm open Manifest-file-ID sidecars directly. Timestamp normalization must
+  sqlite-wasm open Manifest-file-ID sidecars directly.
+  Encrypted database mains decrypt-stream directly into the source-sqlite workspace
+  (no intermediate session-staged copy); the OPFS quota preflight keeps its
+  conservative 3x reserve because sidecar-dominated sets still stage WAL/SHM to
+  transient OPFS while WAL reconstruction and the sahpool import each hold another
+  copy. Optional contacts/contact-image sets get no pre-prepare preflight, so every
+  read and stage is bounded against the remaining set budget BEFORE any
+  decrypt/staging I/O — hostile declared sizes degrade to the
+  `<role>-database-unreadable` warning without I/O. After a successful finalize,
+  source-staging cleanup failures become the `source-staging-cleanup-failed` report
+  warning (never a failed ingest, and never masking an original ingest error).
+  `ingestBackupDirectory` always ends an encrypted ingest by locking the session
+  through `resetBackupSourceCaches` (D-043), so the one-shot overview worker leaves
+  `transient/` empty without relying on route discipline. Timestamp normalization must
   accept sqlite bigint values for Apple nanosecond epochs and omit out-of-range dates
   instead of throwing. Attachment source
   hashing during ingest is bounded to Manifest-known files at or below 64 MiB, guarded
@@ -282,24 +325,41 @@ metal and the ore it surfaces; no clay/terracotta styling).
   Manifest.db, and retains only mutable class keys plus its transient Manifest reader.
   Clear the structured-cloned credential field/drop local string references immediately
   after unlock/open (JS strings cannot be zeroized); continue clearing all mutable
-  password/key byte arrays. In-memory bounds (D-039): the encrypted Manifest.db cap is
-  512 MiB and each logical source main/WAL/SHM set has a 1 GiB aggregate budget
-  (unencrypted ingest included). These are sized against sqlite-wasm's hard 2 GiB
-  imported-memory maximum, which hosts the transient Manifest copy plus every
-  concurrently open source-set copy; do not raise them without re-deriving that budget
-  (streaming transient-VFS/OPFS import remains the real fix, D-038/D-039). Keep
-  rejection ahead of `arrayBuffer()`/decryption, and keep the REQUIRED messages set's
-  budget validated from Manifest metadata/stored sizes BEFORE the destructive
-  `prepare` boundary (`assertRequiredSourceDatabaseSetWithinBudget`) — a post-prepare
-  budget failure would wipe a previously good derived DB. Read-time budget charging
-  uses plaintext byte lengths (ciphertext may carry up to 16 PKCS#7 slop bytes).
-  Unencrypted root Manifest.db/WAL/SHM still uses the legacy 1 GiB per-file bounds;
-  Plan.md tracks aggregate/streaming recovery hardening because all three buffers can
-  otherwise coexist.
+  password/key byte arrays. M5.5 removes D-039's RAM caps (D-041): encrypted and
+  unencrypted Manifest/source main/WAL/SHM sets stream through transient OPFS and
+  callback-import into unique 16-slot `opfs-sahpool` instances without full wasm-heap
+  copies. Keep the REQUIRED messages set's metadata/stored-file/quota validation
+  BEFORE the destructive `prepare` boundary at
+  `assertRequiredSourceDatabaseSetWithinBudget`; it now uses an 8 TiB staged-set /
+  4 TiB per-file hostile-metadata sanity bound plus remaining OPFS quota, reserving a
+  conservative 3x peak for decrypt staging, WAL reconstruction, and sahpool import.
+  Missing required records, malformed encrypted Size/key/alignment metadata, and insufficient
+  quota must remain pre-prepare; trial-unwrap every present required main/WAL/SHM file
+  key there and immediately zeroize it. Plaintext staging lives only under
+  `golemine/backups/<id>/transient/`: close/finally, explicit lock, and session eviction
+  delete owned files/pools; `ensureTransientSweep(backupId)` is the only sweep entry
+  point — the first transient open in each fresh worker removes the whole
+  `transient/` directory (crash leftovers) before its Manifest quota estimate, and
+  every later staging/workspace open in that worker reuses that sweep because
+  Manifest and several source DBs may coexist. Remove backup wipes the parent. Lock
+  drains tracked reads for their full decrypt/stage/respond or direct-extraction
+  duration, then awaits staging and Manifest-pool cleanup before resolving, even when
+  the pool's synchronous close reports an error.
   Explicit lock, different backup id/root `isSameEntry` failure, route unmount, or
   worker termination destroys/closes the session; `lockBackupSession` goes through the
   single `resetBackupSourceCaches()` seam in attachment-read (manifest cache + session
   in tandem), and the session drains tracked reads before closing its Manifest reader.
+  All source-touching session work goes through the single
+  `runTrackedSessionOperation` runner. `stageSourceFile(record, destination, options)`
+  is the session API that decrypt-streams a main database into a caller-owned
+  destination; `readSourceFileBlob` exists ONLY to stage encrypted WAL/SHM sidecar
+  payloads for database opens (bounded preview/report reads decrypt in memory and
+  respond with a Blob copy — no transient staging, no retention race, D-043); and
+  `writeSourceFile` hosts extraction's in-window `finalize` commit point. Session
+  eviction and replace-unlock are best-effort on cleanup failure (a fresh unlock
+  never fails on the OLD session's cleanup problems), while the explicit lock RPC
+  still propagates cleanup errors so its caller can fall back to worker termination
+  (D-043).
   Supplying a password to `unlockBackupSession` always verifies it — an active
   matching session is reused only by password-less callers; a supplied password
   triggers a full replace-unlock so a wrong password can never report success.
@@ -318,28 +378,47 @@ metal and the ore it surfaces; no clay/terracotta styling).
   distinct and remains pre-prepare. Encrypted MBFiles require `Size` and
   `EncryptionKey`; validate block/source/plaintext bounds before hashing/allocation,
   decrypt `File` slices through `decryptFileChunks`, and preserve plaintext
-  `sha256`/`bytes` plus ciphertext `sourceSha256`/`sourceBytes`/`isEncrypted` in
+  `sha256`/size plus ciphertext `sourceSha256`/`sourceBytes`/`isEncrypted` in
   source-read responses and Manifest/database-input ingest provenance. The ciphertext
-  `sourceSha256` is opt-in (`includeSourceSha256`) because it costs a second full read:
-  database provenance and `readSourceFile` RPC responses request it; eager attachment
-  hashing does not. Normalized
+  `sourceSha256` is opt-in (`includeSourceSha256`): on session paths it now folds
+  single-pass into the decrypt read via the chunked CBC generator's
+  `onCiphertextChunk` tee (plus a bounded read of any stored tail the decrypt never
+  touches), so it costs extra hashing work rather than a second full read, and it is
+  free on unencrypted reads. Database provenance and `readSourceFile` RPC responses
+  request it; eager attachment hashing does not. Normalized
   attachment rows intentionally keep the optional plaintext hash for preview
   verification; report export gets both labeled attachment hashes through an exact-path
-  `readSourceFile`. Exact ciphertext hashing is a scoped one-shot WebCrypto read
-  because no incremental digest exists; the final plaintext is still materialized by
-  the current Uint8Array RPC. Manifest decryption and file decryption share the one
+  `readSourceFile`. Plaintext and opt-in ciphertext provenance hashes fold through the
+  dependency-free incremental SHA-256 helper in `src/workers/shared/` (the D-041
+  integrity-only exception to WebCrypto-only crypto). `readSourceFile` returns a Blob;
+  `extractSourceFile` writes decrypt chunks directly to the save-picker writable.
+  Manifest decryption and file decryption share the one
   chunked CBC generator (`decryptAes256CbcBlobChunks`, reusable ciphertext scratch,
-  borrowed subarray chunks); there is no one-shot whole-buffer decrypt anymore.
+  borrowed subarray chunks, optional `onCiphertextChunk` tee), and every decrypt
+  destination flows through the single `decryptSourceFileToDestination` streamer and
+  its `DecryptedPlaintextDestination` shape in manifest-db; there is no one-shot
+  whole-buffer decrypt anymore. Present zero-byte root Manifest sidecars are
+  tolerated (normal after `wal_checkpoint(TRUNCATE)`). Manifest staging hashes
+  during the write with a 16-byte pad hold-back so `contentSha256` covers exactly
+  the normalized content without re-reading the staged file
+  (`normalizeStagedManifestDatabase` is the exported byte-level core, shared with
+  `source-sqlite.test-support`); the decrypted Manifest deliberately keeps its
+  stage→copy→import shape because normalization needs read/resize access. Unit-test
+  seams are the single `setBackupSourceOverridesForTests` registry
+  (openSourceSqlite/stageDecryptedMain/stagePlaintext/sweepTransient) — do not
+  reintroduce per-option test globals.
   Per-file ciphertext may contain a block-aligned stored tail more than 16 bytes beyond
   authoritative `MBFile.Size`; decrypt and truncate to `Size` rather than rejecting the
   delta. Sparse files may instead declare `Size` larger than the encrypted materialized
   prefix; leave the bounded destination's remaining bytes zero-filled. Preserve
-  ciphertext alignment and enforce caller caps independently against stored and logical
-  sizes before reading/allocation.
+  ciphertext alignment; encrypted read caps bind the PLAINTEXT size, with the stored
+  ciphertext allowed up to `maxReadBytes + 16` for the padding block — both enforced
+  before reading/allocation.
   The deterministic encrypted fixture and vectors live
   alongside the existing mini backup under `e2e/fixtures/`; `e2e/m5.spec.ts` locks the
-  wrong-password, no-secret-persistence, fresh-session unlock, and decrypted-preview
-  flow.
+  wrong-password, no-secret-persistence, fresh-session unlock, decrypted-preview,
+  and post-ingest empty-`transient/` flows (a completed encrypted overview ingest
+  must leave no staged plaintext).
   The messages success strip's **Lock attachments** action must await session
   invalidation/active-read drain, restore and focus the shared password form, and fall
   back to terminating the route worker if the lock RPC fails.
@@ -444,25 +523,33 @@ metal and the ore it surfaces; no clay/terracotta styling).
 - Attachment source reads use provider-neutral
   `BackupWorkerApi.readSourceFile(root, request, progress?)` in
   `src/workers/backup/attachment-read.ts` (the old unencrypted method is a compatibility
-  seam). It revalidates backup/root identity, applies unencrypted root Manifest WAL
-  sidecars or requires the matching encrypted session, performs exact source
-  domain/path lookup, reads through read-only wrappers, enforces caller byte caps, and
-  verifies optional plaintext hashes. Byte-bearing backup/media worker responses and media-worker image
-  requests use Comlink `transfer()` for their `Uint8Array` buffers. Preview,
-  extraction, and future report hashing should use this worker API; do not pass raw
-  writable-capable handles into provider code. The backup worker memoizes the
+  seam). One `resolveManifestForSourceRequest` owns the manifest/session cache rules
+  for both read and extract. It revalidates backup/root identity, applies unencrypted
+  root Manifest WAL sidecars or requires the matching encrypted session, performs
+  exact source domain/path lookup, reads through read-only wrappers, enforces caller
+  byte caps, and verifies optional plaintext hashes. Source preview responses and media-worker image
+  requests carry Blobs so full payloads are not transferred as arrays; cached JPEG
+  thumbnail responses remain transferred `Uint8Array`s. Preview and future report
+  hashing use this API, while extraction uses `extractSourceFile` so backup-worker
+  writes directly to the save-picker handle; do not pass raw
+  writable-capable handles into provider code. Extraction has an explicit commit
+  point: once `writable.close()` succeeds, a racing session lock or post-close
+  failure can no longer convert the completed extraction into a reported failure.
+  Pre-commit failure aborts the atomic writable; never delete the selected handle
+  from UI cleanup because it may name an existing user file. Manifest staging
+  cleanup failures after a read/extract outcome is decided are logged, never
+  surfaced as the operation's result. The backup worker memoizes the
   most recent backupId's detection result and opened `ManifestDbReader` across
   calls (sound because source backups are read-only while open); requests
   without a backupId bypass the cache, a different backupId closes the old
   reader, and cache hits verify root identity with `isSameEntry` (same backupId
   from a different root directory evicts and rebuilds instead of trusting a
   stale manifest index). `ManifestDbReader` retains only byte-free provenance
-  metadata for its root source files, and `source-sqlite` unlinks its transient
-  wasm VFS copy on close so cached readers do not pin manifest bytes in worker
-  memory. Read-size budgets come from `src/workers/shared/media-limits.ts`; an
-  explicit `maxReadBytes` above the default is honored (no hidden cap), and
-  user-initiated extraction reads with the explicit 1 GiB `extractMaxReadBytes`
-  budget — streaming extraction is deferred (D-031).
+  metadata for its root source files, and `source-sqlite` truncates/unlinks its
+  transient sahpool database synchronously on close before async directory cleanup.
+  Read-size budgets for previews come from `src/workers/shared/media-limits.ts`;
+  extraction has no former 1 GiB materialization cap, but retains the absolute staged
+  sanity and hostile metadata checks (D-041 supersedes D-031).
 - M3 media thumbnails use `MediaWorkerApi.createAttachmentThumbnail` in
   `src/workers/media/thumbnails.ts`. Native PNG/JPEG/GIF/WebP images are rendered in
   the worker with `createImageBitmap`/`OffscreenCanvas`; HEIC thumbnails use

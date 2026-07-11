@@ -559,10 +559,14 @@ export interface ReadSourceFileResponse {
   fileId: string;
   domain: string;
   relativePath: string;
-  bytes: Uint8Array;
+  /**
+   * Plaintext source content. Blob payloads are structured-cloned without
+   * copying a full file through the worker message channel.
+   */
+  blob: Blob;
   byteLength: number;
   sourceByteLength: number;
-  /** True when `bytes` were decrypted from ciphertext in the source backup. */
+  /** True when `blob` was decrypted from ciphertext in the source backup. */
   isEncrypted: boolean;
   /** Hash of bytes as stored in the backup (ciphertext for encrypted backups). */
   sourceSha256: string;
@@ -570,6 +574,10 @@ export interface ReadSourceFileResponse {
   sha256: string;
   hashMatchesExpectedSha256?: boolean;
 }
+
+export type ExtractSourceFileRequest = ReadSourceFileRequest;
+
+export type ExtractSourceFileResponse = Omit<ReadSourceFileResponse, "blob">;
 
 export type ReadUnencryptedSourceFileRequest = ReadSourceFileRequest;
 export type ReadUnencryptedSourceFileResponse = ReadSourceFileResponse;
@@ -579,7 +587,8 @@ export interface CreateAttachmentThumbnailRequest {
   cacheKey: string;
   mediaKind: DbAttachmentMediaKind;
   mime?: string;
-  bytes: Uint8Array;
+  /** Original attachment content, kept byte-free across the worker RPC. */
+  blob: Blob;
   maxPixelSize?: number;
 }
 
@@ -700,6 +709,12 @@ export interface BackupWorkerApi {
     request: ReadSourceFileRequest,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<ReadSourceFileResponse>>;
+  extractSourceFile(
+    root: FileSystemDirectoryHandle,
+    request: ExtractSourceFileRequest,
+    destination: FileSystemFileHandle,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<ExtractSourceFileResponse>>;
   /** @deprecated Compatibility/test seam. Use ingestBackupToDb. */
   ingestUnencryptedBackup(
     root: FileSystemDirectoryHandle,
