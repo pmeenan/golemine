@@ -23,9 +23,10 @@ offline after the first load.
   all-or-thread-scoped results, and jump-to-context.
 - Preview native image, HEIC, and video attachments when Chrome/the media worker can
   decode them, and extract original attachment files back to disk.
-- Select messages into a report and export a print-ready, court-exhibit-grade PDF
-  including forensic provenance (file hashes, device identity, message GUIDs,
-  explicit timezones) in a later milestone.
+- Select messages from timelines or search results into multiple named reports,
+  order them, add notes/case metadata, and export a print-ready,
+  court-exhibit-grade PDF through Chrome with source hashes, device identity,
+  message GUIDs/raw timestamps, and an explicit timezone.
 - Keep a "recent backups" list with friendly names for quick re-opening.
 - Android backup support is planned (see `docs/Decisions.md` D-007).
 
@@ -39,7 +40,7 @@ offline after the first load.
 
 ## Status
 
-M5.5 is implemented for encrypted and unencrypted iPhone backups. The repo contains the strict
+M6 is implemented for encrypted and unencrypted iPhone backups. The repo contains the strict
 Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
@@ -86,8 +87,8 @@ preview caps, compact search panes at the desktop floor, and an on-demand detail
 overlay until the viewport is wide enough to dock all panes. Explicit group names are
 preserved; unnamed group threads list every non-self participant using contact first
 names when available (for example, "Brian, Karin and Sean") instead of looking like a
-duplicate one-to-one thread. Derived database version 2 rebuilds older cached data so
-the corrected explicit-name semantics apply to existing backups.
+duplicate one-to-one thread. Derived database version 3 rebuilds older cached data for
+the report ordering schema and the corrected explicit-name semantics.
 Long normalization and write stages now surface throttled item-count progress, so large
 message backups show advancing counts during otherwise long-running steps.
 The M2 path is hardened for real-world backup quirks: stale/torn SQLite WAL tails are
@@ -131,6 +132,28 @@ and shorter sparse prefixes are zero-extended. Previews cross the worker boundar
 Blobs, while extraction writes decrypt chunks directly to the user-selected file
 instead of materializing the former 1 GiB array. Failed extraction aborts atomically
 without deleting a destination file that may already have existed.
+
+Messages and search results now expose one shared report picker. It can create and
+toggle multiple named reports without putting portal UI inside virtualized rows, and
+every saved report is reachable from the backup overview's Reports tile through a
+dedicated per-backup report list. The
+report builder stores explicit item order, per-item notes, title, matter, preparer,
+and an IANA timezone in the per-backup SQLite database. Same-version message-index
+rebuilds preserve reports and notes, pruning only selections whose source message no
+longer exists; backup replacement, version migration, and Remove backup still wipe
+the affected local report state. The print view embeds readable source images,
+re-reads every included attachment to capture labeled plaintext and stored-source
+SHA-256 values, includes the exact source `sms.db` hashes captured during ingest,
+and renders the selected messages as a transcript matching the Messages workspace:
+sent/received alignment, service colors, attachment previews inside bubbles,
+reactions/status, and full labeled timestamps. Neutral margin numbers link each
+message to a separate metadata section after the transcript containing report notes,
+participants, message GUID/row/raw timestamp fields, attachment source details/hashes,
+and reaction provenance. The final appendix prints device/backup identity,
+tool/build/export metadata, and methodology. Encrypted attachment preparation uses
+the existing session-only password form and locks the worker again before printing.
+Chrome's print dialog provides the PDF destination; print CSS forces a light,
+shadow-free exhibit theme with repeated title/footer metadata and page counters.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

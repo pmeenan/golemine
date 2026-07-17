@@ -4,23 +4,27 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M5.5 implemented and review-hardened — encrypted and unencrypted
-Manifest/source databases stream through per-backup transient OPFS staging and
-callback-based `opfs-sahpool` import instead of full plaintext arrays or wasm-heap
-copies (D-041). WAL frames apply by random access to the staged main file with
-D-021/D-022/D-025 semantics unchanged; commit validation is now checkpoint-tolerant
-(final-commit structural bound plus a hostility cap) with a bounded-memory two-phase
-fallback (D-042). Plaintext and opt-in ciphertext SHA-256 values fold single-pass
-during the decrypt read, source previews cross worker RPC as Blobs (decrypted in
-memory, not staged), and extraction decrypts directly into the save-picker writable
-with an explicit post-close commit point. The former 512 MiB Manifest / 1 GiB
-source-set RAM caps are replaced by pre-prepare OPFS-quota checks and generous
-absolute hostile-metadata bounds. Session lock/eviction drains reads and deletes
-staged plaintext, every encrypted ingest ends by locking its session (D-043), a
-fresh worker sweeps crash leftovers, and Remove backup wipes the parent directory.
-Wrong-password verification, the sole destructive `prepare` boundary, provenance,
-offline privacy, M4 browse/search, and all earlier hardening remain intact. Next is
-M6 — reports and export.**
+**Current status: M6 implemented — timeline and search rows add/remove messages through
+one report picker with multiple named reports; the derived DB stores ordered items,
+notes, case metadata, and explicit IANA timezones at schema version 3. The builder
+supports reorder/remove/note editing, same-version rebuilds preserve reports while
+pruning vanished messages, and the print route embeds source images plus a provenance
+appendix containing device/backup identity, source `sms.db` hashes, freshly re-read
+attachment plaintext/stored-source hashes, tool/build/export metadata, and raw
+per-message identifiers. The print document now mirrors the Messages workspace as a
+transcript-first view, with sent/received bubbles, in-bubble attachments, and neutral
+margin numbers cross-referenced by a separate message metadata section. Encrypted
+report preparation reuses the session-only password
+form and locks again after source reads. Chrome print CSS forces the Lode light exhibit
+theme, repeats title/footer/timezone metadata with page counters, and avoids splitting
+message evidence blocks. Unit and Playwright coverage exercise persistence, rebuild
+durability, timeline/search selection, both UI themes, print-media rules, provenance,
+and the `window.print()` export action (D-044). A post-implementation review pass
+added the `/backup/:id/reports` list route (the overview tile's target), stale-version
+recents gating on read, FK-independent report deletes, root-stamped `@page` print
+variables, a picker-side item cap, lenient report list reads, batch report hydration,
+and shared sqlite/report-limit/dialog-shell helper modules (D-045). Next is M7 —
+polish and hardening.**
 
 ## M0 — Scaffolding
 
@@ -426,12 +430,29 @@ dependency was added (prefer none).
 
 Goal: court-exhibit-grade report from selected messages.
 
-- [ ] Selection model: add/remove messages to a report from timeline + search results; multiple named reports per backup.
-- [ ] Report builder page: ordered items, per-item notes, case metadata form (title, matter, preparer).
-- [ ] Print rendering per Design.md §9: paginated print CSS, message bubbles with full timestamps + participants, attachment images embedded, page headers/footers (report title, page N of M, timezone label), no split bubbles across pages.
-- [ ] Provenance appendix per Architecture §8 (SHA-256 of source sms.db + report attachments, device/backup identity, tool version, methodology note).
-- [ ] Timezone selection for the report, labeled on every page.
-- [ ] Export via Chrome print-to-PDF; e2e test asserts print view content.
+- [x] Selection model: add/remove messages to a report from timeline + search results; multiple named reports per backup.
+- [x] Report builder page: ordered items, per-item notes, case metadata form (title, matter, preparer).
+- [x] Print rendering per Design.md §9: paginated print CSS, message bubbles with full timestamps + participants, attachment images embedded, page headers/footers (report title, page N of M, timezone label), no split bubbles across pages.
+- [x] Transcript-first print refinement: mirror Messages workspace alignment, service
+      colors, attachment placement, reactions/status, and displayed timestamps for the
+      selected messages; number transcript messages in the outside gutter and move
+      report notes plus per-message/attachment/reaction metadata to a cross-referenced
+      section beginning on a new page after the transcript.
+- [x] Provenance appendix per Architecture §8 (SHA-256 of source sms.db + report attachments, device/backup identity, tool version, methodology note).
+- [x] Timezone selection for the report, labeled on every page.
+- [x] Export via Chrome print-to-PDF; e2e test asserts print view content.
+- [x] Report durability hardening: same-schema rebuilds retain reports/notes and
+      remove only selections for messages absent from the rebuilt source; version
+      migrations, backup replacement, and Remove backup continue to wipe report state.
+- [x] M6 review fixes (D-045): dedicated `/backup/:id/reports` list route with the
+      overview Reports tile pointing at it; recents reads present stale
+      `derivedDbVersion` records as `needs-reingest`; explicit transactional report
+      deletes plus factory-level `PRAGMA foreign_keys = ON`; `@page` header/footer
+      variables stamped on the root element; picker add-path `maxReportItems` cap and
+      sparse-position removals (no renumbering); lenient skip-and-degrade report list
+      reads; batch report item hydration; typed factory errors preserved by report
+      RPCs; post-read session lock on every unlocked print-preparation path; shared
+      `sqlite-helpers`/`report-limits`/`dialog-shell`/db test-support modules.
 
 ## M7 — Polish & hardening
 

@@ -520,6 +520,86 @@ export interface ListSearchConversationsResponse {
   coverage: SearchCoverage;
 }
 
+export interface ReportCaseMetadata {
+  matter: string;
+  preparer: string;
+  timezone: string;
+}
+
+export interface DbReportSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  caseMetadata: ReportCaseMetadata;
+  itemCount: number;
+}
+
+export interface DbReportItem {
+  message: DbMessageRecord;
+  conversation: DbConversationSummary;
+  addedAt: string;
+  note: string;
+  position: number;
+}
+
+export interface DbReport extends DbReportSummary {
+  items: DbReportItem[];
+}
+
+export interface ListReportsRequest {
+  backupId: string;
+}
+
+export interface ListReportsResponse {
+  reports: DbReportSummary[];
+}
+
+export interface CreateReportRequest {
+  backupId: string;
+  title: string;
+  timezone: string;
+}
+
+export interface GetReportRequest {
+  backupId: string;
+  reportId: string;
+}
+
+export interface GetMessageReportMembershipRequest {
+  backupId: string;
+  messageId: string;
+}
+
+export interface GetMessageReportMembershipResponse {
+  reportIds: string[];
+}
+
+export interface SetMessageReportMembershipRequest {
+  backupId: string;
+  messageId: string;
+  reportId: string;
+  selected: boolean;
+}
+
+export interface SaveReportItemInput {
+  messageId: string;
+  note: string;
+}
+
+export interface SaveReportRequest {
+  backupId: string;
+  reportId: string;
+  title: string;
+  caseMetadata: ReportCaseMetadata;
+  items: SaveReportItemInput[];
+}
+
+export interface DeleteReportRequest {
+  backupId: string;
+  reportId: string;
+}
+
 /**
  * Credentials exist only on the unlock/ingest RPC call. Implementations must
  * never retain this object or include it in persisted state, logs, or errors.
@@ -788,6 +868,34 @@ export interface DbWorkerApi {
     request: ListSearchConversationsRequest,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<ListSearchConversationsResponse>>;
+  listReports(
+    request: ListReportsRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<ListReportsResponse>>;
+  createReport(
+    request: CreateReportRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<DbReportSummary>>;
+  getReport(
+    request: GetReportRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<DbReport | undefined>>;
+  getMessageReportMembership(
+    request: GetMessageReportMembershipRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<GetMessageReportMembershipResponse>>;
+  setMessageReportMembership(
+    request: SetMessageReportMembershipRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<GetMessageReportMembershipResponse>>;
+  saveReport(
+    request: SaveReportRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<DbReport>>;
+  deleteReport(
+    request: DeleteReportRequest,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<boolean>>;
 }
 
 export interface MediaWorkerApi {

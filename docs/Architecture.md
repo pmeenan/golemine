@@ -323,8 +323,8 @@ attachments(id, message_id, filename, mime, bytes, source_path, source_domain,
 reactions(id, target_message_id, sender_id, kind, sent_at_utc, raw_timestamp,
           source_guid, source_rowid)
 messages_fts(body)   -- FTS5, external-content table on messages
-report_items(report_id, message_id, added_at, note)
-reports(id, title, created_at, case_meta_json)
+report_items(report_id, message_id, added_at, position, note)
+reports(id, title, created_at, updated_at, case_meta_json)
 ingest_meta(key, value)  -- summary_json (machine-read ingest summary) + scalar debug rows
 ```
 
@@ -345,6 +345,11 @@ written under `thumbs/contact-avatars/` and referenced by path metadata in SQLit
 Attachment source hashes may be absent for large, unknown-size, deceptive-size, or
 budget-deferred media; the source path, domain, GUID, and manifest/source-file
 provenance are still kept so report/export code can hash selected originals on demand.
+Same-version rebuilds preserve the `reports` and `report_items` tables because report
+notes are user-authored, not reconstructable parser output. Finalize prunes report
+items whose message no longer exists in the rebuilt source. Schema-version changes,
+confirmed backup replacement, and Remove backup still clear reports with the rest of
+that backup's incompatible/retired local data (D-044).
 
 The db-worker query API lives in `src/workers/db/queries.ts`. `listConversations`
 (also exposed as `listThreads`) returns a recency-sorted virtualized page with
@@ -392,6 +397,8 @@ Routes (react-router, all client-side):
   an accessible overlay otherwise. Conversation/timeline/search pages are bounded and
   load additional windows. Attachment previews and extraction read source bytes
   lazily through backup-worker.
+- `/backup/:id/reports` — saved-report list for the backup (the overview's Reports
+  tile links here); each entry opens the builder.
 - `/backup/:id/report/:reportId` — report builder: ordered selected messages, case
   metadata form, print preview.
 - `/backup/:id/report/:reportId/print` — print-optimized rendering (see §8).
@@ -418,14 +425,34 @@ Every report includes a **provenance appendix**, generated at export time:
   labeled as such).
 - Extraction record: tool name + version + commit, export timestamp (UTC), timezone used
   for displayed timestamps (explicitly labeled on every page).
-- Per-message provenance: source GUID, source row id, raw timestamp value alongside the
-  human-readable rendering.
+- Per-message provenance: source GUID, source row id, and raw timestamp value in a
+  numbered metadata section after the human-readable transcript. Neutral margin
+  numbers cross-reference transcript bubbles to those records without crowding raw
+  source fields into the conversation rendering.
 - Methodology note: brief fixed text describing how data was read (read-only, from an
   iTunes/Finder backup) and a pointer to the open-source code.
 
 Timestamps: stored as UTC + raw source value; displayed in a user-selected timezone
 (default: report author's choice, defaulting to device-local if known), with the
 timezone printed on the report. Never display an ambiguous local time.
+
+M6 implements report persistence through typed db-worker operations in
+`src/workers/db/reports.ts`; React never issues SQL. Timeline/search controls open one
+Radix picker outside the virtualized rows, and the builder performs ordered atomic
+saves. At print preparation the backup worker re-reads every selected attachment by
+exact Manifest domain/path and returns both plaintext and stored-source hashes; image
+Blobs are embedded only in memory for the route lifetime. The source database hashes
+were already computed from exact source bytes during ingest and are read from the
+version-gated ingest summary when the appendix is assembled. Encrypted preparation
+uses a fresh route worker session, never persists the password/keys, and explicitly
+locks after reads. The print action stays disabled until provenance preparation has
+completed; per-attachment failures remain visible in the appendix instead of being
+silently omitted. The print document is transcript-first: selected messages preserve
+the Messages workspace's sent/received alignment, normalized service colors,
+in-bubble attachment treatment, reactions, status, and displayed timestamps. A
+page-breaking numbered metadata section follows the transcript with report notes,
+participants, message source identifiers, attachment source fields/hashes, and
+reaction provenance before the backup-wide provenance appendix (D-044).
 
 ## 9. Encrypted backups
 

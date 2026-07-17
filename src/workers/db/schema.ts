@@ -9,7 +9,33 @@ export type DerivedSqliteStatement = ReturnType<DerivedSqliteDatabase["prepare"]
 export const derivedDatabaseFilename = "golemine.sqlite";
 export const contactAvatarRelativeDirectory = "thumbs/contact-avatars";
 
+/**
+ * User-authored tables survive same-version ingest resets (D-044): their
+ * contents (report names, notes, case metadata) cannot be rebuilt from the
+ * source backup. Version migrations still wipe them. Add future user-authored
+ * tables here instead of special-casing the reset script.
+ */
+const userAuthoredTables = ["report_items", "reports"] as const;
+
+/** Rebuildable normalized tables, dropped on every ingest reset. */
+const derivedTables = [
+  "reactions",
+  "attachments",
+  "messages",
+  "conversation_participants",
+  "contact_avatars",
+  "participants",
+  "conversations",
+  "ingest_meta",
+] as const;
+
 export function resetDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
+  const currentVersion = Number(db.selectValue("PRAGMA user_version;"));
+  const preserveUserAuthoredTables = currentVersion === derivedDbVersion;
+  const droppedTables = preserveUserAuthoredTables
+    ? derivedTables
+    : [...userAuthoredTables, ...derivedTables];
+
   db.exec(`
     PRAGMA foreign_keys = OFF;
 
@@ -18,19 +44,24 @@ export function resetDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
     DROP TRIGGER IF EXISTS messages_au;
 
     DROP TABLE IF EXISTS messages_fts;
-    DROP TABLE IF EXISTS report_items;
-    DROP TABLE IF EXISTS reports;
-    DROP TABLE IF EXISTS reactions;
-    DROP TABLE IF EXISTS attachments;
-    DROP TABLE IF EXISTS messages;
-    DROP TABLE IF EXISTS conversation_participants;
-    DROP TABLE IF EXISTS contact_avatars;
-    DROP TABLE IF EXISTS participants;
-    DROP TABLE IF EXISTS conversations;
-    DROP TABLE IF EXISTS ingest_meta;
+    ${droppedTables.map((table) => `DROP TABLE IF EXISTS ${table};`).join("\n    ")}
   `);
 
   createDerivedDatabaseSchema(db);
+}
+
+/**
+ * Removes report selections whose normalized message no longer exists after a
+ * same-version rebuild. Owned here with the report-table declarations so
+ * report-table knowledge stays out of the ingest writer.
+ */
+export function pruneOrphanedReportItems(db: DerivedSqliteDatabase): void {
+  db.exec(`
+    DELETE FROM report_items
+    WHERE NOT EXISTS (
+      SELECT 1 FROM messages WHERE messages.id = report_items.message_id
+    );
+  `);
 }
 
 export function createDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
@@ -132,6 +163,7 @@ export function createDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
       case_meta_json TEXT NOT NULL
     );
 
@@ -139,6 +171,7 @@ export function createDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
       report_id TEXT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
       message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
       added_at TEXT NOT NULL,
+      position INTEGER NOT NULL CHECK (position >= 0),
       note TEXT,
       PRIMARY KEY (report_id, message_id)
     );
@@ -193,5 +226,7 @@ export function createDerivedDatabaseSchema(db: DerivedSqliteDatabase): void {
       ON reactions(target_message_id);
     CREATE INDEX IF NOT EXISTS idx_report_items_message
       ON report_items(message_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_report_items_position
+      ON report_items(report_id, position);
   `);
 }

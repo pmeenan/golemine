@@ -545,6 +545,15 @@ export function formatBytes(value: number | undefined): string {
   }).format(value >= 1024 * 1024 ? value / (1024 * 1024) : value >= 1024 ? value / 1024 : value);
 }
 
+/**
+ * Strips U+FFFC object-replacement placeholders (inline attachment markers in
+ * iOS message bodies) for rendering. Callers that need an emptiness check
+ * should test `cleanMessageBody(body).trim().length`.
+ */
+export function cleanMessageBody(body: string): string {
+  return body.replaceAll("￼", "");
+}
+
 export function participantLabel(input: {
   contactName?: string;
   handle: string;

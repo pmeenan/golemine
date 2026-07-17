@@ -7,11 +7,12 @@ import { WorkspaceCapabilityGate } from "../features/m1/capability-gate";
 import { AndroidGuideRoute, IphoneGuideRoute } from "../features/m1/guide-routes";
 import { LandingRoute } from "../features/m1/landing-route";
 import { MessagesRoute } from "../features/m3/messages-route";
+import { NotFoundRoute } from "../features/m0/route-placeholders";
 import {
-  NotFoundRoute,
   PrintReportRoute,
   ReportRoute,
-} from "../features/m0/route-placeholders";
+  ReportsRoute,
+} from "../features/report/report-routes";
 
 function workspaceRoute(element: ReactNode) {
   return <WorkspaceCapabilityGate>{element}</WorkspaceCapabilityGate>;
@@ -41,6 +42,10 @@ const router = createBrowserRouter([
       {
         path: "/backup/:id/messages",
         element: workspaceRoute(<MessagesRoute />),
+      },
+      {
+        path: "/backup/:id/reports",
+        element: workspaceRoute(<ReportsRoute />),
       },
       {
         path: "/backup/:id/report/:reportId",

@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { derivedDbVersion } from "../../lib/constants";
 import {
-  formatWorkerErrorPayload,
   type BackupIngestRequest,
   type DbWorkerApi,
-  type WorkerResult,
 } from "../../lib/worker-types";
+import {
+  closeMemoryDatabases,
+  createMemoryDatabase,
+  unwrap,
+} from "./derived-db.test-support";
 import {
   createDbWorkerIngestApi,
   type ContactAvatarStore,
@@ -18,15 +21,8 @@ import {
   createDbWorkerQueryApi,
 } from "./queries";
 import { derivedDatabaseFilename, type DerivedSqliteDatabase } from "./schema";
-import { getSqlite } from "../shared/sqlite-init";
 
-const openDatabases: DerivedSqliteDatabase[] = [];
-
-afterEach(() => {
-  while (openDatabases.length > 0) {
-    openDatabases.pop()?.close();
-  }
-});
+afterEach(closeMemoryDatabases);
 
 describe("db-worker queries", () => {
   it("lists conversations by recency with participants and last-message previews", async () => {
@@ -1705,23 +1701,6 @@ async function seedDataset(
       ],
     }),
   );
-}
-
-async function createMemoryDatabase(): Promise<DerivedSqliteDatabase> {
-  const sqlite3 = await getSqlite();
-  const db = new sqlite3.oo1.DB(":memory:", "c");
-
-  openDatabases.push(db);
-
-  return db;
-}
-
-function unwrap<TValue>(result: WorkerResult<TValue>): TValue {
-  if (!result.ok) {
-    throw new Error(formatWorkerErrorPayload(result.error));
-  }
-
-  return result.value;
 }
 
 const attachmentSha256 =

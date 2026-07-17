@@ -42,10 +42,15 @@ import { getSqlite, type Sqlite3Api } from "../shared/sqlite-init";
 import {
   contactAvatarRelativeDirectory,
   derivedDatabaseFilename,
+  pruneOrphanedReportItems,
   resetDerivedDatabaseSchema,
   type DerivedSqliteDatabase,
-  type DerivedSqliteStatement,
 } from "./schema";
+import {
+  runPrepared,
+  withTransaction,
+  type SqliteBindValue,
+} from "./sqlite-helpers";
 
 type SahPool = Awaited<ReturnType<Sqlite3Api["installOpfsSAHPoolVfs"]>>;
 /**
@@ -59,7 +64,6 @@ type InstallOpfsSahPoolVfsOptions = Parameters<
 >[0] & {
   forceReinitIfPreviouslyFailed?: boolean;
 };
-type SqliteBindValue = string | number | null | Uint8Array;
 type IngestApi = Pick<
   DbWorkerApi,
   "prepareIngest" | "writeIngestBatch" | "finalizeIngest" | "getIngestSummary"
@@ -188,6 +192,12 @@ export function createOpfsDerivedDatabaseFactory(): DerivedDatabaseFactory {
         cause,
       });
     }
+
+    // Foreign-key enforcement is per-connection and OFF by default in
+    // sqlite-wasm; report deletes rely on ON DELETE CASCADE, so every
+    // factory-opened connection enables it (schema creation re-asserts it on
+    // the ingest connection).
+    db.exec("PRAGMA foreign_keys = ON;");
 
     return {
       db,
@@ -373,6 +383,13 @@ class DbIngestController {
         const context = this.requireActiveIngest(report.backupId);
 
         await emitWorkerProgress("db", progress, "writing", "Writing ingest summary", 0, 2);
+
+        // Same-version rebuilds preserve user-authored reports. Remove only
+        // selections whose normalized message no longer exists in the new
+        // source snapshot; report metadata and surviving notes stay intact.
+        withTransaction(context.db, () => {
+          pruneOrphanedReportItems(context.db);
+        });
 
         const counts = readStoredIngestCounts(
           context.db,
@@ -948,38 +965,6 @@ function readDbIngestSummary(
   }
 
   return parsed;
-}
-
-function withTransaction<TValue>(
-  db: DerivedSqliteDatabase,
-  operation: () => TValue,
-): TValue {
-  db.exec("BEGIN IMMEDIATE;");
-
-  try {
-    const result = operation();
-
-    db.exec("COMMIT;");
-
-    return result;
-  } catch (cause) {
-    try {
-      db.exec("ROLLBACK;");
-    } catch {
-      // Preserve the original failure; rollback errors are secondary cleanup.
-    }
-
-    throw cause;
-  }
-}
-
-function runPrepared(
-  statement: DerivedSqliteStatement,
-  values: SqliteBindValue[],
-): void {
-  statement.clearBindings();
-  statement.bind(values);
-  statement.stepReset();
 }
 
 function boolToSql(value: boolean): number {

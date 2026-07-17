@@ -237,6 +237,17 @@ hover affordances there are CSS-driven.
   or 20. Pane headers: 48px tall, `--type-heading`, actions right.
 - **Selection:** selected list rows/messages get `--accent-subtle` background + 2px
   accent left bar (not just a tint — must survive screenshots/printing in grayscale).
+- **Report selection:** timeline and search-result rows expose the same compact
+  verb-first **Report** action. It opens one focus-managed Radix dialog outside the
+  virtualized lists; the dialog lists named reports with checkboxes, exact selected
+  message counts, builder links, and an inline named-report creator. Checkbox changes
+  update optimistically while the db-worker persists them and roll back with an inline
+  error on failure. Never portal a picker from inside a virtualized row.
+- **Report builder:** use a wide ordered evidence column plus a narrower case-metadata
+  column. Each item is one unsplittable card with message/sender/full timezone-labeled
+  timestamp, move/remove actions, and a bounded note field. Save is explicit; preparing
+  print saves first. Report title, matter, preparer, and timezone are labeled controls.
+  Destructive report deletion uses the standard named-object confirmation.
 - **Badges:** `--type-micro`, `--radius-full`, subtle backgrounds (`*-subtle` +
   `*-text`); filled badges reserved for counts on accent elements.
 - **Dialogs:** max-width `--layout-dialog-confirm` (30rem / 480px) for confirms and
@@ -393,9 +404,20 @@ Print is a first-class theme, not an afterthought:
   so bubble colors (iMessage blue / SMS green) reproduce accurately.
 - Serif is not used; Inter throughout, body 11pt, provenance/mono 9.5pt.
 - No shadows, no glass, no accent decoration; selection bars and UI chrome stripped.
+- The selected-message transcript mirrors the Messages workspace: received bubbles
+  align left, sent bubbles align right, iMessage/SMS/received colors keep their
+  normalized service semantics, attachment previews stay inside their bubble, and
+  reactions/status/timestamps remain adjacent to the message.
+- Give each transcript message a neutral number in its outside gutter. A message
+  metadata section starts on a new page after the transcript and uses the same numbers
+  for report notes, participants, service/state, source GUID/row/raw timestamp,
+  attachment source fields/hashes, and reaction provenance. Do not crowd raw metadata
+  into the transcript.
 - Every page: header (report title) + footer (page N of M, export timestamp UTC,
   displayed-timezone label).
-- Page breaks never split a message bubble or separate a bubble from its annotations.
+- Page breaks never split a message bubble or separate it from its number, attachment
+  previews, reactions, status, or displayed timestamp. Metadata records also stay
+  together when they fit on one page.
 
 ## 10. Voice & microcopy
 

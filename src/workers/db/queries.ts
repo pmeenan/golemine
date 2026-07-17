@@ -52,6 +52,7 @@ import {
   type DerivedDatabaseFactory,
 } from "./ingest-sink";
 import type { DerivedSqliteDatabase } from "./schema";
+import { selectRows } from "./sqlite-helpers";
 
 type SqliteBindValue = string | number | null;
 type QueryApi = Pick<
@@ -722,7 +723,7 @@ function readConversationPage(
   return rows.map(mapConversationRow);
 }
 
-function readConversation(
+export function readConversation(
   db: DerivedSqliteDatabase,
   conversationId: string,
 ): DbConversationSummary | undefined {
@@ -739,7 +740,7 @@ function readConversation(
   return row === undefined ? undefined : mapConversationRow(row);
 }
 
-function readConversationsByIds(
+export function readConversationsByIds(
   db: DerivedSqliteDatabase,
   conversationIds: readonly string[],
 ): DbConversationSummary[] {
@@ -762,7 +763,7 @@ function readConversationsByIds(
   return rows.map(mapConversationRow);
 }
 
-function hydrateConversations(
+export function hydrateConversations(
   db: DerivedSqliteDatabase,
   conversations: DbConversationSummary[],
 ): void {
@@ -892,7 +893,7 @@ function readMessagePage(
   return rows.map(mapMessageRow);
 }
 
-function readMessageById(
+export function readMessageById(
   db: DerivedSqliteDatabase,
   messageId: string,
 ): DbMessageRecord | undefined {
@@ -907,6 +908,32 @@ function readMessageById(
   ).at(0);
 
   return row === undefined ? undefined : mapMessageRow(row);
+}
+
+export function readMessagesByIds(
+  db: DerivedSqliteDatabase,
+  messageIds: readonly string[],
+): Map<string, DbMessageRecord> {
+  if (messageIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = createPlaceholders(messageIds.length);
+  const rows = selectRows<MessageRow>(
+    db,
+    `
+      SELECT${messageSelectColumns()}
+      FROM messages
+      WHERE id IN (${placeholders});
+    `,
+    [...messageIds],
+  );
+
+  return new Map(rows.map((row) => {
+    const message = mapMessageRow(row);
+
+    return [message.id, message];
+  }));
 }
 
 function hydrateMessagePreviews(
@@ -938,7 +965,7 @@ function hydrateMessagePreviews(
   }
 }
 
-function hydrateMessages(
+export function hydrateMessages(
   db: DerivedSqliteDatabase,
   messages: DbMessageRecord[],
 ): void {
@@ -2330,16 +2357,6 @@ function validateRequiredText(value: string, fieldName: string): void {
   }
 }
 
-function selectRows<TRow extends Record<string, unknown>>(
-  db: DerivedSqliteDatabase,
-  sql: string,
-  bind: readonly SqliteBindValue[] = [],
-): TRow[] {
-  return (
-    bind.length === 0 ? db.selectObjects(sql) : db.selectObjects(sql, [...bind])
-  ) as TRow[];
-}
-
 function readCount(
   db: DerivedSqliteDatabase,
   sql: string,
@@ -2440,7 +2457,7 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function toSafeNumber(value: unknown, fieldName: string): number {
+export function toSafeNumber(value: unknown, fieldName: string): number {
   const numberValue =
     typeof value === "bigint"
       ? Number(value)
@@ -2534,7 +2551,7 @@ function malformedRow(fieldName: string): DbQueryError {
   });
 }
 
-function toDbQueryWorkerError(
+export function toDbQueryWorkerError(
   cause: unknown,
   fallbackMessage: string,
   fallbackDetails: Record<string, WorkerStructuredValue>,

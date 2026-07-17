@@ -1,12 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { derivedDbVersion } from "../../lib/constants";
 import {
-  formatWorkerErrorPayload,
   type BackupIngestReport,
   type BackupIngestRequest,
   type DbWorkerApi,
   type NormalizedContactAvatar,
-  type WorkerResult,
 } from "../../lib/worker-types";
 import {
   contactAvatarRelativeDirectory,
@@ -15,11 +13,15 @@ import {
   type DerivedSqliteDatabase,
 } from "./schema";
 import {
+  closeMemoryDatabases,
+  createMemoryDatabase,
+  unwrap,
+} from "./derived-db.test-support";
+import {
   createDbWorkerIngestApi,
   type ContactAvatarStore,
   type DerivedDatabaseFactory,
 } from "./ingest-sink";
-import { getSqlite } from "../shared/sqlite-init";
 
 const testNow = new Date("2026-07-08T12:00:00.000Z");
 const avatarSha256 =
@@ -27,13 +29,7 @@ const avatarSha256 =
 const attachmentSha256 =
   "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
-const openDatabases: DerivedSqliteDatabase[] = [];
-
-afterEach(() => {
-  while (openDatabases.length > 0) {
-    openDatabases.pop()?.close();
-  }
-});
+afterEach(closeMemoryDatabases);
 
 describe("derived db schema", () => {
   it("creates the M2 tables, FTS table, triggers, and schema version", async () => {
@@ -522,23 +518,6 @@ async function insertMinimalMessageDataset(
       ],
     }),
   );
-}
-
-async function createMemoryDatabase(): Promise<DerivedSqliteDatabase> {
-  const sqlite3 = await getSqlite();
-  const db = new sqlite3.oo1.DB(":memory:", "c");
-
-  openDatabases.push(db);
-
-  return db;
-}
-
-function unwrap<TValue>(result: WorkerResult<TValue>): TValue {
-  if (!result.ok) {
-    throw new Error(formatWorkerErrorPayload(result.error));
-  }
-
-  return result.value;
 }
 
 const testRequest: BackupIngestRequest = {

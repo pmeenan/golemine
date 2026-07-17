@@ -966,3 +966,97 @@ relitigated:
   database opens, which can exceed memory budgets but are consumed as read-only
   Blobs; main databases decrypt-stream through `stageSourceFile` into the
   source-sqlite workspace instead.
+
+## D-044 — Reports stay worker-owned; same-version rebuilds preserve drafts; print preparation re-reads attachments (2026-07-16)
+
+M6 needs to persist user-authored report names, ordering, notes, and case metadata,
+select messages from virtualized timeline/search rows, and assemble a court-oriented
+print view without moving SQL, hashing, crypto, or hostile backup strings into unsafe
+layers.
+
+Decision:
+
+- Reports remain in the per-backup derived SQLite database behind typed db-worker
+  operations (`src/workers/db/reports.ts`). `report_items.position` is explicit and
+  report metadata stores `updated_at` plus bounded JSON case fields; schema version is
+  3. A single Radix picker owned by the messages route—not by a virtualized row—lists,
+  creates, and toggles multiple reports. The builder atomically replaces order/notes
+  after validating unique message ids, bounded text, and the IANA timezone.
+- Report drafts are user-authored and therefore survive a same-schema message-index
+  rebuild. `resetDerivedDatabaseSchema` retains report tables only when the existing
+  `user_version` equals the current version; finalize removes selections for messages
+  absent from the rebuilt source. A schema migration, confirmed backup replacement,
+  or Remove backup still wipes report state because compatibility/source identity is
+  no longer guaranteed.
+- The provenance appendix is assembled at print preparation. Exact source `sms.db`
+  plaintext/stored hashes already computed during ingest come from the version-gated
+  summary. Every included attachment is re-read by exact Manifest domain/path through
+  backup-worker so the appendix receives fresh plaintext and stored-source hashes and
+  any readable image can be embedded from an in-memory Blob. Read failures are printed
+  as unavailable provenance, never silently dropped. Encrypted preparation uses the
+  shared uncontrolled password form on a fresh route worker and explicitly locks after
+  the reads; no secret or preview Blob is persisted by the report route.
+- Export stays Chrome `window.print()`. The print action is disabled until provenance
+  preparation completes. `@page` margin boxes carry the title plus UTC export
+  timestamp/timezone and `counter(page)`/`counter(pages)`; evidence groups use
+  `break-inside: avoid`, UI chrome is hidden, and print forces the token-defined light
+  exhibit palette even when the app is dark. The selected-message portion is a
+  transcript rather than a series of evidence cards: it preserves the Messages
+  workspace's sent/received alignment, normalized service colors, in-bubble
+  attachments, reactions/status, and displayed timestamps. Neutral outside-gutter
+  numbers reference a page-breaking metadata section after the transcript, where
+  report notes, participants, source identifiers, attachment source fields/hashes,
+  and reaction provenance are recorded before the backup-wide appendix.
+
+Rationale: report state stays co-located with normalized message ids and behind the
+existing db-worker ownership boundary, rebuilds do not casually destroy authored
+work, provenance continues to originate in source-reading workers, and V1 produces a
+reviewable browser/PDF exhibit without adding a PDF dependency or weakening offline
+privacy.
+
+## D-045 — M6 review hardening: reachable reports, version-gated reads, FK-independent deletes, root-stamped print variables (2026-07-16)
+
+A post-implementation review of M6 found the reports UI unreachable (the overview
+tile linked a placeholder report id and no list route existed) plus a set of
+durability and correctness gaps in the report stack.
+
+Decision:
+
+- Reports get a dedicated list route (`/backup/:id/reports`, backed by
+  `listReports`); the backup overview's Reports tile targets it. Deep links to
+  individual reports remain `/backup/:id/report/:reportId`.
+- Recents reads apply the `derivedDbVersion` staleness rule, not just detection
+  writes: `reconcileRecordOnRead` presents records ingested under an older version
+  as `needs-reingest`, so route gates never open a derived DB whose schema predates
+  the running build. Presentation-only — nothing is persisted until the next write.
+- Report deletes never rely on `ON DELETE CASCADE`. SQLite foreign-key enforcement
+  is per-connection and OFF by default, so `deleteReport` removes `report_items`
+  explicitly inside one transaction; the OPFS database factory additionally runs
+  `PRAGMA foreign_keys = ON` on every connection it opens as defense in depth.
+- Report reads are lenient where writes are strict. Stored rows were validated when
+  written; re-validating on read against the current runtime (timezone support,
+  bounds) would let one drifted or corrupt row hide every report. `listReports`
+  maps rows skip-and-degrade: unsupported stored timezones fall back to UTC,
+  malformed metadata degrades to defaults, and a row that still fails to map is
+  skipped rather than failing the call.
+- The picker's add path enforces `maxReportItems` (shared with UI via
+  `src/workers/shared/report-limits.ts`) so a report can never grow past what
+  `saveReport` accepts, and item removal leaves positions sparse — renumbering under
+  the UNIQUE `(report_id, position)` index was collision-prone at the cap and
+  nothing requires density (reads order by position, inserts use MAX+1, saves
+  rewrite 0..n).
+- `@page` margin boxes resolve custom properties from the root element only, so the
+  print route stamps `--report-print-title`/`--report-print-footer` on
+  `document.documentElement` in a mount-scoped effect; element-level variables never
+  reach the printed running header/footer.
+- Report RPC error handling reuses `toDbQueryWorkerError` so typed factory codes
+  (`derived_db_pool_unavailable`, `sqlite_opfs_unavailable`) survive to the UI, and
+  encrypted print preparation locks the session in `finally` on every path that
+  unlocked it (terminating the route worker if the lock RPC fails).
+
+Rationale: the user-visible bug was an unreachable surface, but the underlying theme
+was write-path assumptions leaking into read/delete paths (connection-scoped FK
+state, current-runtime validation of stored rows, version checks applied only on
+write). Fixing each at the owning seam — recents read path, schema-declared
+user-authored tables (`userAuthoredTables` + `pruneOrphanedReportItems`), shared
+sqlite helpers — keeps the invariants in one place for future user-authored state.

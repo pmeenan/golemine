@@ -3,10 +3,12 @@ import type { DbWorkerApi } from "../../lib/worker-types";
 import { runDemoRoundTrip } from "../shared/demo";
 import { createDbWorkerIngestApi } from "./ingest-sink";
 import { createDbWorkerQueryApi } from "./queries";
+import { createDbWorkerReportApi } from "./reports";
 import { runSqliteSmoke } from "./sqlite-smoke";
 
 const ingestApi = createDbWorkerIngestApi();
 const queryApi = createDbWorkerQueryApi();
+const reportApi = createDbWorkerReportApi();
 
 export const dbWorkerApi: DbWorkerApi = {
   demoRoundTrip: (request, progress) => runDemoRoundTrip("db", request, progress),
@@ -22,6 +24,13 @@ export const dbWorkerApi: DbWorkerApi = {
   getMessageDetails: queryApi.getMessageDetails,
   searchMessages: queryApi.searchMessages,
   listSearchConversations: queryApi.listSearchConversations,
+  listReports: reportApi.listReports,
+  createReport: reportApi.createReport,
+  getReport: reportApi.getReport,
+  getMessageReportMembership: reportApi.getMessageReportMembership,
+  setMessageReportMembership: reportApi.setMessageReportMembership,
+  saveReport: reportApi.saveReport,
+  deleteReport: reportApi.deleteReport,
 };
 
 expose(dbWorkerApi);

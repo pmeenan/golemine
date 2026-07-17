@@ -48,3 +48,116 @@ select {
   background: var(--surface-glass);
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
 }
+
+.report-message-item {
+  padding-inline: var(--print-message-number-gutter);
+}
+
+.report-message-number {
+  align-items: center;
+  border-radius: var(--radius-full);
+  display: flex;
+  font-size: var(--font-size-print-provenance);
+  height: var(--print-message-number-size);
+  justify-content: center;
+  position: absolute;
+  top: var(--space-24);
+  width: var(--print-message-number-size);
+}
+
+.report-message-item-received .report-message-number {
+  left: 0;
+}
+
+.report-message-item-sent .report-message-number {
+  right: 0;
+}
+
+.report-message-stack {
+  display: flex;
+  flex-direction: column;
+  max-width: var(--print-bubble-max);
+}
+
+.report-message-bubble {
+  max-width: 100%;
+}
+
+@page {
+  margin: var(--print-page-margin);
+
+  @top-center {
+    content: var(--report-print-title);
+    font-family: "Inter Variable", Inter, ui-sans-serif, system-ui, sans-serif;
+    font-size: var(--font-size-print-provenance);
+  }
+
+  @bottom-center {
+    content: var(--report-print-footer) " / Page " counter(page) " of " counter(pages);
+    font-family: "Inter Variable", Inter, ui-sans-serif, system-ui, sans-serif;
+    font-size: var(--font-size-print-provenance);
+  }
+}
+
+@media print {
+  :root,
+  :root[data-theme="dark"] {
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root {
+    min-width: 0;
+    background: var(--print-bg);
+    color: var(--print-text);
+  }
+
+  .app-topbar,
+  .report-print-toolbar {
+    display: none;
+  }
+
+  .report-print-document {
+    --surface: var(--print-bg);
+    --surface-sunken: var(--print-surface-sunken);
+    --bubble-received: var(--print-surface-sunken);
+    --bubble-imessage: var(--print-bubble-imessage);
+    --bubble-sms: var(--print-bubble-sms);
+    --border: var(--print-border);
+    --text: var(--print-text);
+    --text-secondary: var(--print-text);
+    background: var(--print-bg);
+    color: var(--print-text);
+    font-size: var(--font-size-print-body);
+    line-height: var(--line-height-print-body);
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .report-print-document .font-mono,
+  .report-attachment-metadata,
+  .report-provenance-appendix dd {
+    font-size: var(--font-size-print-provenance);
+    line-height: var(--line-height-print-provenance);
+  }
+
+  .report-message-item,
+  .report-message-stack,
+  .report-message-bubble,
+  .report-item-note,
+  .report-attachments figure,
+  .report-message-metadata-item,
+  .report-attachment-metadata {
+    break-inside: avoid;
+  }
+
+  .report-message-bubble {
+    box-shadow: none;
+  }
+
+  .report-message-metadata,
+  .report-provenance-appendix {
+    break-before: page;
+  }
+}

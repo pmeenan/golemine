@@ -168,8 +168,12 @@ metal and the ore it surfaces; no clay/terracotta styling).
   ingest status across every entry point, applies the `derivedDbVersion` staleness
   rule, and retires stale records (wiping only derived-data directories the new
   record does not share). Recents parsing is skip-and-report per record; unknown
-  ingest statuses map to `needs-reingest` instead of rejecting the row, and persisted
-  interrupted `ingesting` records are recovered as `needs-reingest` on read. Only a
+  ingest statuses map to `needs-reingest` instead of rejecting the row. Every read
+  (`list`/`get`) passes through `reconcileRecordOnRead`, which recovers persisted
+  interrupted `ingesting` records as `needs-reingest` AND presents records ingested
+  under an older `derivedDbVersion` as `needs-reingest` — routes must never open a
+  derived DB whose schema predates the current version (the route gates rely on this;
+  do not gate on `ingestStatus` alone elsewhere). Only a
   successful `ingested` status stamps the current `derivedDbVersion`; `ingesting` and
   `failed` preserve the prior version.
   iOS IDs are normally UDIDs, so storage currently permits one active snapshot per
@@ -220,6 +224,16 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `src/workers/shared/media-mime.ts` (native-image + HEIC MIME sets),
   `src/workers/shared/media-limits.ts` (named small-read/preview/thumbnail
   budget constants, import-safe from UI code),
+  `src/workers/shared/report-limits.ts` (report title/field/note/item bounds shared
+  by the db-worker validators and UI `maxLength` attributes, import-safe from UI),
+  `src/workers/db/sqlite-helpers.ts` (`selectRows`, `withTransaction`, `runPrepared`,
+  `SqliteBindValue` — the single statement/transaction helpers for queries,
+  ingest-sink, and reports; never re-declare them per module),
+  `src/workers/db/derived-db.test-support.ts` (vitest-only in-memory sqlite factory
+  + `unwrap`, shared by the queries/ingest-sink/reports suites),
+  `src/components/ui/dialog-shell.css` (the `golemine-dialog-overlay`/
+  `golemine-dialog-content` centered-dialog animation classes — import the stylesheet
+  from every component that uses them),
   `src/workers/shared/incremental-sha256.ts` (dependency-free streaming integrity
   hasher with FIPS/NIST vectors; D-041 — `sha256BlobHex` accepts an optional
   `onChunk` tee and uses one native `crypto.subtle.digest` for un-teed Blobs at or
@@ -425,6 +439,55 @@ metal and the ore it surfaces; no clay/terracotta styling).
   Route cleanup sets `routeActiveRef` false before releasing clients; preserve the
   post-permission/pre-client and post-RPC guards so a deferred Chrome permission prompt
   cannot create or strand an encrypted worker after unmount.
+- M6 reports are worker-owned in `src/workers/db/reports.ts` and rendered by
+  `src/features/report/report-routes.tsx` (`/backup/:id/reports` list route —
+  the overview's Reports tile targets it — plus builder and print routes); the shared
+  messages-route picker lives in `src/features/report/report-picker-dialog.tsx`.
+  Report schema version 3 adds `report_items.position` and `reports.updated_at`.
+  Same-version ingest resets MUST preserve report tables because names/notes/case
+  metadata are user-authored; the preserved set is declared in `schema.ts`
+  (`userAuthoredTables`) and finalize prunes only selections whose message
+  disappeared via `pruneOrphanedReportItems` (also owned by schema.ts). Version
+  migrations, confirmed backup replacement, and Remove backup still wipe report
+  state (D-044). Keep report SQL inside db-worker and the one picker outside
+  virtualized rows. Builder saves validate bounded fields, unique message ids, and a
+  supported IANA timezone; the picker's add path enforces the same `maxReportItems`
+  cap (bounds live in `src/workers/shared/report-limits.ts`, import-safe from UI —
+  never re-hardcode them in `maxLength` attributes). Report deletes are explicit
+  transactional two-statement deletes: SQLite FK enforcement is per-connection, so
+  never rely on `ON DELETE CASCADE` alone (the OPFS factory now also runs
+  `PRAGMA foreign_keys = ON` per connection). Item removal leaves positions sparse
+  on purpose — nothing requires density and renumbering under the UNIQUE
+  (report_id, position) index is collision-prone. Read-side report row mapping is
+  lenient (skip-and-degrade: malformed metadata or a now-unsupported stored timezone
+  degrades that row instead of failing `listReports`), `readReport` hydrates items
+  through the batch `readMessagesByIds`/`readConversationsByIds` + one
+  `hydrateMessages`/`hydrateConversations` pass, and the report `run()` wrapper
+  preserves typed factory errors via `toDbQueryWorkerError` (never flatten
+  `derived_db_pool_unavailable`). Print preparation reads exact attachment Manifest
+  paths through backup-worker, labels plaintext vs stored-source SHA-256, embeds only
+  route-lifetime image Blob URLs, and discloses per-attachment failures in the
+  appendix. `sms.db` hashes come from the version-gated ingest summary. Encrypted
+  print preparation must use the shared uncontrolled password form, a fresh route
+  worker, and an explicit post-read lock that runs in `finally` on every unlocked
+  path (worker termination is the fallback if the lock RPC fails). Do not enable
+  `window.print()` before provenance preparation completes.
+  The print document is transcript-first: match the Messages workspace's sent/received
+  alignment and normalized bubble colors, keep attachment previews inside bubbles,
+  and keep reactions/status/displayed timestamps adjacent. Number messages in the
+  outside gutter and put report notes, participants, per-message source identifiers,
+  attachment source fields/hashes, and reaction provenance in the cross-referenced
+  `Message metadata` section after the transcript; do not move raw metadata back under
+  each bubble.
+  Print CSS uses token-defined forced-light values, `@page` title/footer/timezone plus
+  page counters, and `break-inside: avoid` for message/annotation evidence groups.
+  The `--report-print-title`/`--report-print-footer` variables MUST be stamped on
+  `document.documentElement` (the print route does this in an effect): `@page` margin
+  boxes resolve custom properties from the root element only, so variables on nested
+  elements never reach the printed header/footer.
+  `e2e/m6.spec.ts` covers timeline + search selection, multiple report persistence,
+  builder metadata, source attachment/image provenance, dark UI, print-media rules,
+  the print action, and the reports list route.
 - M4 unified browse/search is implemented in `src/features/m3/messages-route.tsx` and
   covered by `e2e/m3.spec.ts`; there is no standalone search route. It requires an
   `ingested` recent, uses `react-virtuoso` for conversation/timeline/result lists,

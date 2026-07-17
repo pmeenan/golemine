@@ -73,6 +73,7 @@ import {
   previewVideoMaxBytes,
 } from "../../workers/shared/media-limits";
 import {
+  cleanMessageBody,
   conversationTitle,
   type ConversationsState,
   formatBytes,
@@ -95,6 +96,10 @@ import {
   includePinnedSearchResult,
   selectScopedCachedSearchResult,
 } from "./search-result-pinning";
+import {
+  ManageReportsButton,
+  ReportPickerDialog,
+} from "../report/report-picker-dialog";
 
 const conversationPageSize = 100;
 const searchPageSize = 100;
@@ -282,6 +287,9 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
   const [activatedSearchResults, setActivatedSearchResults] = useState<
     ReadonlyMap<string, SearchMessageResult>
   >(() => new Map());
+  const [reportPickerMessage, setReportPickerMessage] = useState<
+    DbMessageRecord | undefined
+  >();
   const [searchResultActivationRevision, setSearchResultActivationRevision] =
     useState(0);
   const timelineStateRef = useRef<TimelineState>(timelineState);
@@ -1057,6 +1065,9 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
       return next;
     });
   }, [setSearchParams]);
+  const manageMessageReports = useCallback((message: DbMessageRecord) => {
+    setReportPickerMessage(message);
+  }, []);
   const focusEncryptedUnlock = useCallback(() => {
     if (!isRouteActive(routeActiveRef)) {
       return;
@@ -1585,6 +1596,7 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
               onLoadMore={() => {
                 void loadMoreSearchResults();
               }}
+              onManageReports={manageMessageReports}
               onRetry={retryResultsScope}
               onSelectResult={selectSearchResult}
             />
@@ -1610,6 +1622,7 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
             onLoadTimelinePage={(direction) => {
               void loadTimelinePage(direction);
             }}
+            onManageReports={manageMessageReports}
             onSelectMessage={selectMessage}
           />
         </MessagesPane>
@@ -1649,6 +1662,14 @@ function MessagesWorkspace({ record }: { record: RecentBackupRecord }) {
             </div>,
             document.body,
           )}
+      <ReportPickerDialog
+        getDbClient={getDbClient}
+        message={reportPickerMessage}
+        record={record}
+        onClose={() => {
+          setReportPickerMessage(undefined);
+        }}
+      />
     </EncryptedSessionContext.Provider>
   );
 }
@@ -2098,6 +2119,7 @@ function SearchResultsPane({
   isDisplayingPreviousScope,
   jumpMessageId,
   onLoadMore,
+  onManageReports,
   onRetry,
   onSelectResult,
   pinnedResult,
@@ -2109,6 +2131,7 @@ function SearchResultsPane({
   isDisplayingPreviousScope: boolean;
   jumpMessageId: string | undefined;
   onLoadMore: () => void;
+  onManageReports: (message: DbMessageRecord) => void;
   onRetry: () => void;
   onSelectResult: (result: SearchMessageResult) => void;
   pinnedResult: SearchMessageResult | undefined;
@@ -2206,6 +2229,9 @@ function SearchResultsPane({
               <SearchResultRow
                 isSelected={result.message.id === selectedMessageId}
                 result={result}
+                onManageReports={() => {
+                  onManageReports(result.message);
+                }}
                 onSelect={() => {
                   onSelectResult(result);
                 }}
@@ -2240,10 +2266,12 @@ function SearchResultsPane({
 
 function SearchResultRow({
   isSelected,
+  onManageReports,
   onSelect,
   result,
 }: {
   isSelected: boolean;
+  onManageReports: () => void;
   onSelect: () => void;
   result: SearchMessageResult;
 }) {
@@ -2255,40 +2283,42 @@ function SearchResultRow({
       : participantLabel(result.message.sender);
 
   return (
-    <button
+    <div
       aria-current={isSelected ? "true" : undefined}
       className={cn(listRowClass, isSelected && listRowSelectedClass)}
       data-search-result-id={result.message.id}
       data-testid={`search-result-${String(result.message.sourceRowId)}`}
-      onClick={onSelect}
-      type="button"
+      tabIndex={-1}
     >
-      <span className="block truncate text-body font-[var(--font-weight-strong)] text-text">
-        {conversationTitle(result.conversation)}
-      </span>
-      <span className="mt-1 block truncate text-caption text-text-secondary">
-        {sender} / {formatDateTime(result.message.sentAtUtc)}
-      </span>
-      <span className="mt-2 block break-words text-body text-text">
-        {result.snippets.map((segment, index) => (
-          <span
-            className={cn(
-              segment.highlighted &&
-                "bg-accent-subtle text-accent-text underline decoration-accent-text",
-            )}
-            key={`${segment.text}-${String(index)}`}
-          >
-            {segment.text}
-          </span>
-        ))}
-      </span>
-      {result.message.attachments.length > 0 ? (
-        <span className="mt-2 block text-micro text-text-tertiary">
-          {result.message.attachments.length.toLocaleString()} attachment
-          {result.message.attachments.length === 1 ? "" : "s"}
+      <button className="block w-full text-left" onClick={onSelect} type="button">
+        <span className="block truncate text-body font-[var(--font-weight-strong)] text-text">
+          {conversationTitle(result.conversation)}
         </span>
-      ) : null}
-    </button>
+        <span className="mt-1 block truncate text-caption text-text-secondary">
+          {sender} / {formatDateTime(result.message.sentAtUtc)}
+        </span>
+        <span className="mt-2 block break-words text-body text-text">
+          {result.snippets.map((segment, index) => (
+            <span
+              className={cn(
+                segment.highlighted &&
+                  "bg-accent-subtle text-accent-text underline decoration-accent-text",
+              )}
+              key={`${segment.text}-${String(index)}`}
+            >
+              {segment.text}
+            </span>
+          ))}
+        </span>
+        {result.message.attachments.length > 0 ? (
+          <span className="mt-2 block text-micro text-text-tertiary">
+            {result.message.attachments.length.toLocaleString()} attachment
+            {result.message.attachments.length === 1 ? "" : "s"}
+          </span>
+        ) : null}
+      </button>
+      <ManageReportsButton className="mt-2" onClick={onManageReports} />
+    </div>
   );
 }
 
@@ -2471,6 +2501,7 @@ function TimelinePane({
   getMediaClient,
   jumpMessageId,
   onLoadTimelinePage,
+  onManageReports,
   onSelectMessage,
   record,
   runPreviewTask,
@@ -2484,6 +2515,7 @@ function TimelinePane({
   getMediaClient: () => MediaWorkerClient;
   jumpMessageId: string | undefined;
   onLoadTimelinePage: (direction: "after" | "before") => void;
+  onManageReports: (message: DbMessageRecord) => void;
   onSelectMessage: (messageId: string, conversationId: string) => void;
   record: RecentBackupRecord;
   runPreviewTask: RunPreviewTask;
@@ -2599,6 +2631,9 @@ function TimelinePane({
                 getMediaClient={getMediaClient}
                 isSelected={row.message.id === selectedMessageId}
                 message={row.message}
+                onManageReports={() => {
+                  onManageReports(row.message);
+                }}
                 record={record}
                 runEnd={row.runEnd}
                 runStart={row.runStart}
@@ -2631,6 +2666,7 @@ function MessageRow({
   getMediaClient,
   isSelected,
   message,
+  onManageReports,
   onSelect,
   record,
   runEnd,
@@ -2641,6 +2677,7 @@ function MessageRow({
   getMediaClient: () => MediaWorkerClient;
   isSelected: boolean;
   message: DbMessageRecord;
+  onManageReports: () => void;
   onSelect: () => void;
   record: RecentBackupRecord;
   runEnd: boolean;
@@ -2658,18 +2695,21 @@ function MessageRow({
 
   if (message.isSystemEvent) {
     return (
-      <button
+      <div
         className={cn(
-          "block w-full px-6 py-2 text-center",
+          "flex w-full items-center justify-center gap-2 px-6 py-2 text-center",
           isSelected && "bg-accent-subtle",
         )}
-        data-message-id={message.id}
         data-testid={`message-${String(message.sourceRowId)}`}
-        onClick={onSelect}
-        type="button"
       >
-        <span className="text-caption text-text-secondary">{message.body}</span>
-      </button>
+        {/* data-message-id must live on the focusable trigger: Details-close
+            focus return re-finds the trigger by this attribute and calls
+            .focus(), which silently no-ops on a non-focusable wrapper. */}
+        <button data-message-id={message.id} onClick={onSelect} type="button">
+          <span className="text-caption text-text-secondary">{message.body}</span>
+        </button>
+        <ManageReportsButton onClick={onManageReports} />
+      </div>
     );
   }
 
@@ -2727,7 +2767,7 @@ function MessageRow({
             tabIndex={0}
           >
             {message.attachments.length > 0 ? (
-              <span className={cn("grid max-w-full gap-2", message.body.replaceAll("\uFFFC", "").trim().length > 0 && "mb-2")}>
+              <span className={cn("grid max-w-full gap-2", cleanMessageBody(message.body).trim().length > 0 && "mb-2")}>
                 {message.attachments.map((attachment) => (
                   <AttachmentPreview
                     attachment={attachment}
@@ -2740,8 +2780,8 @@ function MessageRow({
                 ))}
               </span>
             ) : null}
-            {message.body.replaceAll("\uFFFC", "").trim().length > 0 ? (
-              <span className="whitespace-pre-wrap break-words">{message.body.replaceAll("\uFFFC", "")}</span>
+            {cleanMessageBody(message.body).trim().length > 0 ? (
+              <span className="whitespace-pre-wrap break-words">{cleanMessageBody(message.body)}</span>
             ) : null}
             {message.reactions.length > 0 ? (
               <span className="absolute -top-4 right-2 flex flex-wrap gap-1">
@@ -2772,6 +2812,10 @@ function MessageRow({
           >
             {formatDateTime(message.sentAtUtc)}
           </span>
+          <ManageReportsButton
+            className="mt-1 opacity-0 transition-opacity duration-fast ease-out group-focus-within:opacity-100 group-hover:opacity-100"
+            onClick={onManageReports}
+          />
           {message.reactions.length > 0 ? (
             <span className="mt-3 flex flex-wrap gap-1 text-caption text-text-secondary">
               {message.reactions.map((reaction) => (

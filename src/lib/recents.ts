@@ -117,11 +117,11 @@ export function createBackupRecentsStore(
 
   return {
     list: async () =>
-      sortRecentBackups((await persistence.list()).map(recoverInterruptedIngest)),
+      sortRecentBackups((await persistence.list()).map(reconcileRecordOnRead)),
     get: async (id) => {
       const record = await persistence.get(normalizeRecentBackupId(id));
 
-      return record === undefined ? undefined : recoverInterruptedIngest(record);
+      return record === undefined ? undefined : reconcileRecordOnRead(record);
     },
     findReplacementCandidate: async (detection, directoryHandle) => {
       const existing = await findRecordForDetection(persistence, detection);
@@ -481,10 +481,20 @@ function reconcileIngestStatus(
   return existing.ingestStatus;
 }
 
-function recoverInterruptedIngest(record: RecentBackupRecord): RecentBackupRecord {
-  return record.ingestStatus === "ingesting"
-    ? { ...record, ingestStatus: "needs-reingest" }
-    : record;
+/**
+ * Applies the same staleness rules as `reconcileIngestStatus` on every read:
+ * interrupted `ingesting` records recover as `needs-reingest`, and records
+ * ingested under an older `derivedDbVersion` are presented as
+ * `needs-reingest` so routes never open a derived database whose schema
+ * predates the current version. Presentation only — nothing is persisted
+ * until the next `recordDetection`/ingest write.
+ */
+function reconcileRecordOnRead(record: RecentBackupRecord): RecentBackupRecord {
+  const ingestStatus = reconcileIngestStatus(record);
+
+  return ingestStatus === record.ingestStatus
+    ? record
+    : { ...record, ingestStatus };
 }
 
 let recentsDatabasePromise: Promise<IDBDatabase> | undefined;

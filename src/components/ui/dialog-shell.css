@@ -1,0 +1,65 @@
+/*
+ * Shared centered-dialog shell animations for Radix dialogs (confirmation
+ * dialog, report picker). Import this stylesheet from every component that
+ * uses the classes so the animations never depend on another component
+ * happening to be bundled first.
+ */
+
+.golemine-dialog-overlay[data-state="open"] {
+  animation: golemine-dialog-overlay-in var(--dur-base) var(--ease-out);
+}
+
+.golemine-dialog-overlay[data-state="closed"] {
+  animation: golemine-dialog-overlay-out var(--dur-fast) var(--ease-out);
+}
+
+.golemine-dialog-content[data-state="open"] {
+  animation: golemine-dialog-content-in var(--dur-slow) var(--ease-out);
+}
+
+.golemine-dialog-content[data-state="closed"] {
+  animation: golemine-dialog-content-out var(--dur-base) var(--ease-out);
+}
+
+@keyframes golemine-dialog-overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes golemine-dialog-overlay-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes golemine-dialog-content-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + var(--space-8))) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes golemine-dialog-content-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .golemine-dialog-overlay[data-state],
+  .golemine-dialog-content[data-state] {
+    animation-duration: 0s;
+  }
+}

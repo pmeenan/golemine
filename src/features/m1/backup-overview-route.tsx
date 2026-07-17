@@ -504,10 +504,10 @@ export function BackupOverviewRoute() {
           to={`/backup/${encodeURIComponent(record.id)}/messages`}
         />
         <CapabilityLink
-          description="Report builder route reserved for selected messages."
+          description="Browse saved reports built from selected messages."
           icon={<FileText aria-hidden="true" className="size-5" />}
           label="Reports"
-          to={`/backup/${encodeURIComponent(record.id)}/report/draft`}
+          to={`/backup/${encodeURIComponent(record.id)}/reports`}
         />
       </div>
     </PageShell>
