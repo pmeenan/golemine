@@ -7,7 +7,19 @@ import {
 } from "lucide-react";
 import { Link } from "react-router";
 
-import { PageShell, Panel, PanelHeader } from "../../components/layout/page-shell";
+import guideEncryptedBackupDark from "../../assets/illustrations/guide-encrypted-backup-dark.webp";
+import guideEncryptedBackupLight from "../../assets/illustrations/guide-encrypted-backup-light.webp";
+import guideFindBackupDark from "../../assets/illustrations/guide-find-backup-dark.webp";
+import guideFindBackupLight from "../../assets/illustrations/guide-find-backup-light.webp";
+import guideOpenBackupDark from "../../assets/illustrations/guide-open-backup-dark.webp";
+import guideOpenBackupLight from "../../assets/illustrations/guide-open-backup-light.webp";
+import { DecorativeIllustration } from "../../components/brand/decorative-illustration";
+import {
+  IllustratedSection,
+  PageShell,
+  Panel,
+  PanelHeader,
+} from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 
@@ -81,59 +93,94 @@ export function IphoneGuideRoute() {
       title="iPhone backup guide"
     >
       <Panel>
-        <PanelHeader
-          badge={<Badge variant="accent">Finder or iTunes</Badge>}
-          description="Use a local backup folder. iCloud backups are not opened directly by this app."
-          title="Prepare the backup"
-        />
-        <ol className="mt-4 grid gap-3">
-          {iphoneSteps.map((step, index) => (
-            <li className="flex gap-3 rounded-md border border-border bg-surface-sunken p-3" key={step.label}>
-              <span className="inline-flex size-[var(--control-height-md)] shrink-0 items-center justify-center rounded-full bg-accent-subtle font-mono text-caption text-accent-text">
-                {index + 1}
-              </span>
-              <span className="min-w-0">
-                <span className="block text-body font-[var(--font-weight-strong)] text-text">
-                  {step.label}
-                </span>
-                <span className="mt-1 block text-caption text-text-secondary">{step.detail}</span>
-              </span>
-            </li>
-          ))}
-        </ol>
-      </Panel>
-
-      <Panel>
-        <PanelHeader
-          badge={<Badge variant="neutral">Mac</Badge>}
-          description="Use Finder on macOS Catalina or newer. Older macOS versions use iTunes instead."
-          title="Mac Finder steps"
-        />
-        <ol className="mt-4 grid gap-2">
-          {finderSteps.map((step, index) => (
-            <li className="flex gap-3 text-body text-text-secondary" key={step}>
-              <span className="font-mono text-caption text-text-tertiary">
-                {index + 1}
-              </span>
-              <span>{step}</span>
-            </li>
-          ))}
-        </ol>
-      </Panel>
-
-      <Panel>
-        <div className="flex items-start gap-3">
-          <span className="inline-flex size-[var(--control-height-lg)] items-center justify-center rounded-lg bg-surface-sunken text-text-tertiary">
-            <KeyRound aria-hidden="true" className="size-5" />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-heading text-text">Encrypted backup note</h2>
-            <p className="mt-1 text-body text-text-secondary">
-              The password is only needed when encrypted-backup ingest lands. It will never
-              be saved, uploaded, or written to derived storage.
-            </p>
+        <IllustratedSection
+          illustration={
+            <DecorativeIllustration
+              darkSrc={guideOpenBackupDark}
+              lightSrc={guideOpenBackupLight}
+            />
+          }
+          width="guide"
+        >
+          <div>
+            <PanelHeader
+              badge={<Badge variant="accent">Finder or iTunes</Badge>}
+              description="Use a local backup folder. iCloud backups are not opened directly by this app."
+              title="Prepare the backup"
+            />
+            <ol className="mt-4 grid gap-3">
+              {iphoneSteps.map((step, index) => (
+                <li className="flex gap-3 rounded-md border border-border bg-surface-sunken p-3" key={step.label}>
+                  <span className="inline-flex size-[var(--control-height-md)] shrink-0 items-center justify-center rounded-full bg-accent-subtle font-mono text-caption text-accent-text">
+                    {index + 1}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-body font-[var(--font-weight-strong)] text-text">
+                      {step.label}
+                    </span>
+                    <span className="mt-1 block text-caption text-text-secondary">{step.detail}</span>
+                  </span>
+                </li>
+              ))}
+            </ol>
           </div>
-        </div>
+        </IllustratedSection>
+      </Panel>
+
+      <Panel>
+        <IllustratedSection
+          illustration={
+            <DecorativeIllustration
+              darkSrc={guideFindBackupDark}
+              lightSrc={guideFindBackupLight}
+            />
+          }
+          width="guide"
+        >
+          <div>
+            <PanelHeader
+              badge={<Badge variant="neutral">Mac</Badge>}
+              description="Use Finder on macOS Catalina or newer. Older macOS versions use iTunes instead."
+              title="Mac Finder steps"
+            />
+            <ol className="mt-4 grid gap-2">
+              {finderSteps.map((step, index) => (
+                <li className="flex gap-3 text-body text-text-secondary" key={step}>
+                  <span className="font-mono text-caption text-text-tertiary">
+                    {index + 1}
+                  </span>
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </IllustratedSection>
+      </Panel>
+
+      <Panel>
+        <IllustratedSection
+          align="center"
+          illustration={
+            <DecorativeIllustration
+              darkSrc={guideEncryptedBackupDark}
+              lightSrc={guideEncryptedBackupLight}
+            />
+          }
+          width="guide"
+        >
+          <div className="flex items-start gap-3">
+            <span className="inline-flex size-[var(--control-height-lg)] items-center justify-center rounded-lg bg-surface-sunken text-text-tertiary">
+              <KeyRound aria-hidden="true" className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <h2 className="text-heading text-text">Encrypted backup note</h2>
+              <p className="mt-1 text-body text-text-secondary">
+                The password is only needed when encrypted-backup ingest lands. It will never
+                be saved, uploaded, or written to derived storage.
+              </p>
+            </div>
+          </div>
+        </IllustratedSection>
       </Panel>
 
       <Panel>

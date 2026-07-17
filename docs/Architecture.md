@@ -409,6 +409,17 @@ rendered as text nodes, never HTML. All visual/interaction design follows
 [Design.md](Design.md), including mandatory light + dark themes (system-auto with
 manual override) and the token-only styling rule.
 
+Approved in-app artwork is routed through the shared
+`src/components/brand/decorative-illustration.tsx` component. It renders both imported
+WebP variants and delegates visibility to CSS so system color-scheme changes and the
+manual `data-theme` override share one source of truth. Illustrations are decorative
+(`alt=""`, `aria-hidden`) and globally excluded from print output. `PageShell` keeps
+artwork separate from header actions through its `illustration` slot, while
+`IllustratedSection` centralizes the gate/guide grid, token-sized second track, and
+single-column print collapse. Workbox precaches WebP assets; native lazy loading avoids
+fetching the hidden theme variant, and the opacity-hidden drag overlay remains mounted
+so its visible variant is decoded before first interaction.
+
 ## 8. Reports (court-exhibit grade)
 
 A report is a curated, ordered set of messages plus case metadata, rendered as paginated

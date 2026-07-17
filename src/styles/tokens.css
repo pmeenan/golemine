@@ -89,6 +89,10 @@
   --layout-responsive-floor: 64rem;
   --layout-detail-dock: 96rem;
   --layout-workspace-min: 32rem;
+  --illustration-landing-width: 20rem;
+  --illustration-gate-width: 14rem;
+  --illustration-guide-width: 12rem;
+  --illustration-drop-width: 8rem;
   --print-page-margin: 18mm;
   --print-content-gap: 8mm;
   --print-bubble-max: 75%;

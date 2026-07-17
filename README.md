@@ -40,7 +40,8 @@ offline after the first load.
 
 ## Status
 
-M6 is implemented for encrypted and unencrypted iPhone backups. The repo contains the strict
+M7 polish is underway on top of the completed M6 reports milestone for encrypted and
+unencrypted iPhone backups. The repo contains the strict
 Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
@@ -154,6 +155,15 @@ tool/build/export metadata, and methodology. Encrypted attachment preparation us
 the existing session-only password form and locks the worker again before printing.
 Chrome's print dialog provides the PDF destination; print CSS forces a light,
 shadow-free exhibit theme with repeated title/footer metadata and page counters.
+
+The generated steampunk-automaton artwork is now integrated into the landing header,
+active drag/drop overlay, unsupported-browser gate, and iPhone guide. Paired WebP assets
+follow system, light, and dark themes without JavaScript theme selection, remain
+decorative to assistive technology, and are omitted from printed reports without
+leaving blank illustration columns. All variants are included in the PWA precache for
+offline guide/theme changes; native lazy loading avoids downloading the hidden variant
+during the initial page render, while the drag artwork is mounted and decoded before
+the first drag.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

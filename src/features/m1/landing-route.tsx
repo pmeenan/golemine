@@ -12,6 +12,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { Link, useNavigate } from "react-router";
 
+import dropTargetDark from "../../assets/illustrations/drop-target-dark.webp";
+import dropTargetLight from "../../assets/illustrations/drop-target-light.webp";
+import landingDark from "../../assets/illustrations/landing-dark.webp";
+import landingLight from "../../assets/illustrations/landing-light.webp";
+import { DecorativeIllustration } from "../../components/brand/decorative-illustration";
 import {
   EmptyState,
   PageShell,
@@ -339,6 +344,13 @@ export function LandingRoute() {
 
   return (
     <PageShell
+      illustration={
+        <DecorativeIllustration
+          className="w-[var(--illustration-landing-width)]"
+          darkSrc={landingDark}
+          lightSrc={landingLight}
+        />
+      }
       description="Open a local iPhone Finder or iTunes backup, recognize the device, and keep a private recent-backups list on this computer."
       eyebrow="Local backup workspace"
       title="Local backup workspace"
@@ -374,18 +386,42 @@ export function LandingRoute() {
 
           <div
             className={cn(
-              "mt-6 rounded-lg border border-dashed border-border-strong bg-surface-sunken p-6 text-center",
+              "relative mt-6 flex min-h-[calc(var(--illustration-drop-width)+var(--space-64)+var(--space-24))] flex-col items-center justify-center overflow-hidden rounded-lg border border-dashed border-border-strong bg-surface-sunken p-6 text-center",
               isDragging && "border-accent bg-accent-subtle",
             )}
+            data-backup-drop-target=""
             onDragLeave={onDragLeave}
             onDragOver={onDragOver}
             onDrop={onDrop}
           >
-            <HardDrive aria-hidden="true" className="mx-auto size-6 text-text-tertiary" />
-            <p className="mt-3 text-body text-text">Drop an iPhone backup folder</p>
-            <p className="mt-1 text-caption text-text-secondary">
-              Detection runs in the backup worker and reads only metadata files.
-            </p>
+            <div
+              aria-hidden={isDragging ? undefined : "true"}
+              className={cn(
+                "pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-accent-subtle p-4 transition-opacity duration-base ease-out",
+                isDragging ? "opacity-100" : "opacity-0",
+              )}
+              data-backup-drop-overlay=""
+              role="status"
+            >
+              <DecorativeIllustration
+                className="w-[var(--illustration-drop-width)]"
+                darkSrc={dropTargetDark}
+                lightSrc={dropTargetLight}
+              />
+              <p className="mt-2 text-body font-[var(--font-weight-strong)] text-accent-text">
+                Drop to open this backup
+              </p>
+            </div>
+            <div
+              aria-hidden={isDragging ? "true" : undefined}
+              className="flex flex-col items-center"
+            >
+              <HardDrive aria-hidden="true" className="size-6 text-text-tertiary" />
+              <p className="mt-3 text-body text-text">Drop an iPhone backup folder</p>
+              <p className="mt-1 text-caption text-text-secondary">
+                Detection runs in the backup worker and reads only metadata files.
+              </p>
+            </div>
           </div>
 
           <OpeningStatusMessage status={openingStatus} />

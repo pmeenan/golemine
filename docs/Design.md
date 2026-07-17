@@ -378,8 +378,10 @@ values retain the mono treatment from §2.
   stylesheet breakpoint, which would silently diverge from the token at non-default
   browser font sizes. Panes use hairline borders rather than gaps, and a
   collapsed detail pane consumes no width.
-- Landing/guides: single column, max-width 720px text / 960px content, generous
-  (48–64) vertical rhythm.
+- Landing/guides: one page-level column, max-width 720px text / 960px content, with
+  approved spot illustrations permitted as a fixed token-sized second column inside
+  a header or panel. Illustrated sections collapse to one content column in print.
+  Keep generous (48–64) vertical rhythm between page sections.
 - Responsive floor: `--layout-responsive-floor` (64rem / 1024px). At the floor,
   active-search Threads, Results, and Timeline use their compact tokens; they must not
   stack or introduce page-level horizontal scrolling. Details overlay below the 96rem
@@ -479,6 +481,19 @@ carry information that isn't also in text.
   Components stay theme-blind: render both and gate visibility with CSS theme
   selectors (or use `<picture>` + `prefers-color-scheme` where the manual override
   is also handled) — do not query the theme in JS to pick an image source.
+- Paired artwork is rendered through
+  `src/components/brand/decorative-illustration.tsx`. Semantic width tokens keep the
+  four approved placements consistent: `--illustration-landing-width`,
+  `--illustration-gate-width`, `--illustration-guide-width`, and
+  `--illustration-drop-width`. The shared component owns empty alternative text and
+  the print stylesheet removes every instance. `PageShell` exposes a dedicated
+  `illustration` slot; panel/gate two-column composition uses the shared
+  `IllustratedSection`, which owns alignment, token-width tracks, and print collapse.
+- In-app WebPs are part of the Workbox precache. Theme variants use native lazy
+  loading so `display: none` prevents the unused variant from competing with the app
+  shell. Interaction artwork that must be ready immediately (the drag overlay) stays
+  mounted in its final geometry and toggles opacity/accessibility state instead of
+  mounting on first interaction.
 - Illustrations are generated against the target background color and keyed to
   transparency (D-018); verify edges on both themes before shipping.
 - New generated assets follow the same pipeline: character sheet as context, target

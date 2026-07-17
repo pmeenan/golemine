@@ -89,7 +89,14 @@ metal and the ore it surfaces; no clay/terracotta styling).
   `docs/assets/golem-reference-sheet.png` — pass it as image context when generating
   any new golem artwork; never generate from a text prompt alone. In-app
   illustrations live in `src/assets/illustrations/` (paired `-light`/`-dark` WebP
-  variants, decorative only), the icon master in `src/assets/brand/`, the social
+  variants, decorative only) and render through
+  `src/components/brand/decorative-illustration.tsx` so system/manual theme switching,
+  lazy hidden-variant loading, empty alt text, and print exclusion stay centralized.
+  Use `PageShell`'s dedicated `illustration` prop for page headers and
+  `IllustratedSection` for fixed guide/gate columns so print collapse stays automatic.
+  The Workbox glob in `vite.config.ts` must keep `webp` precached, and interaction art
+  such as the drag overlay must remain mounted before first interaction; the icon master in
+  `src/assets/brand/`, the social
   card in `public/og-image.png` (referenced absolutely as
   `https://golemine.com/og-image.png` from `index.html`).
 - Static-host security headers live in `public/_headers`, and the pre-paint theme

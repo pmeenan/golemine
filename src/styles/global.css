@@ -49,6 +49,32 @@ select {
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
 }
 
+.golemine-illustration {
+  display: block;
+}
+
+.golemine-illustration-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .golemine-illustration-light {
+    display: none;
+  }
+
+  :root:not([data-theme="light"]) .golemine-illustration-dark {
+    display: block;
+  }
+}
+
+:root[data-theme="dark"] .golemine-illustration-light {
+  display: none;
+}
+
+:root[data-theme="dark"] .golemine-illustration-dark {
+  display: block;
+}
+
 .report-message-item {
   padding-inline: var(--print-message-number-gutter);
 }
@@ -114,6 +140,7 @@ select {
   }
 
   .app-topbar,
+  .golemine-illustration,
   .report-print-toolbar {
     display: none;
   }

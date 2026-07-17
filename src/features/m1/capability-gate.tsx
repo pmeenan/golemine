@@ -2,6 +2,10 @@ import { AlertTriangle, ExternalLink, HardDrive } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
+import gateDark from "../../assets/illustrations/gate-dark.webp";
+import gateLight from "../../assets/illustrations/gate-light.webp";
+import { DecorativeIllustration } from "../../components/brand/decorative-illustration";
+import { IllustratedSection } from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
@@ -73,22 +77,33 @@ function UnsupportedBrowserScreen({ snapshot }: { snapshot: BrowserCapabilitySna
   return (
     <main className="mx-auto flex min-h-[calc(100vh-var(--layout-top-bar))] w-full max-w-[var(--layout-content-text)] items-center px-6 py-12">
       <section className="w-full rounded-lg border border-border bg-surface p-6 shadow-1">
-        <div className="flex items-start gap-4">
-          <span className="inline-flex size-[var(--control-height-lg)] shrink-0 items-center justify-center rounded-lg bg-[var(--warning-subtle)] text-warning">
-            <AlertTriangle aria-hidden="true" className="size-5" />
-          </span>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-title text-text">Chrome is required for this workspace</h1>
-              <Badge variant="warning">Unsupported browser</Badge>
+        <IllustratedSection
+          align="center"
+          illustration={
+            <DecorativeIllustration
+              darkSrc={gateDark}
+              lightSrc={gateLight}
+            />
+          }
+          width="gate"
+        >
+          <div className="flex items-start gap-4">
+            <span className="inline-flex size-[var(--control-height-lg)] shrink-0 items-center justify-center rounded-lg bg-[var(--warning-subtle)] text-warning">
+              <AlertTriangle aria-hidden="true" className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-title text-text">Chrome is required for this workspace</h1>
+                <Badge variant="warning">Unsupported browser</Badge>
+              </div>
+              <p className="mt-2 text-body text-text-secondary">
+                Golemine opens phone backups directly from local folders and stores derived
+                data in Chrome's Origin Private File System. This browser is missing one or
+                more required APIs.
+              </p>
             </div>
-            <p className="mt-2 text-body text-text-secondary">
-              Golemine opens phone backups directly from local folders and stores derived
-              data in Chrome's Origin Private File System. This browser is missing one or
-              more required APIs.
-            </p>
           </div>
-        </div>
+        </IllustratedSection>
 
         <div className="mt-6 grid gap-3">
           {snapshot.checks.map((check) => (

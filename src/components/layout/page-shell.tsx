@@ -8,6 +8,7 @@ interface PageShellProps {
   children: ReactNode;
   description: string;
   eyebrow: string;
+  illustration?: ReactNode;
   maxWidth?: "text" | "wide" | "full";
   title: string;
 }
@@ -17,6 +18,7 @@ export function PageShell({
   children,
   description,
   eyebrow,
+  illustration,
   maxWidth = "wide",
   title,
 }: PageShellProps) {
@@ -37,10 +39,40 @@ export function PageShell({
             {description}
           </p>
         </div>
+        {illustration ? <div className="shrink-0">{illustration}</div> : null}
         {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
       </div>
       {children}
     </main>
+  );
+}
+
+export function IllustratedSection({
+  align = "start",
+  children,
+  illustration,
+  width,
+}: {
+  align?: "center" | "start";
+  children: ReactNode;
+  illustration: ReactNode;
+  width: "gate" | "guide";
+}) {
+  return (
+    <div
+      className={cn(
+        "grid gap-6 print:block",
+        align === "center" ? "items-center" : "items-start",
+        width === "gate" &&
+          "grid-cols-[minmax(0,1fr)_var(--illustration-gate-width)]",
+        width === "guide" &&
+          "grid-cols-[minmax(0,1fr)_var(--illustration-guide-width)]",
+      )}
+      data-illustrated-section=""
+    >
+      {children}
+      {illustration}
+    </div>
   );
 }
 

@@ -76,7 +76,7 @@ function postLoadRequestIsAllowed(request: Request, baseURL: string) {
     return true;
   }
 
-  return /^\/(assets\/|workbox-).+\.(css|ico|js|png|svg|wasm|woff2)$/.test(url.pathname);
+  return /^\/(assets\/|workbox-).+\.(css|ico|js|png|svg|wasm|webp|woff2)$/.test(url.pathname);
 }
 
 async function waitForServiceWorkerActivation(page: Page) {
@@ -124,12 +124,17 @@ async function ensureServiceWorkerControlsPage(page: Page) {
     .toBe(true);
 }
 
-async function reloadOffline(context: BrowserContext, page: Page) {
+async function runOffline(
+  context: BrowserContext,
+  page: Page,
+  verify: () => Promise<void>,
+) {
   await context.setOffline(true);
 
   try {
     await page.reload({ waitUntil: "domcontentloaded" });
     await expectAppShell(page);
+    await verify();
   } finally {
     await context.setOffline(false);
   }
@@ -283,7 +288,33 @@ test.describe("network guardrail without service worker mediation", () => {
 test("reloads offline after the generated service worker is installed", async ({ context, page }) => {
   await page.goto("/", { waitUntil: "networkidle" });
   await expectAppShell(page);
+  await page.getByRole("button", { name: "Use light theme" }).click();
   await waitForServiceWorkerActivation(page);
   await ensureServiceWorkerControlsPage(page);
-  await reloadOffline(context, page);
+  await runOffline(context, page, async () => {
+    await page.goto("/guide/iphone", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("heading", { level: 1, name: "iPhone backup guide" }),
+    ).toBeVisible();
+
+    for (const tone of ["light", "dark"] as const) {
+      await page.getByRole("button", { name: `Use ${tone} theme` }).click();
+
+      for (const assetName of [
+        "guide-open-backup",
+        "guide-find-backup",
+        "guide-encrypted-backup",
+      ]) {
+        const image = page.locator(`img[src*="${assetName}-${tone}"]`);
+
+        await expect
+          .poll(() =>
+            image.evaluate(
+              (element) => (element as HTMLImageElement).naturalWidth,
+            ),
+          )
+          .toBeGreaterThan(0);
+      }
+    }
+  });
 });

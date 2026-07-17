@@ -4,27 +4,17 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M6 implemented — timeline and search rows add/remove messages through
-one report picker with multiple named reports; the derived DB stores ordered items,
-notes, case metadata, and explicit IANA timezones at schema version 3. The builder
-supports reorder/remove/note editing, same-version rebuilds preserve reports while
-pruning vanished messages, and the print route embeds source images plus a provenance
-appendix containing device/backup identity, source `sms.db` hashes, freshly re-read
-attachment plaintext/stored-source hashes, tool/build/export metadata, and raw
-per-message identifiers. The print document now mirrors the Messages workspace as a
-transcript-first view, with sent/received bubbles, in-bubble attachments, and neutral
-margin numbers cross-referenced by a separate message metadata section. Encrypted
-report preparation reuses the session-only password
-form and locks again after source reads. Chrome print CSS forces the Lode light exhibit
-theme, repeats title/footer/timezone metadata with page counters, and avoids splitting
-message evidence blocks. Unit and Playwright coverage exercise persistence, rebuild
-durability, timeline/search selection, both UI themes, print-media rules, provenance,
-and the `window.print()` export action (D-044). A post-implementation review pass
-added the `/backup/:id/reports` list route (the overview tile's target), stale-version
-recents gating on read, FK-independent report deletes, root-stamped `@page` print
-variables, a picker-side item cap, lenient report list reads, batch report hydration,
-and shared sqlite/report-limit/dialog-shell helper modules (D-045). Next is M7 —
-polish and hardening.**
+**Current status: M7 is in progress. The first polish increment wires the generated
+steampunk-automaton illustrations into the landing header and active drag/drop overlay, the
+unsupported-browser capability screen, and all three illustrated iPhone-guide
+sections. One shared decorative component renders paired light/dark WebP variants;
+CSS follows both the system color scheme and manual override without theme queries in
+React, keeps the artwork out of the accessibility tree, and removes it from print.
+Review hardening adds every WebP to Workbox precache, lazy-loads only the visible
+theme variant, preloads the mounted drag overlay, collapses illustrated grids in
+print, and covers the full system/manual theme matrix plus offline guide artwork.
+M6 reports and all earlier encrypted/streaming functionality remain complete. Next
+is the final favicon and PWA icon set.**
 
 ## M0 — Scaffolding
 
@@ -456,9 +446,13 @@ Goal: court-exhibit-grade report from selected messages.
 
 ## M7 — Polish & hardening
 
-- [ ] Wire generated illustrations into the UI (landing, capability-gate block screen,
+- [x] Wire generated illustrations into the UI (landing, capability-gate block screen,
       drag-drop overlay, backup guides) from `src/assets/illustrations/`, with
       light/dark variants swapped per theme and decorative `alt=""` (Design.md §12).
+      Review hardening precaches all WebPs for offline use, avoids eager hidden-theme
+      downloads, keeps the drag artwork mounted before first hover, collapses fixed
+      illustration tracks in print, centralizes illustrated layouts, and tests both
+      themes under system/manual overrides.
 - [ ] Derive final favicon (retraced SVG) and PWA manifest icons (192/512/maskable)
       from `src/assets/brand/icon-master.png`; keep favicon.svg and manifest in sync.
 - [x] Social/OG meta tags in `index.html` pointing at

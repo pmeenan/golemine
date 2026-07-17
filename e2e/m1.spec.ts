@@ -31,6 +31,7 @@ const derivedDataPath = {
 test("blocks workspace routes without required Chrome APIs while guides remain accessible", async ({
   page,
 }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.addInitScript(() => {
     Reflect.deleteProperty(window, "showDirectoryPicker");
 
@@ -63,6 +64,16 @@ test("blocks workspace routes without required Chrome APIs while guides remain a
     }),
   ).toBeVisible();
   await expect(page.getByText("Open local backup folders")).toBeVisible();
+  await page.getByRole("button", { name: "Use light theme" }).click();
+  await expectIllustrationTheme(page, "gate", "light");
+  await page.getByRole("button", { name: "Use dark theme" }).click();
+  await expectIllustrationTheme(page, "gate", "dark");
+  await page.emulateMedia({ media: "print" });
+  await expect(page.locator("[data-illustrated-section]")).toHaveCSS(
+    "display",
+    "block",
+  );
+  await page.emulateMedia({ media: "screen" });
 
   await page.goto("/guide/iphone");
   await expect(
@@ -80,6 +91,68 @@ test("blocks workspace routes without required Chrome APIs while guides remain a
   await expect(
     page.getByRole("link", { name: "Apple: back up with your Mac" }),
   ).toBeVisible();
+});
+
+test("decorative illustrations follow manual light and dark themes", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Use light theme" }).click();
+
+  const dropTarget = page.locator("[data-backup-drop-target]");
+  const dropOverlay = page.locator("[data-backup-drop-overlay]");
+
+  await expectIllustrationTheme(page, "landing", "light");
+  await expect(dropOverlay).toHaveAttribute("aria-hidden", "true");
+  await expectIllustrationLoaded(page, "drop-target", "light");
+
+  await dropTarget.dispatchEvent("dragover");
+  await expect(dropOverlay).not.toHaveAttribute("aria-hidden", "true");
+  await expect(page.getByText("Drop to open this backup")).toBeVisible();
+  await expectIllustrationTheme(page, "drop-target", "light");
+
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.getByRole("button", { name: "Use dark theme" }).click();
+  await expectIllustrationTheme(page, "landing", "dark");
+  await expectIllustrationTheme(page, "drop-target", "dark");
+
+  await page.getByRole("button", { name: "Use system theme" }).click();
+  await expectIllustrationTheme(page, "landing", "light");
+  await expectIllustrationTheme(page, "drop-target", "light");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectIllustrationTheme(page, "landing", "dark");
+  await expectIllustrationTheme(page, "drop-target", "dark");
+
+  await page.goto("/guide/iphone");
+  for (const assetName of [
+    "guide-open-backup",
+    "guide-find-backup",
+    "guide-encrypted-backup",
+  ]) {
+    await expectIllustrationTheme(page, assetName, "dark");
+  }
+
+  await page.emulateMedia({ colorScheme: "light" });
+  for (const assetName of [
+    "guide-open-backup",
+    "guide-find-backup",
+    "guide-encrypted-backup",
+  ]) {
+    await expectIllustrationTheme(page, assetName, "light");
+  }
+
+  await page.emulateMedia({ media: "print" });
+  await expect(page.locator("[data-illustrated-section]")).toHaveCount(3);
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-illustrated-section]")
+        .evaluateAll((sections) =>
+          sections.map((section) => getComputedStyle(section).display),
+        ),
+    )
+    .toEqual(["block", "block", "block"]);
 });
 
 test("opens a synthetic iPhone backup, persists recents, renames, and removes derived data", async ({
@@ -230,4 +303,42 @@ async function derivedDataDirectoryExists(
     },
     { ...derivedDataPath, id: backupId },
   );
+}
+
+type IllustrationTone = "dark" | "light";
+
+async function expectIllustrationTheme(
+  page: Page,
+  assetName: string,
+  tone: IllustrationTone,
+): Promise<void> {
+  const lightVariant = page.locator(`img[src*="${assetName}-light"]`);
+  const darkVariant = page.locator(`img[src*="${assetName}-dark"]`);
+
+  await expect(lightVariant).toHaveAttribute("alt", "");
+  await expect(darkVariant).toHaveAttribute("alt", "");
+
+  if (tone === "light") {
+    await expect(lightVariant).toBeVisible();
+    await expect(darkVariant).toBeHidden();
+    return;
+  }
+
+  await expect(lightVariant).toBeHidden();
+  await expect(darkVariant).toBeVisible();
+}
+
+async function expectIllustrationLoaded(
+  page: Page,
+  assetName: string,
+  tone: IllustrationTone,
+): Promise<void> {
+  const image = page.locator(`img[src*="${assetName}-${tone}"]`);
+
+  await expect(image).toHaveAttribute("alt", "");
+  await expect
+    .poll(() =>
+      image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0);
 }
