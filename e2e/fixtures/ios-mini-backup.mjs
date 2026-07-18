@@ -5,6 +5,7 @@
 
 export const iosMiniBackupUdid = "00008030-001C195E0A88802E";
 export const iosMiniEncryptedBackupUdid = "00008030-001C195E0A88805E";
+export const iosMalformedBackupUdid = "00008030-001C195E0A88807E";
 
 const smsDbFileId = "3d0d7e5fb2ce288813306e4d4636395e047a3d28";
 const smsDbWalFileId = "cd47480f213dba9bc38ee792775d17e3f5a73a59";
@@ -32,6 +33,14 @@ export const iosMiniEncryptedBackupDevice = {
   displayName: "Mina's encrypted iPhone backup",
   deviceName: "Mina's encrypted iPhone",
   serialNumber: "C39SYNTHM5001",
+};
+
+export const iosMalformedBackupDevice = {
+  ...iosMiniBackupDevice,
+  udid: iosMalformedBackupUdid,
+  displayName: "Synthetic malformed iPhone backup",
+  deviceName: "Synthetic malformed iPhone",
+  serialNumber: "C39SYNTHM7001",
 };
 
 export const iosMiniBackupExpectedMetadata = {
@@ -447,6 +456,10 @@ export function iosMiniBackupInfoPlist() {
 
 export function iosMiniEncryptedBackupInfoPlist() {
   return iosBackupInfoPlist(iosMiniEncryptedBackupDevice);
+}
+
+export function iosMalformedBackupInfoPlist() {
+  return iosBackupInfoPlist(iosMalformedBackupDevice);
 }
 
 function iosBackupInfoPlist(device) {

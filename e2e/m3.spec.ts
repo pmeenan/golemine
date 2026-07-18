@@ -39,8 +39,11 @@ test("browses and searches ingested messages from the synthetic iPhone backup", 
     page.getByRole("heading", { level: 1, name: "Mina's iPhone backup" }),
   ).toBeVisible({ timeout: 15_000 });
 
+  const ingestPanel = page.locator("section").filter({
+    has: page.getByRole("heading", { level: 2, name: "Ingest" }),
+  });
   await page.getByRole("button", { name: "Ingest messages" }).click();
-  await expect(page.getByRole("status")).toContainText(
+  await expect(ingestPanel.getByRole("status")).toContainText(
     `Extracted ${String(
       iosMiniBackupExpectedMetadata.counts.normalizedMessages,
     )} messages from ${String(

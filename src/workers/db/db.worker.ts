@@ -5,10 +5,12 @@ import { createDbWorkerIngestApi } from "./ingest-sink";
 import { createDbWorkerQueryApi } from "./queries";
 import { createDbWorkerReportApi } from "./reports";
 import { runSqliteSmoke } from "./sqlite-smoke";
+import { createDbWorkerStorageApi } from "./storage";
 
 const ingestApi = createDbWorkerIngestApi();
 const queryApi = createDbWorkerQueryApi();
 const reportApi = createDbWorkerReportApi();
+const storageApi = createDbWorkerStorageApi();
 
 export const dbWorkerApi: DbWorkerApi = {
   demoRoundTrip: (request, progress) => runDemoRoundTrip("db", request, progress),
@@ -17,6 +19,8 @@ export const dbWorkerApi: DbWorkerApi = {
   writeIngestBatch: ingestApi.writeIngestBatch,
   finalizeIngest: ingestApi.finalizeIngest,
   getIngestSummary: ingestApi.getIngestSummary,
+  getDerivedDataStorageSummary: storageApi.getDerivedDataStorageSummary,
+  clearDerivedDataStorage: storageApi.clearDerivedDataStorage,
   listConversations: queryApi.listConversations,
   listThreads: queryApi.listThreads,
   getMessageTimelinePage: queryApi.getMessageTimelinePage,

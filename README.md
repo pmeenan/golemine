@@ -38,10 +38,35 @@ offline after the first load.
   and wasm/font assets are served same-origin and cached for offline use.
 - `pnpm build` writes the static end product to `dist/`.
 
+## Using Golemine
+
+1. Create an iPhone backup with Finder on macOS or Apple Devices/iTunes on Windows.
+   The backup can be created on another computer and copied to the computer running
+   Golemine. On macOS, copy the specific backup folder out of
+   `~/Library/Application Support/MobileSync/Backup/` before opening it in Chrome.
+2. Load Golemine once while online so Chrome can install the offline app files, then
+   choose **Open backup** or drag the backup folder onto the landing page. Select the
+   folder that directly contains `Info.plist`, `Manifest.plist`, and `Manifest.db`.
+3. If the backup is encrypted, enter its backup password. The password and unwrapped
+   keys stay only in worker memory for that session and are cleared when the worker is
+   locked or closed.
+4. Choose **Ingest messages**. Golemine builds a disposable local database and search
+   index in Chrome storage; the source backup remains read-only.
+5. Open **Messages** to browse, search, preview or extract attachments, and select
+   messages for reports. Open **Reports** to prepare a source-verified print view and
+   save it as PDF through Chrome's print dialog.
+6. Use **Derived storage** on the backup overview to inspect local disk use, clear the
+   generated database/previews, or rebuild them from the unchanged source backup.
+   Removing a recent backup also removes its local derived data.
+
+After the first successful load, the app shell, workers, guides, fonts, wasm, codecs,
+and illustrations run without a network connection. Backup content, passwords,
+searches, reports, and generated previews are never uploaded.
+
 ## Status
 
-M7 polish is underway on top of the completed M6 reports milestone for encrypted and
-unencrypted iPhone backups. The repo contains the strict
+M7 polish and hardening is complete on top of the M6 reports milestone for encrypted
+and unencrypted iPhone backups. The repo contains the strict
 Vite/React/TypeScript app shell,
 token-driven light/dark theme foundation, offline PWA registration, worker and
 sqlite-wasm diagnostics, CI workflow, license audit, privacy/offline Playwright
@@ -164,6 +189,24 @@ leaving blank illustration columns. All variants are included in the PWA precach
 offline guide/theme changes; native lazy loading avoids downloading the hidden variant
 during the initial page render, while the drag artwork is mounted and decoded before
 the first drag.
+
+The installed app now uses the same automaton identity as the artwork: a simplified
+vector favicon remains legible at tab size, while 192px and 512px install icons retain
+the full icon master. A separate full-bleed 512px maskable icon keeps the portrait in
+the platform-safe zone. The manifest roles, decoded dimensions, and favicon link are
+covered by the browser guardrail suite, and all four assets are precached for offline
+launches.
+
+The M7 hardening suite clears Chrome's HTTP cache after service-worker installation,
+takes the browser offline, and verifies that every app request is served by Workbox.
+A deterministic malformed-backup fixture covers truncated message bodies, missing
+attachments and reaction targets, and corrupt avatars while proving that valid rows
+still ingest and every skipped optional record contributes a warning. The backup
+overview measures per-backup OPFS usage in `db-worker` and offers a confirmed clear
+action that leaves the source untouched and makes rebuild available. Public routes
+also carry one main landmark and heading, route-specific titles, skip navigation,
+route-change focus, named controls, complete image alternatives, and guarded heading
+structure.
 
 The iPhone guide covers Finder/iTunes backups created on any Mac or Windows computer,
 with inline Finder steps and links to Apple Support for current screenshots and

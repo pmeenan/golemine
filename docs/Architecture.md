@@ -92,8 +92,10 @@ more than ~16 ms.
   source folder, and it only ever reads; source access should go through read-only
   wrapper helpers so writable handles never enter provider code.
 - **db-worker** — hosts sqlite-wasm. Owns the per-backup derived database in OPFS
-  (normalized messages + FTS5 index + report selections). All queries the UI needs are
-  RPC methods here; the UI never sees raw SQL.
+  (normalized messages + FTS5 index + report selections) and the recursive
+  measure/clear API for that backup's complete derived directory. All queries and
+  storage mutations the UI needs are RPC methods here; the UI never sees raw SQL or
+  walks OPFS itself.
 - **media-worker** — generates and caches JPEG image thumbnails in OPFS and lazy-loads
   isolated same-origin `libheif-js` vendor files for HEIC thumbnails. Production
   imports the public vendor ES module directly; Vite dev fetches the same unmodified
@@ -171,6 +173,11 @@ rather than re-declared per worker.
 - Derived data is always disposable: deleting a backup from recents deletes its OPFS
   directory through `src/lib/recents.ts`; the source folder is untouched. A
   `derivedDbVersion` bump forces re-ingest after schema changes.
+- The overview measures and clears one backup directory through
+  `src/workers/db/storage.ts`. Clear marks recents non-browsable before deletion,
+  closes any summary reader that could own the SAH pool, removes the exact safe-id
+  directory, and publishes `not-ingested` only after success. A failed clear remains
+  `needs-reingest`; the source directory handle and source files are never changed.
 - `derivedDbVersion` is a single shared constant in source code. UI recents, db-worker
   schema setup, ingest invalidation, and tests must import that constant rather than
   duplicating version numbers.
@@ -386,7 +393,8 @@ Routes (react-router, all client-side):
 - `/` — landing: what the tool is, privacy statement ("your data never leaves this
   machine"), drag/drop + open-folder entry points, recents list (rename/remove).
 - `/guide/iphone`, `/guide/android` — static how-to-back-up-your-phone pages.
-- `/backup/:id` — backup overview: device info, ingest status/progress, capability tiles.
+- `/backup/:id` — backup overview: device info, ingest status/progress, capability
+  tiles, and per-backup derived-storage size/clear/rebuild management.
 - `/backup/:id/messages` — unified browse/search workspace for ingested backups.
   Browse mode shows Threads → Timeline. Active search shows hit-filtered Threads →
   newest-first Results → Timeline, with all/thread result scoping and jump-to-message.
@@ -409,6 +417,11 @@ rendered as text nodes, never HTML. All visual/interaction design follows
 [Design.md](Design.md), including mandatory light + dark themes (system-auto with
 manual override) and the token-only styling rule.
 
+Every standard route renders one focusable `#main-content` landmark. The shell exposes
+a keyboard-visible **Skip to content** link, moves focus to the new route's main region
+after client-side navigation, and updates a route-specific document title. The
+standalone print route provides the same main-landmark contract without the app shell.
+
 Approved in-app artwork is routed through the shared
 `src/components/brand/decorative-illustration.tsx` component. It renders both imported
 WebP variants and delegates visibility to CSS so system color-scheme changes and the
@@ -419,6 +432,13 @@ artwork separate from header actions through its `illustration` slot, while
 single-column print collapse. Workbox precaches WebP assets; native lazy loading avoids
 fetching the hidden theme variant, and the opacity-hidden drag overlay remains mounted
 so its visible variant is decoded before first interaction.
+
+Brand install assets are static files under `public/`: `favicon.svg` is the
+small-size vector retrace of `src/assets/brand/icon-master.png`; the 192px and 512px
+`any` PNGs preserve the master's transparent rounded corners; and the dedicated 512px
+maskable PNG uses a full-bleed charcoal background. Vite's manifest declares the
+three raster roles explicitly and Workbox precaches the favicon and every install icon
+(D-046).
 
 ## 8. Reports (court-exhibit grade)
 
@@ -538,6 +558,8 @@ backup wipes the backup's complete derived-data directory.
   public/             static assets, wasm binaries
     _headers          static-host security headers (CSP)
     theme-init.js     pre-paint theme preference script
+    favicon.svg       simplified vector tab icon derived from the icon master
+    pwa-icon-*.png    192/512 install icons plus the full-bleed maskable variant
     og-image.png      1200×630 social card (absolute URL in index.html OG tags)
   docs/               this documentation
     assets/           repo-facing images (README banner, golem character sheet)
@@ -552,8 +574,18 @@ the repo, with generator scripts/metadata kept alongside them); Playwright (Chro
 for end-to-end flows including drag/drop ingest, offline/privacy invariants, and report
 printing.
 
+The M7 post-install audit first installs Workbox, clears Chrome's ordinary HTTP cache,
+opens a fresh page with the network disabled, traverses the shell and both guides, and
+requires every response to come from the service worker. Its companion public-route
+audit checks one main/H1, duplicate ids, image alternatives, control names, heading
+order, skip navigation, route focus, and document titles.
+
 The first generated fixture is `e2e/fixtures/generated/ios-mini-backup/`, a synthetic
 unencrypted iPhone backup root used by the M1 open -> detect -> recents Playwright flow,
 the M2 open -> ingest -> derived summary flow, and the M3/M4 browse/search flow. Its source module and generator
 produce deterministic Manifest/sms/contact SQLite data, real WAL sidecars, tapbacks,
 attachments, contact-avatar happy/error cases, and expected normalized metadata.
+`e2e/fixtures/generated/ios-malformed-backup/` is a separate deterministic hostile-row
+variant. It keeps enough valid Messages data to finish ingest while truncated bodies,
+missing attachment/reaction sources, and a corrupt avatar exercise skip-and-report
+behavior in both Vitest and Playwright.

@@ -1,6 +1,7 @@
-import { type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Link } from "react-router";
 
+import { appName } from "../../lib/constants";
 import { cn } from "../../lib/cn";
 
 interface PageShellProps {
@@ -22,6 +23,11 @@ export function PageShell({
   maxWidth = "wide",
   title,
 }: PageShellProps) {
+  useEffect(() => {
+    document.title =
+      title === "Local backup workspace" ? appName : `${title} — ${appName}`;
+  }, [title]);
+
   return (
     <main
       className={cn(
@@ -30,6 +36,8 @@ export function PageShell({
         maxWidth === "wide" && "max-w-[var(--layout-content-wide)]",
         maxWidth === "full" && "max-w-none",
       )}
+      id="main-content"
+      tabIndex={-1}
     >
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0">

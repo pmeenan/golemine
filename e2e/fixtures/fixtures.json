@@ -48,6 +48,26 @@
         "Manifest.db and every source database, WAL sidecar, contact-image database, and attachment are independently AES-256-CBC encrypted with a zero IV and PKCS#7 padding. MBFile.Size remains authoritative, including for block-aligned plaintext that receives a full 16-byte padding block.",
         "Each encrypted Files.file value is an NSKeyedArchiver-shaped MBFile: $top.root is a UID into $objects, and EncryptionKey is a UID to a NSMutableData object carrying NS.data. The 44-byte value is a little-endian class number followed by a 40-byte RFC 3394 AES-KW key. The generator unwraps, decrypts, validates padding, and byte-compares every payload; focused parser and ingest tests validate the archived metadata indirection."
       ]
+    },
+    {
+      "id": "ios-malformed-backup",
+      "provider": "ios-itunes",
+      "path": "generated/ios-malformed-backup/00008030-001C195E0A88807E",
+      "description": "Synthetic unencrypted fuzz fixture proving malformed optional Messages records are skipped and reported without aborting ingest.",
+      "device": {
+        "displayName": "Synthetic malformed iPhone backup",
+        "deviceName": "Synthetic malformed iPhone",
+        "productType": "iPhone15,2",
+        "productVersion": "18.5",
+        "serialNumber": "C39SYNTHM7001",
+        "udid": "00008030-001C195E0A88807E",
+        "phoneNumber": "+15555550123"
+      },
+      "provenance": [
+        "Generated entirely from static synthetic data and deterministic sqlite-wasm builders; contains no real personal data or copied backup content.",
+        "The valid mini-backup corpus is extended with a truncated attributedBody payload, an attachment missing from Manifest.db, a reaction targeting a missing message, and the existing corrupt contact-avatar blob.",
+        "The required Manifest.db and sms.db structures remain readable so production ingest reaches normalization, preserves valid rows, and returns explicit warning records for malformed optional content."
+      ]
     }
   ]
 }

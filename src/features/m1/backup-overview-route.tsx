@@ -1,4 +1,11 @@
-import { CircleAlert, Database, FileText, MessageSquareText } from "lucide-react";
+import {
+  CircleAlert,
+  Database,
+  FileText,
+  HardDrive,
+  MessageSquareText,
+  Trash2,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
@@ -15,6 +22,7 @@ import {
 } from "../../components/layout/page-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
 import { appVersion, derivedDbVersion } from "../../lib/constants";
 import {
   createBackupRecentsStore,
@@ -31,6 +39,7 @@ import {
   formatWorkerErrorPayload,
   type BackupIngestRequest,
   type DbIngestSummary,
+  type DerivedDataStorageSummary,
   type WorkerProgressEvent,
 } from "../../lib/worker-types";
 
@@ -51,6 +60,14 @@ export function BackupOverviewRoute() {
   const [error, setError] = useState<string | null>(null);
   const [ingestStatus, setIngestStatus] = useState<IngestUiStatus>({ kind: "idle" });
   const [summary, setSummary] = useState<DbIngestSummary | null>(null);
+  const [storageSummary, setStorageSummary] =
+    useState<DerivedDataStorageSummary | null>(null);
+  const [storageStatus, setStorageStatus] = useState<IngestUiStatus>({
+    kind: "idle",
+  });
+  const [storageRefreshToken, setStorageRefreshToken] = useState(0);
+  const [isConfirmingClear, setIsConfirmingClear] = useState(false);
+  const storageOperationActive = useRef(false);
   // Lets startIngest release the read-only summary db-worker synchronously,
   // before ingest can reach prepareIngest, instead of relying on React to
   // commit the "running" state and run the summary effect cleanup in time
@@ -59,6 +76,7 @@ export function BackupOverviewRoute() {
   // is safe.
   const summaryReaderRelease = useRef<(() => void) | null>(null);
   const passwordForm = useBackupPasswordForm();
+  const storageBackupId = record?.id ?? null;
 
   useEffect(() => {
     let active = true;
@@ -123,6 +141,59 @@ export function BackupOverviewRoute() {
       summaryReaderRelease.current = null;
     };
   }, [record, ingestStatus.kind]);
+
+  useEffect(() => {
+    if (storageBackupId === null) {
+      return;
+    }
+
+    if (ingestStatus.kind === "running") {
+      setStorageStatus({ kind: "idle" });
+      return;
+    }
+
+    if (storageOperationActive.current) {
+      return;
+    }
+
+    const active = { current: true };
+    const client = createDbWorkerClient();
+    setStorageStatus({ kind: "running", label: "Measuring derived data." });
+
+    void (async () => {
+      try {
+        const result = await client.api.getDerivedDataStorageSummary(storageBackupId);
+
+        if (!active.current) {
+          return;
+        }
+
+        if (result.ok) {
+          setStorageSummary(result.value);
+          setStorageStatus({ kind: "idle" });
+        } else {
+          setStorageStatus({
+            kind: "error",
+            label: formatWorkerErrorPayload(result.error),
+          });
+        }
+      } catch (cause) {
+        if (active.current) {
+          setStorageStatus({
+            kind: "error",
+            label: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+      } finally {
+        client.release();
+      }
+    })();
+
+    return () => {
+      active.current = false;
+      client.release();
+    };
+  }, [ingestStatus.kind, storageBackupId, storageRefreshToken]);
 
   if (isLoading) {
     return (
@@ -383,6 +454,60 @@ export function BackupOverviewRoute() {
   };
   const isIngestRunning =
     ingestStatus.kind === "running" || record.ingestStatus === "ingesting";
+  const clearDerivedData = async () => {
+    setIsConfirmingClear(false);
+    storageOperationActive.current = true;
+    summaryReaderRelease.current?.();
+    summaryReaderRelease.current = null;
+    setStorageStatus({ kind: "running", label: "Clearing derived data." });
+
+    try {
+      const stale = await recentsStore.updateIngestStatus(
+        record.id,
+        "needs-reingest",
+      );
+      setRecord(stale);
+      const client = createDbWorkerClient();
+
+      try {
+        const result = await client.api.clearDerivedDataStorage(record.id);
+
+        if (!result.ok) {
+          setStorageStatus({
+            kind: "error",
+            label: formatWorkerErrorPayload(result.error),
+          });
+          return;
+        }
+
+        const cleared = await recentsStore.updateIngestStatus(
+          record.id,
+          "not-ingested",
+        );
+        setRecord(cleared);
+        setSummary(null);
+        setStorageSummary({
+          backupId: record.id,
+          byteLength: 0,
+          directoryCount: 0,
+          fileCount: 0,
+        });
+        setStorageStatus({
+          kind: "success",
+          label: `Cleared ${formatByteSize(result.value.clearedByteLength)} of derived data. The source backup was not changed.`,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (cause) {
+      setStorageStatus({
+        kind: "error",
+        label: cause instanceof Error ? cause.message : String(cause),
+      });
+    } finally {
+      storageOperationActive.current = false;
+    }
+  };
 
   return (
     <PageShell
@@ -510,6 +635,77 @@ export function BackupOverviewRoute() {
           to={`/backup/${encodeURIComponent(record.id)}/reports`}
         />
       </div>
+
+      <Panel>
+        <PanelHeader
+          badge={<Badge variant="neutral">Local only</Badge>}
+          description="The derived database, search index, report drafts, and generated previews live in this browser profile. The source backup is never counted or changed."
+          title="Derived storage"
+        />
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-4 rounded-md border border-border bg-surface-sunken p-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <HardDrive aria-hidden="true" className="size-5 shrink-0 text-text-tertiary" />
+            <div className="min-w-0">
+              <p className="text-body font-[var(--font-weight-strong)] text-text">
+                {storageSummary === null
+                  ? "Calculating local storage"
+                  : formatByteSize(storageSummary.byteLength)}
+              </p>
+              <p className="mt-1 text-caption text-text-secondary">
+                {storageSummary === null
+                  ? "The db-worker is scanning this backup's OPFS directory."
+                  : `${storageSummary.fileCount.toLocaleString()} files in ${storageSummary.directoryCount.toLocaleString()} folders`}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {storageStatus.kind === "error" ? (
+              <Button
+                onClick={() => {
+                  setStorageRefreshToken((value) => value + 1);
+                }}
+                type="button"
+                variant="secondary"
+              >
+                Retry size
+              </Button>
+            ) : null}
+            <Button
+              disabled={
+                isIngestRunning ||
+                storageStatus.kind === "running" ||
+                (storageSummary?.byteLength ?? 0) === 0
+              }
+              onClick={() => {
+                setIsConfirmingClear(true);
+              }}
+              type="button"
+              variant="destructive"
+            >
+              <Trash2 aria-hidden="true" className="size-4" />
+              Clear derived data
+            </Button>
+          </div>
+        </div>
+        <IngestStatusMessage status={storageStatus} />
+      </Panel>
+
+      <ConfirmationDialog
+        cancelLabel="Keep derived data"
+        confirmLabel="Clear derived data"
+        onCancel={() => {
+          setIsConfirmingClear(false);
+        }}
+        onConfirm={() => {
+          void clearDerivedData();
+        }}
+        open={isConfirmingClear}
+        title={`Clear derived data for ${record.friendlyName}?`}
+      >
+        This removes the local message database, search index, report drafts, and
+        generated previews for this backup. The source folder is not changed. You can
+        rebuild the derived data from the source backup afterward.
+      </ConfirmationDialog>
     </PageShell>
   );
 }
@@ -631,4 +827,21 @@ function formatIngestProgressLabel(progress: WorkerProgressEvent): string {
   }
 
   return `${progress.label} (${progress.completedUnits.toLocaleString()} / ${progress.totalUnits.toLocaleString()})`;
+}
+
+function formatByteSize(byteLength: number): string {
+  if (byteLength < 1024) {
+    return `${byteLength.toLocaleString()} bytes`;
+  }
+
+  const units = ["KiB", "MiB", "GiB", "TiB"] as const;
+  let value = byteLength / 1024;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[unitIndex]} (${byteLength.toLocaleString()} bytes)`;
 }

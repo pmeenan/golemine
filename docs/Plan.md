@@ -4,17 +4,12 @@ Phased build order. Each milestone ends in a working, demonstrable state. Update
 status column as work lands; add discovered work as tasks under the relevant milestone
 rather than inventing new documents.
 
-**Current status: M7 is in progress. The first polish increment wires the generated
-steampunk-automaton illustrations into the landing header and active drag/drop overlay, the
-unsupported-browser capability screen, and all three illustrated iPhone-guide
-sections. One shared decorative component renders paired light/dark WebP variants;
-CSS follows both the system color scheme and manual override without theme queries in
-React, keeps the artwork out of the accessibility tree, and removes it from print.
-Review hardening adds every WebP to Workbox precache, lazy-loads only the visible
-theme variant, preloads the mounted drag overlay, collapses illustrated grids in
-print, and covers the full system/manual theme matrix plus offline guide artwork.
-M6 reports and all earlier encrypted/streaming functionality remain complete. Next
-is the final favicon and PWA icon set.**
+**Current status: M7 is complete. The production PWA now has its final illustration,
+favicon, install-icon, social-card, landing, and guide surfaces; a cache-cleared
+post-install offline audit; deterministic malformed-backup skip-and-report coverage;
+worker-owned per-backup derived-storage measurement/clear/rebuild controls; and the
+keyboard, focus, landmark, title, image, control-name, and heading accessibility pass.
+M6 reports and all earlier encrypted/streaming functionality remain complete.**
 
 ## M0 — Scaffolding
 
@@ -453,16 +448,29 @@ Goal: court-exhibit-grade report from selected messages.
       downloads, keeps the drag artwork mounted before first hover, collapses fixed
       illustration tracks in print, centralizes illustrated layouts, and tests both
       themes under system/manual overrides.
-- [ ] Derive final favicon (retraced SVG) and PWA manifest icons (192/512/maskable)
+- [x] Derive final favicon (retraced SVG) and PWA manifest icons (192/512/maskable)
       from `src/assets/brand/icon-master.png`; keep favicon.svg and manifest in sync.
 - [x] Social/OG meta tags in `index.html` pointing at
       `https://golemine.com/og-image.png` (1200×630, lives in `public/`).
 - [x] README banner (`docs/assets/readme-banner.png`) embedded at the top of README.
-- [ ] Offline audit: zero network requests after install (test-enforced).
-- [ ] Malformed-backup fuzz fixtures: ingest never crashes, always reports what was skipped.
-- [ ] Storage management UI: per-backup derived-data size, clear/rebuild.
-- [ ] Accessibility + keyboard navigation pass; empty/error states everywhere.
-- [ ] Landing + guide content finalized; README user docs.
+- [x] Offline audit: after Workbox installation, clear Chrome's HTTP cache, take a
+      fresh page offline, traverse the app shell and both guides, and assert every
+      request is same-origin and served by the service worker with no failures.
+- [x] Malformed-backup fuzz fixture: deterministically generate truncated
+      `attributedBody`, missing attachment source, missing reaction target, and corrupt
+      avatar cases; valid rows still ingest and each skipped optional record is
+      reflected in the stored/user-visible warning count.
+- [x] Storage management UI: `db-worker` recursively measures each backup's derived
+      OPFS files/directories/bytes; the overview exposes size plus confirmed clear,
+      leaves the source untouched, and returns the workspace to an ingest/rebuildable
+      state even when clear fails partway.
+- [x] Accessibility + keyboard navigation pass: visible skip link, one focusable main
+      landmark, route-change focus, route-specific document titles, and browser audits
+      for landmarks, headings, image alternatives, duplicate ids, and control names;
+      existing loading/empty/error paths remain explicit and actionable.
+- [x] Landing + iPhone guide content finalized for Finder and Apple Devices/iTunes,
+      including encrypted/local-storage disclosures; README now contains the complete
+      open → ingest → browse/search → report → storage-management user flow.
 
 ## Later / backlog (not scheduled)
 

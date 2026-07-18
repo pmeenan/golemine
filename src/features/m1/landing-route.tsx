@@ -351,15 +351,15 @@ export function LandingRoute() {
           lightSrc={landingLight}
         />
       }
-      description="Open a local iPhone Finder or iTunes backup, recognize the device, and keep a private recent-backups list on this computer."
+      description="Open an encrypted or unencrypted Finder, Apple Devices, or iTunes backup to browse iPhone Messages entirely on this computer."
       eyebrow="Local backup workspace"
       title="Local backup workspace"
     >
       <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(var(--pane-threads),0.85fr)] gap-6">
         <Panel>
           <PanelHeader
-            badge={<Badge variant="accent">M1</Badge>}
-            description="Your backup data never leaves this machine. Source folders are opened read-only."
+            badge={<Badge variant="accent">iPhone Messages</Badge>}
+            description="Your backup data never leaves this machine. Source folders are opened read-only; generated indexes and previews stay in this browser profile."
             title="Open backup"
           />
 
@@ -454,8 +454,10 @@ export function LandingRoute() {
             <h2 className="text-heading text-text">Privacy boundary</h2>
             <p className="mt-1 text-body text-text-secondary">
               Golemine is a static offline app. It does not upload backups, run analytics,
-              or load code from a CDN. Derived data is rebuildable and can be wiped when a
-              recent backup is removed.
+              or load code from a CDN. Messages, searches, attachments, and report drafts
+              are derived locally from the source backup. Use Derived storage on a backup
+              overview to inspect or clear that local data, or remove the recent backup to
+              wipe it completely.
             </p>
           </div>
         </div>

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { expect, test, type BrowserContext, type Page, type Request } from "@playwright/test";
+import { expect, test, type Page, type Request } from "@playwright/test";
 import { appName, themeStorageKey } from "../src/lib/constants";
 
 const appShellHeading = "Local backup workspace";
@@ -124,25 +124,180 @@ async function ensureServiceWorkerControlsPage(page: Page) {
     .toBe(true);
 }
 
-async function runOffline(
-  context: BrowserContext,
-  page: Page,
-  verify: () => Promise<void>,
-) {
-  await context.setOffline(true);
-
-  try {
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await expectAppShell(page);
-    await verify();
-  } finally {
-    await context.setOffline(false);
-  }
-}
-
 test("renders the app shell", async ({ page }) => {
   await page.goto("/");
   await expectAppShell(page);
+});
+
+test("supports skip navigation, route focus, and distinct document titles", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.keyboard.press("Tab");
+
+  const skipLink = page.getByRole("link", { name: "Skip to content" });
+  await expect(skipLink).toBeFocused();
+  await expect(skipLink).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main-content")).toBeFocused();
+
+  await page
+    .locator("#main-content")
+    .getByRole("link", { name: "iPhone guide" })
+    .click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "iPhone backup guide" }),
+  ).toBeVisible();
+  await expect(page.locator("#main-content")).toBeFocused();
+  await expect(page).toHaveTitle(`iPhone backup guide — ${appName}`);
+});
+
+test("keeps public-route landmarks, headings, images, and controls accessible", async ({
+  page,
+}) => {
+  for (const route of ["/", "/guide/iphone", "/guide/android", "/missing"]) {
+    await page.goto(route);
+    await expect(page.locator("h1")).toHaveCount(1);
+
+    const issues = await page.evaluate(() => {
+      const results: string[] = [];
+      const ids = new Set<string>();
+
+      for (const element of Array.from(
+        document.querySelectorAll<HTMLElement>("[id]"),
+      )) {
+        if (ids.has(element.id)) {
+          results.push(`duplicate id: ${element.id}`);
+        }
+        ids.add(element.id);
+      }
+
+      if (document.querySelectorAll("main").length !== 1) {
+        results.push("page must contain exactly one main landmark");
+      }
+
+      for (const image of Array.from(document.querySelectorAll("img"))) {
+        if (!image.hasAttribute("alt")) {
+          results.push(`image without alt: ${image.getAttribute("src") ?? "unknown"}`);
+        }
+      }
+
+      const accessibleName = (element: HTMLElement): string => {
+        const labelledBy = element.getAttribute("aria-labelledby");
+        const referenced = labelledBy
+          ?.split(/\s+/u)
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" ");
+
+        return (
+          element.getAttribute("aria-label") ??
+          referenced ??
+          element.getAttribute("title") ??
+          element.innerText
+        ).trim();
+      };
+
+      for (const control of Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "button, a[href], input, select, textarea",
+        ),
+      )) {
+        if (control.closest('[aria-hidden="true"]')) {
+          continue;
+        }
+
+        if (
+          control instanceof HTMLInputElement ||
+          control instanceof HTMLSelectElement ||
+          control instanceof HTMLTextAreaElement
+        ) {
+          if ((control.labels?.length ?? 0) === 0 && accessibleName(control) === "") {
+            results.push(`unlabelled form control: ${control.tagName.toLowerCase()}`);
+          }
+        } else if (accessibleName(control) === "") {
+          results.push(`unnamed control: ${control.tagName.toLowerCase()}`);
+        }
+      }
+
+      let previousLevel = 0;
+      for (const heading of Array.from(
+        document.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6"),
+      )) {
+        const level = Number(heading.tagName.slice(1));
+        if (previousLevel > 0 && level > previousLevel + 1) {
+          results.push(
+            `heading level jumps from ${String(previousLevel)} to ${String(level)}`,
+          );
+        }
+        previousLevel = level;
+      }
+
+      return results;
+    });
+
+    expect(issues, route).toEqual([]);
+  }
+});
+
+test("publishes the synchronized favicon and install icon set", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute("href", "/favicon.svg");
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute("type", "image/svg+xml");
+
+  const iconSet = await page.evaluate(async () => {
+    const manifestResponse = await fetch("/manifest.webmanifest");
+    const manifest = (await manifestResponse.json()) as {
+      icons?: {
+        purpose?: string;
+        sizes?: string;
+        src?: string;
+        type?: string;
+      }[];
+    };
+    const icons = manifest.icons ?? [];
+
+    return Promise.all(
+      icons.map(async (icon) => {
+        const response = await fetch(icon.src ?? "");
+        const bitmap = await createImageBitmap(await response.blob());
+        const result = {
+          ...icon,
+          height: bitmap.height,
+          width: bitmap.width,
+        };
+        bitmap.close();
+        return result;
+      }),
+    );
+  });
+
+  expect(iconSet).toEqual([
+    {
+      height: 192,
+      purpose: "any",
+      sizes: "192x192",
+      src: "/pwa-icon-192.png",
+      type: "image/png",
+      width: 192,
+    },
+    {
+      height: 512,
+      purpose: "any",
+      sizes: "512x512",
+      src: "/pwa-icon-512.png",
+      type: "image/png",
+      width: 512,
+    },
+    {
+      height: 512,
+      purpose: "maskable",
+      sizes: "512x512",
+      src: "/pwa-icon-maskable-512.png",
+      type: "image/png",
+      width: 512,
+    },
+  ]);
 });
 
 test("runs worker and sqlite diagnostics in the browser", async ({ page }) => {
@@ -285,27 +440,78 @@ test.describe("network guardrail without service worker mediation", () => {
   });
 });
 
-test("reloads offline after the generated service worker is installed", async ({ context, page }) => {
+test("serves every app request from Workbox after install with the network offline", async ({
+  baseURL,
+  context,
+  page,
+}) => {
+  if (!baseURL) {
+    throw new Error("Playwright baseURL is required for the offline audit.");
+  }
+
+  const appOrigin = new URL(baseURL).origin;
   await page.goto("/", { waitUntil: "networkidle" });
   await expectAppShell(page);
-  await page.getByRole("button", { name: "Use light theme" }).click();
   await waitForServiceWorkerActivation(page);
   await ensureServiceWorkerControlsPage(page);
-  await runOffline(context, page, async () => {
-    await page.goto("/guide/iphone", { waitUntil: "domcontentloaded" });
+
+  // Remove the ordinary HTTP cache while preserving CacheStorage so this
+  // audit proves the installed Workbox precache is the only successful
+  // response source once Chrome's network is disabled.
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Network.clearBrowserCache");
+  await page.close();
+  await context.setOffline(true);
+
+  const offlinePage = await context.newPage();
+  const externalRequests: string[] = [];
+  const failedRequests: string[] = [];
+  const nonServiceWorkerResponses: string[] = [];
+
+  offlinePage.on("request", (request) => {
+    const url = new URL(request.url());
+
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      if (url.origin !== appOrigin) {
+        externalRequests.push(request.url());
+      }
+    }
+  });
+  offlinePage.on("requestfailed", (request) => {
+    failedRequests.push(`${request.url()} (${request.failure()?.errorText ?? "unknown"})`);
+  });
+  offlinePage.on("response", (response) => {
+    const url = new URL(response.url());
+
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      !response.fromServiceWorker()
+    ) {
+      nonServiceWorkerResponses.push(response.url());
+    }
+  });
+
+  try {
+    await offlinePage.goto("/", { waitUntil: "domcontentloaded" });
+    await expectAppShell(offlinePage);
     await expect(
-      page.getByRole("heading", { level: 1, name: "iPhone backup guide" }),
+      offlinePage.getByText(/SQLite .+ via opfs-sahpool\./),
+    ).toBeVisible({ timeout: 20_000 });
+
+    await offlinePage.goto("/guide/iphone", { waitUntil: "domcontentloaded" });
+    await expect(
+      offlinePage.getByRole("heading", { level: 1, name: "iPhone backup guide" }),
     ).toBeVisible();
 
     for (const tone of ["light", "dark"] as const) {
-      await page.getByRole("button", { name: `Use ${tone} theme` }).click();
+      await offlinePage.getByRole("button", { name: `Use ${tone} theme` }).click();
 
       for (const assetName of [
         "guide-open-backup",
         "guide-find-backup",
         "guide-encrypted-backup",
       ]) {
-        const image = page.locator(`img[src*="${assetName}-${tone}"]`);
+        const image = offlinePage.locator(`img[src*="${assetName}-${tone}"]`);
 
         await expect
           .poll(() =>
@@ -316,5 +522,17 @@ test("reloads offline after the generated service worker is installed", async ({
           .toBeGreaterThan(0);
       }
     }
-  });
+
+    await offlinePage.goto("/guide/android", { waitUntil: "domcontentloaded" });
+    await expect(
+      offlinePage.getByRole("heading", { level: 1, name: "Android backup guide" }),
+    ).toBeVisible();
+  } finally {
+    await offlinePage.close();
+    await context.setOffline(false);
+  }
+
+  expect(externalRequests).toEqual([]);
+  expect(failedRequests).toEqual([]);
+  expect(nonServiceWorkerResponses).toEqual([]);
 });

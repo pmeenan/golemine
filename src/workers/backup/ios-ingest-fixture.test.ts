@@ -21,6 +21,8 @@ import {
   iosMiniBackupExpectedMessages,
   iosMiniBackupExpectedMetadata,
   iosMiniBackupUdid,
+  iosMalformedBackupDevice,
+  iosMalformedBackupUdid,
 } from "../../../e2e/fixtures/ios-mini-backup.mjs";
 import {
   ManifestDbReader,
@@ -58,6 +60,11 @@ const encryptedFixtureRoot = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../e2e/fixtures/generated/ios-mini-encrypted-backup",
   iosMiniEncryptedBackupUdid,
+);
+const malformedFixtureRoot = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../e2e/fixtures/generated/ios-malformed-backup",
+  iosMalformedBackupUdid,
 );
 
 beforeEach(() => {
@@ -186,6 +193,50 @@ describe("iOS M2 ingest fixture", () => {
       }
       manifest.close();
     }
+  });
+
+  it("ingests the malformed-record fuzz fixture and reports every skipped record", async () => {
+    const root = new DiskFileSystemDirectory(
+      malformedFixtureRoot,
+      iosMalformedBackupUdid,
+    );
+    const { sink } = createCollectingSink();
+    const result = await ingestUnencryptedBackupDirectory(
+      root as unknown as FileSystemDirectoryHandle,
+      {
+        backupId: iosMalformedBackupUdid,
+        provider: "ios-itunes",
+        sourceKind: "itunes-finder",
+        sourceFolderName: iosMalformedBackupUdid,
+        friendlyName: iosMalformedBackupDevice.displayName,
+        deviceInfo: {
+          udid: iosMalformedBackupUdid,
+          name: iosMalformedBackupDevice.deviceName,
+          model: iosMalformedBackupDevice.productType,
+          osVersion: iosMalformedBackupDevice.productVersion,
+          serialNumber: iosMalformedBackupDevice.serialNumber,
+          phoneNumber: iosMalformedBackupDevice.phoneNumber,
+        },
+        isEncrypted: false,
+        derivedDbVersion,
+      },
+      sink,
+    );
+
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.error));
+    }
+
+    expect(result.value.counts.messages).toBeGreaterThan(0);
+    expect(result.value.counts.warnings).toBe(result.value.warnings.length);
+    expect(result.value.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "message-body-undecodable" }),
+        expect.objectContaining({ code: "attachment-source-missing" }),
+        expect.objectContaining({ code: "reaction-target-missing" }),
+        expect.objectContaining({ code: "contact-avatar-unreadable" }),
+      ]),
+    );
   });
 
   it("rejects a stale recent request before preparing the db sink", async () => {

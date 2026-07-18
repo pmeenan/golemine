@@ -49,6 +49,31 @@ select {
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
 }
 
+.skip-link {
+  position: fixed;
+  left: var(--space-16);
+  top: var(--space-8);
+  z-index: 50;
+  display: inline-flex;
+  height: var(--control-height-lg);
+  align-items: center;
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding-inline: var(--space-12);
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-2);
+  transform: translateY(calc(-100% - var(--space-16)));
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+#main-content:focus {
+  outline: none;
+}
+
 .golemine-illustration {
   display: block;
 }

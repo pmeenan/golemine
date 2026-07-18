@@ -17,6 +17,7 @@
   --focus-ring: var(--accent);
   --focus-ring-width: 0.125rem;
   --focus-ring-offset: 0.125rem;
+  --border-width: 0.0625rem;
   --success: oklch(0.60 0.13 155);
   --success-subtle: oklch(0.94 0.05 155);
   --success-foreground: oklch(0.22 0.04 155);

@@ -73,7 +73,7 @@ test("retries a wrong encrypted-backup password, ingests with the correct passwo
 
   await passwordInput.fill(iosMiniEncryptedBackupPassword);
   await ingestButton.click();
-  await expect(page.getByRole("status")).toContainText(
+  await expect(ingestPanel.getByRole("status")).toContainText(
     `Extracted ${String(
       iosMiniEncryptedBackupExpectedMetadata.counts.normalizedMessages,
     )} messages from ${String(

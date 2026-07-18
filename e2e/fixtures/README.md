@@ -22,6 +22,12 @@ Current generated fixtures:
   synthetic messages, contacts, one attachment, real sms/contact WAL sidecars, a
   WAL-only message/contact, one tapback reaction, a prefixed valid contact thumbnail,
   and one malformed avatar blob for skip-and-report coverage.
+- `generated/ios-malformed-backup/00008030-001C195E0A88807E/` — hostile-row M7
+  variant built from the same fully synthetic SQLite sources. It adds a truncated
+  `attributedBody`, a missing Manifest attachment record, and a reaction whose target
+  message is absent, while retaining the corrupt-avatar case and enough valid rows to
+  finish ingest. Unit and browser tests require the four skips to surface as four
+  warnings rather than crashing or hiding valid messages.
 - `generated/ios-mini-encrypted-backup/00008030-001C195E0A88805E/` — encrypted M5
   counterpart built from the same synthetic databases and attachment. Its root
   `Manifest.db` and every MBFile payload are AES-256-CBC ciphertext with zero IVs

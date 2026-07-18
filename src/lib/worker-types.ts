@@ -33,6 +33,7 @@ export type WorkerErrorCode =
   | "backup_password_incorrect"
   | "backup_password_required"
   | "db_ingest_failed"
+  | "derived_data_storage_failed"
   /**
    * The per-backup derived SQLite database (opfs-sahpool VFS) could not be
    * acquired or opened — e.g. another tab is browsing the same backup and
@@ -105,6 +106,20 @@ export interface SqliteSmokeStatus {
   selectedDerivedDbVersion: number;
   insertedRows: number;
   at: string;
+}
+
+export interface DerivedDataStorageSummary {
+  backupId: string;
+  byteLength: number;
+  directoryCount: number;
+  fileCount: number;
+}
+
+export interface ClearDerivedDataStorageResponse {
+  backupId: string;
+  clearedByteLength: number;
+  clearedDirectoryCount: number;
+  clearedFileCount: number;
 }
 
 export type BackupProviderId = "ios-itunes";
@@ -840,6 +855,14 @@ export interface DbWorkerApi {
     backupId: string,
     progress?: WorkerProgressCallback,
   ): Promise<WorkerResult<DbIngestSummary | undefined>>;
+  getDerivedDataStorageSummary(
+    backupId: string,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<DerivedDataStorageSummary>>;
+  clearDerivedDataStorage(
+    backupId: string,
+    progress?: WorkerProgressCallback,
+  ): Promise<WorkerResult<ClearDerivedDataStorageResponse>>;
   listConversations(
     request: ListConversationsRequest,
     progress?: WorkerProgressCallback,

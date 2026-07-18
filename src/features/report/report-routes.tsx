@@ -795,7 +795,11 @@ function PrintReportWorkspace({ record, reportId }: { record: RecentBackupRecord
   const attachmentProvenance = provenance.kind === "ready" ? provenance.attachments : [];
 
   return (
-    <main className="report-print-root mx-auto w-full max-w-[var(--layout-content-wide)] px-6 py-8 print:max-w-none print:p-0">
+    <main
+      className="report-print-root mx-auto w-full max-w-[var(--layout-content-wide)] px-6 py-8 print:max-w-none print:p-0"
+      id="main-content"
+      tabIndex={-1}
+    >
       <div className="report-print-toolbar mb-6 flex items-start justify-between gap-6 rounded-lg border border-border bg-surface p-4 shadow-1 print:hidden">
         <div>
           <p className="text-micro text-accent-text">Print report</p>

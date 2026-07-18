@@ -35,6 +35,9 @@ import {
   iosMiniBackupManifestPlist,
   iosMiniBackupStatusPlist,
   iosMiniBackupUdid,
+  iosMalformedBackupDevice,
+  iosMalformedBackupInfoPlist,
+  iosMalformedBackupUdid,
 } from "./ios-mini-backup.mjs";
 
 const fixturesDir = path.dirname(fileURLToPath(import.meta.url));
@@ -48,6 +51,7 @@ if (!metadata.policy?.syntheticOnly || !metadata.policy?.noRealPersonalData) {
 
 const iosMiniBackupId = "ios-mini-backup";
 const iosMiniEncryptedBackupId = "ios-mini-encrypted-backup";
+const iosMalformedBackupId = "ios-malformed-backup";
 const textEncoder = new TextEncoder();
 const manifestFileFlag = 1;
 const fileModeRegular0644 = 0o100644;
@@ -59,6 +63,9 @@ const sqlite3 = await sqlite3InitModule({
 });
 
 const iosMiniBackupPlaintext = buildIosMiniBackupPlaintext();
+const iosMalformedBackupPlaintext = buildIosMiniBackupPlaintext({
+  includeMalformedRows: true,
+});
 const generatedFixtures = [
   {
     id: iosMiniBackupId,
@@ -93,6 +100,26 @@ const generatedFixtures = [
       phoneNumber: iosMiniEncryptedBackupDevice.phoneNumber,
     },
     files: buildIosMiniEncryptedBackupFiles(iosMiniBackupPlaintext),
+  },
+  {
+    id: iosMalformedBackupId,
+    root: path.join(
+      generatedDir,
+      iosMalformedBackupId,
+      iosMalformedBackupUdid,
+    ),
+    device: {
+      displayName: iosMalformedBackupDevice.displayName,
+      deviceName: iosMalformedBackupDevice.deviceName,
+      productType: iosMalformedBackupDevice.productType,
+      productVersion: iosMalformedBackupDevice.productVersion,
+      serialNumber: iosMalformedBackupDevice.serialNumber,
+      udid: iosMalformedBackupDevice.udid,
+      phoneNumber: iosMalformedBackupDevice.phoneNumber,
+    },
+    files: buildIosMiniBackupFiles(iosMalformedBackupPlaintext, {
+      infoPlist: iosMalformedBackupInfoPlist(),
+    }),
   },
 ];
 
@@ -143,14 +170,18 @@ for (const fixture of generatedFixtures) {
   console.log(`Generated ${fixture.id} at ${path.relative(fixturesDir, fixture.root)}.`);
 }
 
-function buildIosMiniBackupPlaintext() {
+function buildIosMiniBackupPlaintext(options = {}) {
   const attachmentBytes = smallPngBytes();
   const contactThumbnailBytes = concatBytes([
     textEncoder.encode("GMIIMG!"),
     smallPngBytes(),
   ]);
   const smsDb = createSqliteDatabaseWithWal({
-    buildBase: (db) => buildSmsDatabase(db, attachmentBytes, { includeWalOnlyRows: false }),
+    buildBase: (db) =>
+      buildSmsDatabase(db, attachmentBytes, {
+        includeMalformedRows: options.includeMalformedRows === true,
+        includeWalOnlyRows: false,
+      }),
     buildWal: (db) => insertSmsWalOnlyRows(db),
   });
   const addressBookDb = createSqliteDatabaseWithWal({
@@ -200,7 +231,7 @@ function buildIosMiniBackupPlaintext() {
   return { sourceFiles };
 }
 
-function buildIosMiniBackupFiles({ sourceFiles }) {
+function buildIosMiniBackupFiles({ sourceFiles }, options = {}) {
   const manifestDb = createSqliteDatabase((db) =>
     buildManifestDatabase(db, sourceFiles, undefined),
   );
@@ -208,7 +239,7 @@ function buildIosMiniBackupFiles({ sourceFiles }) {
   return [
     {
       relativePath: "Info.plist",
-      content: iosMiniBackupInfoPlist(),
+      content: options.infoPlist ?? iosMiniBackupInfoPlist(),
     },
     {
       relativePath: "Manifest.plist",
@@ -639,6 +670,76 @@ function buildSmsDatabase(db, attachmentBytes, options) {
   if (options.includeWalOnlyRows) {
     insertSmsWalOnlyRows(db);
   }
+
+  if (options.includeMalformedRows) {
+    insertMalformedSmsRows(db);
+  }
+}
+
+function insertMalformedSmsRows(db) {
+  const groupChat = iosMiniBackupExpectedConversations[1];
+  const malformedBodyGuid = "GOLEMINE-MALFORMED-BODY-0007";
+  const missingAttachmentPath =
+    "~/Library/SMS/Attachments/ff/ff/MISSING/missing.bin";
+
+  db.exec({
+    sql: `
+      INSERT INTO message
+        (ROWID, guid, text, attributedBody, handle_id, service, date,
+         is_from_me, is_read, is_sent, is_delivered, cache_has_attachments,
+         item_type, associated_message_type)
+      VALUES (?, ?, NULL, ?, 2, 'iMessage', ?, 0, 1, 0, 0, 1, 0, 0);
+    `,
+    bind: [
+      7,
+      malformedBodyGuid,
+      new Uint8Array([0x01, 0xff, 0x00, 0x7f, 0x10]),
+      fixtureAppleNs("2026-07-01T14:05:00.000Z"),
+    ],
+  });
+  db.exec({
+    sql: "INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (?, ?, ?);",
+    bind: [
+      groupChat.rowId,
+      7,
+      fixtureAppleNs("2026-07-01T14:05:00.000Z"),
+    ],
+  });
+  db.exec({
+    sql: `
+      INSERT INTO attachment
+        (ROWID, guid, filename, mime_type, transfer_name, total_bytes, is_sticker, uti)
+      VALUES (2, 'GOLEMINE-MALFORMED-ATTACHMENT-0002', ?,
+              'application/octet-stream', 'missing.bin', 5, 0, 'public.data');
+    `,
+    bind: [missingAttachmentPath],
+  });
+  db.exec(
+    "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (7, 2);",
+  );
+
+  // A reaction targeting a missing message must be diverted from the
+  // timeline and reported, never allowed to crash normalization.
+  db.exec({
+    sql: `
+      INSERT INTO message
+        (ROWID, guid, text, attributedBody, handle_id, service, date,
+         is_from_me, is_read, is_sent, is_delivered, cache_has_attachments,
+         item_type, associated_message_guid, associated_message_type)
+      VALUES (9, 'GOLEMINE-MALFORMED-REACTION-0009', NULL, NULL, 1,
+              'iMessage', ?, 0, 1, 0, 0, 0, 0,
+              'p:0/GOLEMINE-MISSING-TARGET', 2000);
+    `,
+    bind: [fixtureAppleNs("2026-07-01T14:07:00.000Z")],
+  });
+  db.exec({
+    sql: "INSERT INTO chat_message_join (chat_id, message_id, message_date) VALUES (?, ?, ?);",
+    bind: [
+      groupChat.rowId,
+      9,
+      fixtureAppleNs("2026-07-01T14:07:00.000Z"),
+    ],
+  });
 }
 
 function insertSmsWalOnlyRows(db) {
@@ -964,6 +1065,12 @@ function expectedMessage(sourceRowId) {
 
 function appleNs(rawAppleNanoseconds) {
   return rawAppleNanoseconds === null ? null : BigInt(rawAppleNanoseconds);
+}
+
+function fixtureAppleNs(iso) {
+  const milliseconds = Date.parse(iso) - Date.UTC(2001, 0, 1);
+
+  return BigInt(milliseconds) * 1_000_000n;
 }
 
 function backupFileId(domain, relativePath) {

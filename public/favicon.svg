@@ -1,7 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Golemine">
-  <rect width="64" height="64" rx="14" fill="oklch(0.20 0.012 255)" />
-  <path d="M20 40h24l5-14H15l5 14Z" fill="oklch(0.72 0.13 78)" />
-  <path d="M23 24h18l-3-7H26l-3 7Z" fill="oklch(0.82 0.12 82)" />
-  <path d="M24 40h16v7H24z" fill="oklch(0.58 0.15 62)" />
-  <path d="M19 29h26M22 35h20" stroke="oklch(0.22 0.02 78)" stroke-width="3" stroke-linecap="round" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#22272d" />
+  <path d="M35 9c9 0 14 8 14 19 0 7-3 10-9 11l-3 1-2 9-6 6-1-7H18V22c1-8 8-13 17-13Z" fill="#c0923d" stroke="#20252a" stroke-width="2.2" stroke-linejoin="round" />
+  <path d="M44 14c3 4 5 9 5 14 0 7-3 10-9 11l-3 1-2 9-6 6-1-7 7-2 3-8 4-1c4-1 6-4 6-10 0-5-1-9-4-13Z" fill="#9f6c18" />
+  <path d="M35 9c3 3 4 7 4 13M21 22c1-6 3-10 7-12M19 40h9c2 0 3-1 4-4l2-4" fill="none" stroke="#20252a" stroke-width="2.2" stroke-linecap="round" />
+  <path d="m18 33 1 15h9l1-16Z" fill="#d2a843" stroke="#20252a" stroke-width="2.2" stroke-linejoin="round" />
+  <path d="m35 39-2 12-4 4h15l-2-17Z" fill="#b77d1e" stroke="#20252a" stroke-width="2.2" stroke-linejoin="round" />
+  <path d="m37 39-2 14M41 39l1 10" stroke="#e0ad53" stroke-width="2" stroke-linecap="round" />
+  <circle cx="19" cy="28" r="7" fill="#c0923d" stroke="#20252a" stroke-width="2.2" />
+  <circle cx="19" cy="28" r="4.5" fill="#f28a2f" stroke="#20252a" stroke-width="1.8" />
+  <circle cx="19" cy="28" r="2.4" fill="#ffbd4b" />
+  <circle cx="39" cy="28" r="7.3" fill="#20252a" />
+  <path d="M38 21h2l.4 2 1.5.6 1.7-1 1.5 1.5-1 1.7.6 1.5 2 .4v2l-2 .4-.6 1.5 1 1.7-1.5 1.5-1.7-1-1.5.6-.4 2h-2l-.4-2-1.5-.6-1.7 1-1.5-1.5 1-1.7-.6-1.5-2-.4v-2l2-.4.6-1.5-1-1.7 1.5-1.5 1.7 1 1.5-.6.4-2Z" fill="#d2a13b" />
+  <circle cx="39" cy="28" r="2.5" fill="#20252a" />
 </svg>

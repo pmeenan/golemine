@@ -65,6 +65,15 @@ const finderSteps: readonly string[] = [
   "Copy the specific backup folder out of the macOS Library location before opening it in Chrome.",
 ];
 
+const windowsSteps: readonly string[] = [
+  "Connect the iPhone to the PC with a cable and trust the computer if prompted.",
+  "Open Apple Devices. If it is not installed, open iTunes instead.",
+  "Select the iPhone, then open General in Apple Devices or Summary in iTunes.",
+  'Select "Encrypt local backup" if you want the fuller backup and can securely retain its password.',
+  'Click "Back Up Now" and wait until the latest-backup date and time appears.',
+  "Use Manage Backups or Show in Explorer to locate the completed device backup folder.",
+];
+
 const appleReferenceLinks = [
   {
     href: "https://support.apple.com/en-us/108796",
@@ -128,6 +137,24 @@ export function IphoneGuideRoute() {
       </Panel>
 
       <Panel>
+        <PanelHeader
+          badge={<Badge variant="neutral">Windows</Badge>}
+          description="Use Apple Devices on current Windows systems, or iTunes when Apple Devices is unavailable."
+          title="Windows steps"
+        />
+        <ol className="mt-4 grid gap-2">
+          {windowsSteps.map((step, index) => (
+            <li className="flex gap-3 text-body text-text-secondary" key={step}>
+              <span className="font-mono text-caption text-text-tertiary">
+                {index + 1}
+              </span>
+              <span>{step}</span>
+            </li>
+          ))}
+        </ol>
+      </Panel>
+
+      <Panel>
         <IllustratedSection
           illustration={
             <DecorativeIllustration
@@ -175,8 +202,11 @@ export function IphoneGuideRoute() {
             <div className="min-w-0">
               <h2 className="text-heading text-text">Encrypted backup note</h2>
               <p className="mt-1 text-body text-text-secondary">
-                The password is only needed when encrypted-backup ingest lands. It will never
-                be saved, uploaded, or written to derived storage.
+                Golemine supports encrypted backups now. The password is used only in
+                worker memory for the active ingest or source-read session and is never
+                saved or uploaded. The local derived database and generated previews can
+                contain decrypted content until you clear the backup's derived data or
+                remove it from recents.
               </p>
             </div>
           </div>

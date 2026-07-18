@@ -235,6 +235,11 @@ hover affordances there are CSS-driven.
   focus containment remains valid, then move focus to the shared field.
 - **Cards/panes:** `--surface`, hairline border, `--radius-lg`, internal padding 16
   or 20. Pane headers: 48px tall, `--type-heading`, actions right.
+- **Derived storage:** show the measured byte total first, with file/directory counts
+  as secondary context. Clearing is a named destructive action behind the standard
+  confirmation dialog; copy must state that generated indexes, report drafts, and
+  previews are removed while the source backup is untouched and rebuildable. Keep
+  measurement, clearing, success, and retryable error states inline in the panel.
 - **Selection:** selected list rows/messages get `--accent-subtle` background + 2px
   accent left bar (not just a tint — must survive screenshots/printing in grayscale).
 - **Report selection:** timeline and search-result rows expose the same compact
@@ -277,6 +282,11 @@ hover affordances there are CSS-driven.
   native date inputs for this pattern.
 - **Empty states:** icon (24px, tertiary) + one-line explanation + one action. No
   illustrations except landing/guides.
+- **Page navigation:** every standard route has one `#main-content` landmark with a
+  level-one heading and route-specific document title. The first keyboard stop is a
+  token-styled **Skip to content** link that becomes visible on focus. Client-side
+  route changes focus the main landmark without adding a visible focus ring; ordinary
+  controls keep the standard focus-visible treatment.
 - **Icons:** `lucide-react` (ISC) only, sizes 16/20/24, stroke-width 1.75, color
   inherits text token. No emoji as UI icons; emoji in message content renders at
   1.3em.
@@ -474,6 +484,7 @@ carry information that isn't also in text.
 |---|---|
 | `src/assets/illustrations/` | In-app spot illustrations (WebP, transparent), imported by components |
 | `src/assets/brand/icon-master.png` | 1024×1024 icon master — source for favicon retrace and PWA manifest icons |
+| `public/favicon.svg`, `public/pwa-icon-*.png` | Final tab/install icons: simplified vector favicon, 192/512 `any` icons, and full-bleed 512 maskable icon |
 | `public/og-image.png` | 1200×630 social card, referenced absolutely from `index.html` (`https://golemine.com/og-image.png`) |
 | `docs/assets/` | Repo-facing images: README banner, golem character sheet |
 
@@ -494,6 +505,12 @@ carry information that isn't also in text.
   shell. Interaction artwork that must be ready immediately (the drag overlay) stays
   mounted in its final geometry and toggles opacity/accessibility state instead of
   mounting on first interaction.
+- Keep the favicon and manifest icons visually synchronized with `icon-master.png`.
+  The favicon is a simplified vector retrace for small-size legibility; `any` PNGs
+  preserve the master's transparent rounded corners, while the maskable PNG fills the
+  canvas with the master's charcoal background and keeps the portrait inside the
+  maskable safe zone. Declare `any` and `maskable` as separate manifest entries and
+  precache every output (D-046).
 - Illustrations are generated against the target background color and keyed to
   transparency (D-018); verify edges on both themes before shipping.
 - New generated assets follow the same pipeline: character sheet as context, target

@@ -1060,3 +1060,58 @@ state, current-runtime validation of stored rows, version checks applied only on
 write). Fixing each at the owning seam — recents read path, schema-declared
 user-authored tables (`userAuthoredTables` + `pruneOrphanedReportItems`), shared
 sqlite helpers — keeps the invariants in one place for future user-authored state.
+
+## D-046 — Brand icon outputs separate small-vector, install, and maskable roles (2026-07-17)
+
+The 1024px automaton icon master has the correct final identity, but its shading and
+fine mechanical detail do not survive at browser-tab scale, and its transparent
+rounded corners are not a valid full-bleed maskable treatment.
+
+Decision:
+
+- `public/favicon.svg` is a hand-simplified vector retrace of the master. It preserves
+  the charcoal tile, gold head profile, orange lens, and side gear while reducing the
+  geometry to shapes that remain distinguishable at favicon sizes.
+- `public/pwa-icon-192.png` and `public/pwa-icon-512.png` are high-quality downscales
+  of `src/assets/brand/icon-master.png` and use manifest purpose `any`, retaining the
+  transparent rounded corners.
+- `public/pwa-icon-maskable-512.png` composites the same master over its charcoal
+  background so the canvas is full bleed and declares only purpose `maskable`; the
+  automaton portrait stays within the platform-safe central region.
+- Vite precaches all four static outputs. Playwright fetches the generated manifest,
+  asserts the exact role/source/size mapping, decodes each PNG to verify its intrinsic
+  dimensions, and guards the document's explicit SVG favicon link.
+
+Rationale: each rendering context gets the source treatment it needs without shipping
+an embedded raster as the favicon or falsely labelling a transparent rounded icon as
+maskable. The manifest and automated assertions are the synchronization seam for
+future icon revisions.
+
+## D-047 — M7 hardening keeps storage ownership and offline proof at their real boundaries (2026-07-17)
+
+The final polish milestone needed to make four claims observable: the installed app
+does not need the network, hostile optional backup rows do not abort ingest, users can
+inspect and remove generated local data without touching the source, and client-side
+navigation remains keyboard/assistive-technology legible.
+
+Decision:
+
+- The post-install browser audit clears only Chrome's ordinary HTTP cache (preserving
+  CacheStorage), opens a fresh page after the context is offline, traverses the shell
+  and both guides, and fails on external, failed, or non-service-worker responses.
+- The malformed fixture is a separate deterministic backup rather than mutations in a
+  browser test. It combines four independently classifiable optional-record failures,
+  retains valid messages, and requires the final warning count to match every skip.
+- Per-backup derived-data measurement and clear live in `db-worker`, which already owns
+  derived OPFS. The overview marks recents non-browsable and releases the summary pool
+  before deletion; success becomes `not-ingested`, while failure stays
+  `needs-reingest`. The source handle is never passed to this API.
+- The app shell owns one visible-on-focus skip link, route-change focus, and document
+  titles; `PageShell` owns the standard focusable main landmark, and the standalone
+  report print route implements the same landmark contract directly.
+
+Rationale: each invariant is enforced where bypasses are hardest. A normal browser
+reload can hide missing precache entries behind the HTTP cache; UI-thread OPFS walking
+would violate worker ownership; optimistic clear status could reopen a deleted or
+partially deleted database; and page-level one-offs would make focus behavior drift
+between routes.

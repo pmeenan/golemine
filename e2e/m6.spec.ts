@@ -34,8 +34,11 @@ test("builds and prepares a source-verified printable report", async ({ page }) 
   await expect(
     page.getByRole("heading", { level: 1, name: "Mina's iPhone backup" }),
   ).toBeVisible({ timeout: 15_000 });
+  const ingestPanel = page.locator("section").filter({
+    has: page.getByRole("heading", { level: 2, name: "Ingest" }),
+  });
   await page.getByRole("button", { name: "Ingest messages" }).click();
-  await expect(page.getByRole("status")).toContainText("Extracted 5 messages", {
+  await expect(ingestPanel.getByRole("status")).toContainText("Extracted 5 messages", {
     timeout: 30_000,
   });
   await page.getByRole("link", { name: /Messages/u }).click();

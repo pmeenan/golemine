@@ -3,6 +3,7 @@
 // sync when adding or renaming exports.
 export declare const iosMiniBackupUdid: string;
 export declare const iosMiniEncryptedBackupUdid: string;
+export declare const iosMalformedBackupUdid: string;
 
 export declare const iosMiniBackupDevice: {
   udid: string;
@@ -16,6 +17,7 @@ export declare const iosMiniBackupDevice: {
 };
 
 export declare const iosMiniEncryptedBackupDevice: typeof iosMiniBackupDevice;
+export declare const iosMalformedBackupDevice: typeof iosMiniBackupDevice;
 
 export declare const iosMiniBackupExpectedMetadata: {
   id: string;
@@ -207,3 +209,4 @@ export declare function iosMiniBackupStatusPlist(): string;
 export declare function iosMiniBackupInfoPlist(): string;
 
 export declare function iosMiniEncryptedBackupInfoPlist(): string;
+export declare function iosMalformedBackupInfoPlist(): string;

@@ -83,7 +83,12 @@ metal and the ore it surfaces; no clay/terracotta styling).
   Playwright Chromium e2e, and license audit.
 - M0 guardrails live in `e2e/m0.spec.ts`; fixture conventions live in
   `e2e/fixtures/fixtures.json` plus `e2e/fixtures/generate-fixtures.mjs`. Keep all
-  fixture data synthetic and regenerable.
+  fixture data synthetic and regenerable. The M7 offline audit deliberately clears
+  Chrome's HTTP cache after Workbox installation, opens a fresh offline page, and
+  requires every app response to come from the service worker; do not weaken it to an
+  ordinary cached reload. Public-route accessibility guardrails in the same spec cover
+  the skip link, route focus/titles, landmarks, headings, image alternatives, ids,
+  and control names.
 - Brand/illustration assets: the golem's visual identity is a steampunk automaton
   (D-018, rules in Design.md §12). The canonical character sheet is
   `docs/assets/golem-reference-sheet.png` — pass it as image context when generating
@@ -95,10 +100,13 @@ metal and the ore it surfaces; no clay/terracotta styling).
   Use `PageShell`'s dedicated `illustration` prop for page headers and
   `IllustratedSection` for fixed guide/gate columns so print collapse stays automatic.
   The Workbox glob in `vite.config.ts` must keep `webp` precached, and interaction art
-  such as the drag overlay must remain mounted before first interaction; the icon master in
-  `src/assets/brand/`, the social
-  card in `public/og-image.png` (referenced absolutely as
-  `https://golemine.com/og-image.png` from `index.html`).
+  such as the drag overlay must remain mounted before first interaction. The icon
+  master is `src/assets/brand/icon-master.png`; its final static outputs are
+  `public/favicon.svg`, `public/pwa-icon-192.png`, `public/pwa-icon-512.png`, and
+  `public/pwa-icon-maskable-512.png` (D-046). Keep the favicon visually synchronized,
+  keep separate `any` and `maskable` manifest entries, and precache all outputs. The
+  social card is `public/og-image.png`, referenced absolutely as
+  `https://golemine.com/og-image.png` from `index.html`.
 - Static-host security headers live in `public/_headers`, and the pre-paint theme
   bootstrap lives in `public/theme-init.js`. Do not reintroduce a CSP meta tag in
   `index.html`; it breaks dev mode and cannot enforce `frame-ancestors`. The e2e suite
@@ -190,6 +198,11 @@ metal and the ore it surfaces; no clay/terracotta styling).
   write. **Replace backup** calls `recordDetection(..., { replaceExisting: true })`,
   which wipes all old derived directories before publishing the new handle and resets
   status to `not-ingested`. Never preserve `ingested` across a confirmed replacement.
+  User-initiated derived-storage measurement and clearing belong to db-worker
+  `src/workers/db/storage.ts`, not the UI thread. Clear must close the overview summary
+  reader, publish a non-browsable recents status before removing the exact safe-id OPFS
+  directory, leave failures as `needs-reingest`, and publish `not-ingested` only after
+  success; source handles/files are never touched.
 - M2 db-worker derived schema and ingest sink live in `src/workers/db/schema.ts` and
   `src/workers/db/ingest-sink.ts`. `prepareIngest` recreates the schema for
   `golemine.sqlite` in the per-backup OPFS `opfs-sahpool` directory under
@@ -658,5 +671,9 @@ metal and the ore it surfaces; no clay/terracotta styling).
   exported production-sized PBKDF2/AES-KW vectors, and generator decrypt/byte-compare
   self-checks. Default fixture DPIC is CI-accelerated; run the 10,000,000-round vector
   with `GOLEMINE_RUN_SLOW_KDF=1`.
+  M7 adds `generated/ios-malformed-backup/` from the same synthetic plaintext builder.
+  It combines a truncated attributed body, a missing attachment source, a reaction
+  with no target, and the corrupt avatar. Keep enough valid rows for ingest to finish,
+  and keep unit/e2e assertions aligned so every skipped optional record is reported.
 - Crypto: WebCrypto only (PBKDF2, AES-KW, AES-CBC, SHA-256); passwords/keys are
   session memory only, never persisted.
